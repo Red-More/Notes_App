@@ -1,11 +1,20 @@
-import react, { reactCompilerPreset } from '@vitejs/plugin-react'
-import babel from '@rolldown/plugin-babel'
-import { defineConfig } from 'vite'
+import react, { reactCompilerPreset } from "@vitejs/plugin-react";
+import babel from "@rolldown/plugin-babel";
+import { defineConfig } from "vite";
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [
-    react(),
-    babel({ presets: [reactCompilerPreset()] })
-  ],
-})
+    plugins: [react(), babel({ presets: [reactCompilerPreset()] })],
+    server: {
+        host: "0.0.0.0",
+        port: 3000,
+        watch: {
+            // 忽略 Rust 编译产物，防止 Windows 文件锁导致 Vite 崩溃
+            ignored: [
+                "**/src-tauri/target/**",
+                "**/src-tauri/gen/**",
+                "**/src-tauri/target_check/**",
+            ],
+        },
+    },
+});

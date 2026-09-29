@@ -1,0 +1,110 @@
+export interface DiffRow {
+  type: 'same' | 'add' | 'del'
+  text: string
+  oldNo: number | null
+  newNo: number | null
+}
+
+/** Parse a SQLite local datetime string ("YYYY-MM-DD HH:MM:SS"). */
+export function parseDbTime(s: string): Date {
+  return new Date(s.replace(' ', 'T'))
+}
+
+/** Format as "YYYY-MM-DD HH:mm". */
+export function formatDateTime(s: string): string {
+  const d = parseDbTime(s)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+/** Friendly relative time: 刚刚 / n分钟前 / n小时前 / 昨天 / M月d日 / yyyy年M月d日. */
+export function formatRelative(s: string): string {
+  const d = parseDbTime(s)
+  const now = new Date()
+  const diffMs = now.getTime() - d.getTime()
+  if (diffMs < 60_000) return '刚刚'
+  if (diffMs < 3_600_000) return `${Math.floor(diffMs / 60_000)}分钟前`
+  if (diffMs < 86_400_000) return `${Math.floor(diffMs / 3_600_000)}小时前`
+  const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
+  const dayDiff = Math.floor((startOfDay(now) - startOfDay(d)) / 86_400_000)
+  if (dayDiff === 1) return '昨天'
+  if (dayDiff < 7) return `${dayDiff}天前`
+  if (d.getFullYear() === now.getFullYear()) return `${d.getMonth() + 1}月${d.getDate()}日`
+  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`
+}
+
+/** Local date string "YYYY-MM-DD". */
+export function dateStr(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
+
+/** Local month string "YYYY-MM". */
+export function monthStr(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}`
+}
+
+/** Format a sequential version number as v{major}.{minor}.{patch}. */
+export function fmtVersion(n: number): string {
+  return `v${Math.floor(n / 100)}.${Math.floor((n % 100) / 10)}.${n % 10}`
+}
+
+/** "HH:mm" from a "YYYY-MM-DD HH:MM[:SS]" string, or the raw value. */
+export function shortTime(s: string | null | undefined): string {
+  if (!s) return ''
+  return s.length >= 16 ? s.slice(11, 16) : s
+}
+
+/**
+ * Line-based diff between `oldText` and `newText` using LCS.
+ * Rows are ordered for display: deletions before additions.
+ */
+export function diffLines(oldText: string, newText: string): DiffRow[] {
+  const a = oldText.length ? oldText.split('\n') : []
+  const b = newText.length ? newText.split('\n') : []
+  const n = a.length
+  const m = b.length
+
+  // dp[i][j] = LCS length of a[i..] and b[j..]
+  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0))
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1])
+    }
+  }
+
+  const rows: DiffRow[] = []
+  let i = 0
+  let j = 0
+  let oldNo = 0
+  let newNo = 0
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      oldNo++
+      newNo++
+      rows.push({ type: 'same', text: a[i], oldNo, newNo })
+      i++
+      j++
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      oldNo++
+      rows.push({ type: 'del', text: a[i], oldNo, newNo: null })
+      i++
+    } else {
+      newNo++
+      rows.push({ type: 'add', text: b[j], oldNo: null, newNo })
+      j++
+    }
+  }
+  while (i < n) {
+    oldNo++
+    rows.push({ type: 'del', text: a[i], oldNo, newNo: null })
+    i++
+  }
+  while (j < m) {
+    newNo++
+    rows.push({ type: 'add', text: b[j], oldNo: null, newNo })
+    j++
+  }
+  return rows
+}
