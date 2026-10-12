@@ -31,10 +31,12 @@ interface ModalProps {
   onClose: () => void
   children: ReactNode
   footer?: ReactNode
+  /** Optional element rendered in the header's right side, replacing the close button. */
+  headerAction?: ReactNode
 }
 
 /** Bottom-sheet style modal dialog. */
-export function Modal({ title, onClose, children, footer }: ModalProps) {
+export function Modal({ title, onClose, children, footer, headerAction }: ModalProps) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
@@ -48,9 +50,11 @@ export function Modal({ title, onClose, children, footer }: ModalProps) {
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <span className="modal-title">{title}</span>
-          <button type="button" className="icon-btn" onClick={onClose} aria-label="关闭">
-            <IconClose size={20} />
-          </button>
+          {headerAction ?? (
+            <button type="button" className="icon-btn" onClick={onClose} aria-label="关闭">
+              <IconClose size={20} />
+            </button>
+          )}
         </div>
         <div className="modal-body">{children}</div>
         {footer && <div className="modal-footer">{footer}</div>}

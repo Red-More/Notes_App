@@ -54,6 +54,48 @@ fn get_note_by_id(conn: &Connection, id: i64) -> Result<Note, String> {
     .map_err(db_err)
 }
 
+/// Encode a reverse delta: given the successor's full content `from` and the
+/// target version's full content `to`, store only the differing middle segment
+/// (the common prefix/suffix are elided). `decode_delta(from, delta)` recovers `to`.
+/// Character-based so multi-byte UTF-8 (Chinese/emoji) is safe.
+fn encode_delta(from: &str, to: &str) -> String {
+    let f: Vec<char> = from.chars().collect();
+    let t: Vec<char> = to.chars().collect();
+    let mut p = 0;
+    while p < f.len() && p < t.len() && f[p] == t[p] {
+        p += 1;
+    }
+    let mut s = 0;
+    while s < f.len().saturating_sub(p)
+        && s < t.len().saturating_sub(p)
+        && f[f.len() - 1 - s] == t[t.len() - 1 - s]
+    {
+        s += 1;
+    }
+    let middle: String = t[p..t.len() - s].iter().collect();
+    format!("{},{},{}\n{}", p, s, middle.chars().count(), middle)
+}
+
+/// Recover the full content encoded by `encode_delta`. `from` must be the exact
+/// successor content used at encode time. Parsing is defensive: malformed deltas
+/// degrade to the middle segment instead of panicking.
+fn decode_delta(from: &str, delta: &str) -> String {
+    let (header, middle) = delta.split_once('\n').unwrap_or((delta, ""));
+    let mut parts = header.split(',');
+    let p: usize = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let s: usize = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let chars: Vec<char> = from.chars().collect();
+    let p = p.min(chars.len());
+    let s = s.min(chars.len().saturating_sub(p));
+    let mut out: String = chars[..p].iter().collect();
+    out.push_str(middle);
+    out.extend(chars[chars.len() - s..].iter());
+    out
+}
+
+/// Insert a new version snapshot. The newest version is always stored in full
+/// (the chain anchor); the previously-newest version is converted into a reverse
+/// delta referencing the new one, so storage only keeps the difference content.
 fn insert_version(
     conn: &Connection,
     note_id: i64,
@@ -70,17 +112,76 @@ fn insert_version(
             |r| r.get(0),
         )
         .map_err(db_err)?;
+    let prev: Option<(i64, String, Option<i64>)> = conn
+        .query_row(
+            "SELECT version_number, content, delta_base FROM note_versions
+             WHERE note_id = ?1 ORDER BY version_number DESC LIMIT 1",
+            params![note_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(db_err)?;
+    if let Some((prev_num, prev_content, prev_base)) = prev {
+        // Reconstruct the previous newest's full content (it is normally full, but
+        // reconstruct defensively in case an earlier cleanup left it as a delta).
+        let prev_full = match prev_base {
+            Some(_) => reconstruct_version_content(conn, note_id, prev_num)?,
+            None => prev_content,
+        };
+        let delta = encode_delta(content, &prev_full);
+        conn.execute(
+            "UPDATE note_versions SET content = ?1, delta_base = ?2
+             WHERE note_id = ?3 AND version_number = ?4",
+            params![delta, next, note_id, prev_num],
+        )
+        .map_err(db_err)?;
+    }
     conn.execute(
-        "INSERT INTO note_versions (note_id, version_number, title, content, label, label_description, is_manual)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO note_versions (note_id, version_number, title, content, label, label_description, is_manual, delta_base)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
         params![note_id, next, title, content, label, label_description, is_manual as i64],
     )
     .map_err(db_err)?;
     cleanup_versions(conn, note_id)
 }
 
-/// Keep at most MAX_VERSIONS versions. The latest version and any
-/// labeled / manually created versions are never removed.
+/// Reconstruct a version's full content by walking the reverse-delta chain from
+/// the newest (full) version back to `version_number`.
+fn reconstruct_version_content(
+    conn: &Connection,
+    note_id: i64,
+    version_number: i64,
+) -> Result<String, String> {
+    let mut chain: Vec<String> = Vec::new();
+    let mut cur = version_number;
+    let full = loop {
+        let (delta_base, content): (Option<i64>, String) = conn
+            .query_row(
+                "SELECT delta_base, content FROM note_versions WHERE note_id = ?1 AND version_number = ?2",
+                params![note_id, cur],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(db_err)?;
+        match delta_base {
+            Some(base) => {
+                chain.push(content);
+                cur = base;
+            }
+            None => break content,
+        }
+    };
+    let mut result = full;
+    for delta in chain.iter().rev() {
+        result = decode_delta(&result, delta);
+    }
+    Ok(result)
+}
+
+/// Keep at most MAX_VERSIONS versions. The latest version and any labeled /
+/// manually created versions are never removed. Since each older version holds a
+/// delta referencing its successor, deletion only ever removes the oldest
+/// versions; if the surviving oldest version's successor was deleted, it is
+/// rebuilt as a full anchor first so the delta chain never breaks.
 fn cleanup_versions(conn: &Connection, note_id: i64) -> Result<(), String> {
     let total: i64 = conn
         .query_row(
@@ -93,19 +194,67 @@ fn cleanup_versions(conn: &Connection, note_id: i64) -> Result<(), String> {
         return Ok(());
     }
     let excess = total - MAX_VERSIONS;
-    conn.execute(
-        "DELETE FROM note_versions WHERE id IN (
-            SELECT id FROM note_versions
-            WHERE note_id = ?1
-              AND label IS NULL
-              AND is_manual = 0
-              AND id != (SELECT id FROM note_versions WHERE note_id = ?1 ORDER BY version_number DESC LIMIT 1)
-            ORDER BY version_number ASC
-            LIMIT ?2
-        )",
-        params![note_id, excess],
-    )
-    .map_err(db_err)?;
+    // Oldest unlabeled/manual versions (excluding the newest) are the candidates.
+    let doomed: Vec<i64> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM note_versions
+                 WHERE note_id = ?1 AND label IS NULL AND is_manual = 0
+                   AND id != (SELECT id FROM note_versions WHERE note_id = ?1 ORDER BY version_number DESC LIMIT 1)
+                 ORDER BY version_number ASC LIMIT ?2",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![note_id, excess], |r| r.get::<_, i64>(0))
+            .map_err(db_err)?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row.map_err(db_err)?);
+        }
+        ids
+    };
+    if doomed.is_empty() {
+        return Ok(());
+    }
+    let doomed_set: std::collections::HashSet<i64> = doomed.iter().copied().collect();
+    // Every surviving version whose successor was deleted must be rebuilt as a
+    // full anchor first, otherwise its delta chain is severed (this happens when
+    // protected versions interleave with the deleted run).
+    let mut reanchor: Vec<i64> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("SELECT id, version_number, delta_base FROM note_versions WHERE note_id = ?1")
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![note_id], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                ))
+            })
+            .map_err(db_err)?;
+        for row in rows {
+            let (id, num, base) = row.map_err(db_err)?;
+            if !doomed_set.contains(&id)
+                && base.map_or(false, |b| doomed_set.contains(&b))
+            {
+                reanchor.push(num);
+            }
+        }
+    }
+    for num in reanchor {
+        let full = reconstruct_version_content(conn, note_id, num)?;
+        conn.execute(
+            "UPDATE note_versions SET content = ?1, delta_base = NULL WHERE note_id = ?2 AND version_number = ?3",
+            params![full, note_id, num],
+        )
+        .map_err(db_err)?;
+    }
+    for id in &doomed {
+        conn.execute("DELETE FROM note_versions WHERE id = ?1", params![id])
+            .map_err(db_err)?;
+    }
     Ok(())
 }
 
@@ -271,30 +420,50 @@ pub fn move_notes(state: State<Db>, ids: Vec<i64>, folder_id: Option<i64>) -> Re
     Ok(())
 }
 
-#[tauri::command]
-pub fn list_versions(state: State<Db>, note_id: i64) -> Result<Vec<NoteVersion>, String> {
-    let conn = state.0.lock().unwrap();
+/// List all versions of a note, newest first, with full reconstructed content.
+/// The newest version is always stored in full; each older version normally
+/// holds a delta against its successor, but a cleanup may re-anchor a surviving
+/// oldest version back to full content. So contents are rebuilt in a single
+/// pass: only rows with a non-NULL delta_base are decoded, against the already
+/// reconstructed full content of the row above.
+fn list_versions_impl(conn: &Connection, note_id: i64) -> Result<Vec<NoteVersion>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, note_id, version_number, title, content, label, label_description, is_manual, created_at
+            "SELECT id, note_id, version_number, title, content, label, label_description, is_manual, created_at, delta_base
              FROM note_versions WHERE note_id = ?1 ORDER BY version_number DESC",
         )
         .map_err(db_err)?;
     let rows = stmt
-        .query_map(params![note_id], version_from_row)
+        .query_map(params![note_id], |r| {
+            let version = version_from_row(r)?;
+            let delta_base: Option<i64> = r.get(9)?;
+            Ok((version, delta_base))
+        })
         .map_err(db_err)?;
     let mut versions = Vec::new();
     for row in rows {
         versions.push(row.map_err(db_err)?);
     }
-    Ok(versions)
+    for i in 1..versions.len() {
+        if versions[i].1.is_some() {
+            let delta = std::mem::replace(&mut versions[i].0.content, String::new());
+            let newer_full = versions[i - 1].0.content.clone();
+            versions[i].0.content = decode_delta(&newer_full, &delta);
+        }
+    }
+    Ok(versions.into_iter().map(|(v, _)| v).collect())
 }
 
-/// Restore a note to the given version. The note content is updated and a
-/// new manual version labeled "恢复自 vX.Y.Z" is created to record the action.
 #[tauri::command]
-pub fn restore_version(state: State<Db>, version_id: i64) -> Result<Note, String> {
+pub fn list_versions(state: State<Db>, note_id: i64) -> Result<Vec<NoteVersion>, String> {
     let conn = state.0.lock().unwrap();
+    list_versions_impl(&conn, note_id)
+}
+
+/// Restore a note to the given version. The note content is updated to the
+/// version's reconstructed full content and a new manual version labeled
+/// "恢复自 vX.Y.Z" is created to record the action.
+fn restore_version_impl(conn: &Connection, version_id: i64) -> Result<Note, String> {
     let v: NoteVersion = conn
         .query_row(
             "SELECT id, note_id, version_number, title, content, label, label_description, is_manual, created_at
@@ -303,32 +472,27 @@ pub fn restore_version(state: State<Db>, version_id: i64) -> Result<Note, String
             version_from_row,
         )
         .map_err(db_err)?;
+    let full_content = reconstruct_version_content(conn, v.note_id, v.version_number)?;
     conn.execute(
         "UPDATE notes SET title = ?1, content = ?2, updated_at = datetime('now','localtime') WHERE id = ?3",
-        params![v.title, v.content, v.note_id],
+        params![v.title, full_content, v.note_id],
     )
     .map_err(db_err)?;
     let label = format!("恢复自 {}", fmt_version(v.version_number));
-    insert_version(&conn, v.note_id, &v.title, &v.content, Some(&label), None, true)?;
-    get_note_by_id(&conn, v.note_id)
+    insert_version(conn, v.note_id, &v.title, &full_content, Some(&label), None, true)?;
+    get_note_by_id(conn, v.note_id)
 }
 
-/// Create a labeled snapshot of the note's current content.
 #[tauri::command]
-pub fn create_label(
-    state: State<Db>,
-    note_id: i64,
-    label: String,
-    description: Option<String>,
-) -> Result<NoteVersion, String> {
-    let label = label.trim().to_string();
-    if label.is_empty() {
-        return Err("标签名称不能为空".into());
-    }
-    if label.chars().count() > 50 {
-        return Err("标签名称最多50个字符".into());
-    }
+pub fn restore_version(state: State<Db>, version_id: i64) -> Result<Note, String> {
     let conn = state.0.lock().unwrap();
+    restore_version_impl(&conn, version_id)
+}
+
+/// Manually snapshot the note's current title/content as a new version.
+/// Rejects the request when the note content is identical to the newest
+/// version, so an empty snapshot can never be recorded.
+fn create_version_impl(conn: &Connection, note_id: i64) -> Result<NoteVersion, String> {
     let (title, content): (String, String) = conn
         .query_row(
             "SELECT title, content FROM notes WHERE id = ?1",
@@ -336,15 +500,22 @@ pub fn create_label(
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .map_err(db_err)?;
-    insert_version(
-        &conn,
-        note_id,
-        &title,
-        &content,
-        Some(&label),
-        description.as_deref(),
-        true,
-    )?;
+    let last: Option<i64> = conn
+        .query_row(
+            "SELECT version_number FROM note_versions
+             WHERE note_id = ?1 ORDER BY version_number DESC LIMIT 1",
+            params![note_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(db_err)?;
+    if let Some(num) = last {
+        let last_full = reconstruct_version_content(conn, note_id, num)?;
+        if last_full == content {
+            return Err("内容与上一版本一致，不能创建新版本".to_string());
+        }
+    }
+    insert_version(conn, note_id, &title, &content, None, None, true)?;
     conn.query_row(
         "SELECT id, note_id, version_number, title, content, label, label_description, is_manual, created_at
          FROM note_versions WHERE note_id = ?1 ORDER BY version_number DESC LIMIT 1",
@@ -354,38 +525,369 @@ pub fn create_label(
     .map_err(db_err)
 }
 
-/// Update the label of a version without creating a new version.
 #[tauri::command]
-pub fn update_label(
-    state: State<Db>,
-    version_id: i64,
-    label: String,
-    description: Option<String>,
-) -> Result<(), String> {
-    let label = label.trim().to_string();
-    if label.is_empty() {
-        return Err("标签名称不能为空".into());
-    }
-    if label.chars().count() > 50 {
-        return Err("标签名称最多50个字符".into());
-    }
+pub fn create_version(state: State<Db>, note_id: i64) -> Result<NoteVersion, String> {
     let conn = state.0.lock().unwrap();
-    conn.execute(
-        "UPDATE note_versions SET label = ?1, label_description = ?2 WHERE id = ?3",
-        params![label, description, version_id],
-    )
-    .map_err(db_err)?;
+    create_version_impl(&conn, note_id)
+}
+
+/// Delete a specific version. If an older version's reverse delta references the
+/// deleted one, it is re-anchored to full content first (while the deleted row
+/// still exists to reconstruct from), so the delta chain never breaks.
+fn delete_version_impl(conn: &Connection, version_id: i64) -> Result<(), String> {
+    let (note_id, num): (i64, i64) = conn
+        .query_row(
+            "SELECT note_id, version_number FROM note_versions WHERE id = ?1",
+            params![version_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(db_err)?;
+    let dependent: Option<i64> = conn
+        .query_row(
+            "SELECT version_number FROM note_versions WHERE note_id = ?1 AND delta_base = ?2",
+            params![note_id, num],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(db_err)?;
+    if let Some(dep) = dependent {
+        let full = reconstruct_version_content(conn, note_id, dep)?;
+        conn.execute(
+            "UPDATE note_versions SET content = ?1, delta_base = NULL WHERE note_id = ?2 AND version_number = ?3",
+            params![full, note_id, dep],
+        )
+        .map_err(db_err)?;
+    }
+    conn.execute("DELETE FROM note_versions WHERE id = ?1", params![version_id])
+        .map_err(db_err)?;
     Ok(())
 }
 
-/// Remove the label from a version. The version content is kept.
 #[tauri::command]
-pub fn delete_label(state: State<Db>, version_id: i64) -> Result<(), String> {
+pub fn delete_version(state: State<Db>, version_id: i64) -> Result<(), String> {
     let conn = state.0.lock().unwrap();
-    conn.execute(
-        "UPDATE note_versions SET label = NULL, label_description = NULL WHERE id = ?1",
-        params![version_id],
-    )
-    .map_err(db_err)?;
-    Ok(())
+    delete_version_impl(&conn, version_id)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        // Mirrors db::init: FK cascade is only active when this pragma is set.
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE folders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                is_pinned INTEGER NOT NULL DEFAULT 0,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+            );
+            CREATE TABLE notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL DEFAULT '',
+                content TEXT NOT NULL DEFAULT '',
+                folder_id INTEGER REFERENCES folders(id) ON DELETE SET NULL,
+                is_pinned INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+            );
+            CREATE TABLE note_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+                version_number INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                label TEXT,
+                label_description TEXT,
+                is_manual INTEGER NOT NULL DEFAULT 0,
+                delta_base INTEGER,
+                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                UNIQUE(note_id, version_number)
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn insert_note(conn: &Connection, id: i64, title: &str, content: &str) {
+        conn.execute(
+            "INSERT INTO notes (id, title, content) VALUES (?1, ?2, ?3)",
+            params![id, title, content],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn delta_round_trip_recovers_full_content() {
+        let cases: Vec<(&str, &str)> = vec![
+            ("", ""),
+            ("hello", "hello"),
+            ("hello", "hello world"),
+            ("hello world", "hello"),
+            ("abc", "xyz"),
+            ("abc", "ab"),
+            ("ab", "abc"),
+            ("你好世界", "你好，世界！"),
+            ("a😀b", "a😀b😀c"),
+            ("line1\nline2\nline3", "line1\nline2 changed\nline3\nline4"),
+        ];
+        for (from, to) in cases {
+            let delta = encode_delta(from, to);
+            assert_eq!(
+                decode_delta(from, &delta),
+                to,
+                "round trip failed for from={from:?} to={to:?}"
+            );
+        }
+        // Long generated content with a small middle change.
+        let long_from = "a".repeat(500);
+        let long_to = "a".repeat(200) + "B" + &"a".repeat(300);
+        let delta = encode_delta(&long_from, &long_to);
+        assert_eq!(decode_delta(&long_from, &delta), long_to);
+        assert!(delta.len() < long_to.len(), "delta should be smaller than full content");
+    }
+
+    #[test]
+    fn chain_reconstruction_returns_all_original_contents() {
+        let conn = test_conn();
+        insert_note(&conn, 1, "t1", "c1");
+        let contents = ["c1", "c1\nmore", "完全不同内容", "你好世界", "final content 😀"];
+        for (i, c) in contents.iter().enumerate() {
+            insert_version(&conn, 1, &format!("t{}", i + 1), c, None, None, true).unwrap();
+        }
+        let versions = list_versions_impl(&conn, 1).unwrap();
+        assert_eq!(versions.len(), contents.len());
+        for (i, v) in versions.iter().enumerate() {
+            assert_eq!(v.content, contents[contents.len() - 1 - i]);
+        }
+        // Exactly one row (the newest) is stored in full.
+        let delta_cnt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM note_versions WHERE delta_base IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(delta_cnt, (contents.len() - 1) as i64);
+    }
+
+    #[test]
+    fn restore_middle_version_updates_note_and_keeps_chain() {
+        let conn = test_conn();
+        insert_note(&conn, 1, "t1", "content-v1");
+        let contents = ["content-v1", "content-v2", "content-v3", "content-v4"];
+        for (i, c) in contents.iter().enumerate() {
+            insert_version(&conn, 1, &format!("t{}", i + 1), c, None, None, true).unwrap();
+        }
+        let v2_id: i64 = conn
+            .query_row(
+                "SELECT id FROM note_versions WHERE note_id = 1 AND version_number = 2",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let note = restore_version_impl(&conn, v2_id).unwrap();
+        assert_eq!(note.content, "content-v2");
+        // A manual "恢复自" version is appended and the chain still reconstructs.
+        let versions = list_versions_impl(&conn, 1).unwrap();
+        assert_eq!(versions.len(), 5);
+        assert_eq!(versions[0].content, "content-v2");
+        assert_eq!(versions[0].label.as_deref(), Some("恢复自 v0.0.2"));
+        assert_eq!(versions[0].is_manual, 1);
+        for v in &versions {
+            reconstruct_version_content(&conn, 1, v.version_number).unwrap();
+        }
+    }
+
+    #[test]
+    fn cleanup_keeps_at_most_max_and_chain_intact() {
+        let conn = test_conn();
+        insert_note(&conn, 1, "t", "base");
+        for i in 0..30 {
+            let c = format!("content-version-{i}");
+            insert_version(&conn, 1, "t", &c, None, None, false).unwrap();
+        }
+        let total: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM note_versions WHERE note_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(total <= MAX_VERSIONS);
+        let versions = list_versions_impl(&conn, 1).unwrap();
+        assert_eq!(versions.len() as i64, total);
+        for (i, v) in versions.iter().enumerate() {
+            assert_eq!(v.content, format!("content-version-{}", 29 - i));
+        }
+    }
+
+    #[test]
+    fn cleanup_protected_oldest_version_is_reanchored() {
+        let conn = test_conn();
+        insert_note(&conn, 1, "t", "base");
+        insert_version(&conn, 1, "t", "labeled-content", Some("important"), None, true).unwrap();
+        for i in 0..30 {
+            let c = format!("content-version-{i}");
+            insert_version(&conn, 1, "t", &c, None, None, false).unwrap();
+        }
+        let total: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM note_versions WHERE note_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(total <= MAX_VERSIONS);
+        let versions = list_versions_impl(&conn, 1).unwrap();
+        let v1 = versions
+            .iter()
+            .find(|v| v.version_number == 1)
+            .expect("labeled v1 must be kept");
+        assert_eq!(v1.label.as_deref(), Some("important"));
+        assert_eq!(v1.content, "labeled-content");
+        for v in &versions {
+            reconstruct_version_content(&conn, 1, v.version_number).unwrap();
+        }
+    }
+
+    #[test]
+    fn cleanup_interleaved_protected_versions_reanchor_in_chain() {
+        let conn = test_conn();
+        insert_note(&conn, 1, "t", "base");
+        // Protected versions interleave with the unprotected run: v2's and v4's
+        // successors are deleted, so both v1 and v3 must be re-anchored.
+        insert_version(&conn, 1, "t", "content-v1", Some("keep-1"), None, true).unwrap();
+        insert_version(&conn, 1, "t", "content-v2", None, None, false).unwrap();
+        insert_version(&conn, 1, "t", "content-v3", Some("keep-2"), None, true).unwrap();
+        for i in 4..34 {
+            let c = format!("content-version-{i}");
+            insert_version(&conn, 1, "t", &c, None, None, false).unwrap();
+        }
+        let total: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM note_versions WHERE note_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(total <= MAX_VERSIONS);
+        let versions = list_versions_impl(&conn, 1).unwrap();
+        let v1 = versions.iter().find(|v| v.version_number == 1).expect("v1 kept");
+        let v3 = versions.iter().find(|v| v.version_number == 3).expect("v3 kept");
+        assert_eq!(v1.content, "content-v1");
+        assert_eq!(v3.content, "content-v3");
+        for v in &versions {
+            reconstruct_version_content(&conn, 1, v.version_number).unwrap();
+        }
+    }
+
+    #[test]
+    fn version_numbers_are_monotonic() {
+        let conn = test_conn();
+        insert_note(&conn, 1, "t", "c");
+        for i in 0..10 {
+            insert_version(&conn, 1, "t", &format!("c{i}"), None, None, true).unwrap();
+        }
+        let numbers: Vec<i64> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT version_number FROM note_versions WHERE note_id = 1 ORDER BY version_number ASC",
+                )
+                .unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, i64>(0)).unwrap();
+            let mut v = Vec::new();
+            for r in rows {
+                v.push(r.unwrap());
+            }
+            v
+        };
+        assert_eq!(numbers.len(), 10);
+        for w in numbers.windows(2) {
+            assert!(w[1] > w[0], "version numbers must be strictly increasing");
+        }
+    }
+
+    #[test]
+    fn create_version_rejects_identical_content() {
+        let conn = test_conn();
+        insert_note(&conn, 1, "t", "c1");
+        insert_version(&conn, 1, "t", "c1", None, None, false).unwrap();
+        // Note content matches the newest version -> must be rejected.
+        assert!(create_version_impl(&conn, 1).is_err());
+        // Changing the content allows a new manual version.
+        conn.execute("UPDATE notes SET content = 'c2' WHERE id = 1", [])
+            .unwrap();
+        let v = create_version_impl(&conn, 1).unwrap();
+        assert_eq!(v.content, "c2");
+        assert_eq!(v.is_manual, 1);
+    }
+
+    #[test]
+    fn delete_version_reanchors_chain_and_keeps_history() {
+        let conn = test_conn();
+        insert_note(&conn, 1, "t", "content-v1");
+        let contents = ["content-v1", "content-v2", "content-v3", "content-v4"];
+        for (i, c) in contents.iter().enumerate() {
+            insert_version(&conn, 1, &format!("t{}", i + 1), c, None, None, true).unwrap();
+        }
+        // Delete v2 (middle): v1 holds a delta against it and must be re-anchored.
+        let v2_id: i64 = conn
+            .query_row(
+                "SELECT id FROM note_versions WHERE note_id = 1 AND version_number = 2",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        delete_version_impl(&conn, v2_id).unwrap();
+        let versions = list_versions_impl(&conn, 1).unwrap();
+        assert_eq!(versions.len(), 3);
+        let v1 = versions.iter().find(|v| v.version_number == 1).unwrap();
+        assert_eq!(v1.content, "content-v1");
+        for v in &versions {
+            reconstruct_version_content(&conn, 1, v.version_number).unwrap();
+        }
+        // Delete the newest (v4): the new newest must be stored in full again.
+        let v4_id: i64 = conn
+            .query_row(
+                "SELECT id FROM note_versions WHERE note_id = 1 AND version_number = 4",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        delete_version_impl(&conn, v4_id).unwrap();
+        let versions = list_versions_impl(&conn, 1).unwrap();
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0].version_number, 3);
+        assert_eq!(versions[0].content, "content-v3");
+        for v in &versions {
+            reconstruct_version_content(&conn, 1, v.version_number).unwrap();
+        }
+    }
+
+    #[test]
+    fn delete_note_cascades_versions() {
+        let conn = test_conn();
+        insert_note(&conn, 1, "t", "c1");
+        insert_version(&conn, 1, "t", "c1", None, None, true).unwrap();
+        insert_version(&conn, 1, "t", "c2", None, None, true).unwrap();
+        // Mirrors the delete_notes command body; the FK cascade must remove
+        // every version of the deleted note.
+        conn.execute("DELETE FROM notes WHERE id = 1", []).unwrap();
+        let cnt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM note_versions WHERE note_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cnt, 0);
+    }
+}
+
+
+

@@ -1,18 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
-import { useLongPress } from "../../hooks";
 import { diffLines, formatDateTime, fmtVersion } from "../../utils";
 import type { Folder, NoteVersion } from "../../types";
-import { ActionSheet, ConfirmDialog, Modal, toast } from "../../components/ui";
+import { ConfirmDialog, Modal, toast } from "../../components/ui";
 import {
     IconBack,
-    IconBookmark,
     IconClock,
     IconCompare,
-    IconDots,
     IconEye,
     IconFolder,
+    IconPlus,
     IconRestore,
+    IconTrash,
 } from "../../components/Icons";
 
 interface Props {
@@ -44,29 +43,8 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     const [restoreConfirm, setRestoreConfirm] = useState<NoteVersion | null>(
         null,
     );
-
-    // Label states
-    const [labelMenuOpen, setLabelMenuOpen] = useState(false);
-    const [createLabelOpen, setCreateLabelOpen] = useState(false);
-    const [newLabelName, setNewLabelName] = useState("");
-    const [newLabelDesc, setNewLabelDesc] = useState("");
-    const [labelListOpen, setLabelListOpen] = useState(false);
-    const [labelSheet, setLabelSheet] = useState<NoteVersion | null>(null);
-    const [editLabelTarget, setEditLabelTarget] = useState<NoteVersion | null>(
-        null,
-    );
-    const [editLabelName, setEditLabelName] = useState("");
-    const [editLabelDesc, setEditLabelDesc] = useState("");
-    const [deleteLabelConfirm, setDeleteLabelConfirm] =
+    const [deleteVersionConfirm, setDeleteVersionConfirm] =
         useState<NoteVersion | null>(null);
-
-    // Load-version-to-editor states
-    const [loadVersion, setLoadVersion] = useState<NoteVersion | null>(null);
-    const [loadConfirm, setLoadConfirm] = useState(false);
-    const [undoBackup, setUndoBackup] = useState<{
-        title: string;
-        content: string;
-    } | null>(null);
 
     const [folderModalOpen, setFolderModalOpen] = useState(false);
 
@@ -152,20 +130,9 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
         return () => clearTimeout(t);
     }, [title, content, isBlank, doSave]);
 
-    // Undo banner auto-dismiss after 5s.
-    useEffect(() => {
-        if (!undoBackup) return;
-        const t = setTimeout(() => setUndoBackup(null), 5000);
-        return () => clearTimeout(t);
-    }, [undoBackup]);
-
     const handleBack = async () => {
         if (previewVersion) {
             setPreviewVersion(null);
-            return;
-        }
-        if (labelMenuOpen) {
-            setLabelMenuOpen(false);
             return;
         }
         await doSave(true);
@@ -210,88 +177,31 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
         }
     };
 
-    const performLoadVersion = (v: NoteVersion) => {
-        setLoadVersion(null);
-        setLoadConfirm(false);
-        // Back up current content for undo, then fill the editor with the version.
-        setUndoBackup({ title, content });
-        setTitle(v.title);
-        setContent(v.content);
-        setPreviewVersion(null);
-    };
-
-    const handleLoadVersion = (v: NoteVersion) => {
-        const dirty =
-            title !== lastSavedRef.current.title ||
-            content !== lastSavedRef.current.content;
-        if (dirty) {
-            setLoadVersion(v);
-            setLoadConfirm(true);
-        } else {
-            performLoadVersion(v);
-        }
-    };
-
-    // ---- Label helpers ----
-    const handleCreateLabel = async () => {
-        const name = newLabelName.trim();
-        if (!name) {
-            toast("请输入标签名称");
-            return;
-        }
+    // ---- Version helpers ----
+    const handleCreateVersion = async () => {
         if (noteIdRef.current == null) {
             toast("请先输入内容以创建笔记");
             return;
         }
         try {
-            await api.createLabel({
-                noteId: noteIdRef.current,
-                label: name,
-                description: newLabelDesc.trim() || null,
-            });
-            setCreateLabelOpen(false);
-            setNewLabelName("");
-            setNewLabelDesc("");
-            toast("标签已创建");
+            await api.createVersion(noteIdRef.current);
+            await refreshVersions();
+            toast("版本已创建");
         } catch (e) {
             console.error(e);
             toast(String(e));
         }
     };
 
-    const handleUpdateLabel = async () => {
-        if (!editLabelTarget) return;
-        const name = editLabelName.trim();
-        if (!name) {
-            toast("请输入标签名称");
-            return;
-        }
+    const handleDeleteVersion = async (v: NoteVersion) => {
+        setDeleteVersionConfirm(null);
         try {
-            await api.updateLabel({
-                versionId: editLabelTarget.id,
-                label: name,
-                description: editLabelDesc.trim() || null,
-            });
-            setEditLabelTarget(null);
+            await api.deleteVersion(v.id);
+            toast("版本已删除");
             await refreshVersions();
-            toast("标签已更新");
         } catch (e) {
             console.error(e);
             toast(String(e));
-        }
-    };
-
-    const handleDeleteLabel = async () => {
-        const target = deleteLabelConfirm;
-        setDeleteLabelConfirm(null);
-        if (!target) return;
-        try {
-            await api.deleteLabel(target.id);
-            await refreshVersions();
-            toast("标签已删除");
-        } catch (e) {
-            console.error(e);
-            toast("删除失败");
         }
     };
 
@@ -319,7 +229,6 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
         folders.find((f) => f.id === currentFolderId)?.name ??
         (currentFolderId == null ? "默认" : "");
 
-    const labeledVersions = versions.filter((v) => v.label);
     const wordCount = content.length;
     const diffRows = compareVersion
         ? diffLines(compareVersion.content, content)
@@ -363,41 +272,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
                 >
                     <IconClock size={20} />
                 </button>
-                <button
-                    type="button"
-                    className="icon-btn accent"
-                    onClick={() => setLabelMenuOpen((v) => !v)}
-                    aria-label="标签"
-                >
-                    <IconBookmark size={20} />
-                </button>
             </div>
-
-            {labelMenuOpen && (
-                <div className="label-menu">
-                    <button
-                        type="button"
-                        className="label-menu-item"
-                        onClick={() => {
-                            setLabelMenuOpen(false);
-                            setCreateLabelOpen(true);
-                        }}
-                    >
-                        新建标签
-                    </button>
-                    <button
-                        type="button"
-                        className="label-menu-item"
-                        onClick={() => {
-                            setLabelMenuOpen(false);
-                            void refreshVersions();
-                            setLabelListOpen(true);
-                        }}
-                    >
-                        标签列表
-                    </button>
-                </div>
-            )}
 
             {previewVersion ? (
                 <>
@@ -422,9 +297,9 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
                             type="button"
                             className="btn btn-primary"
                             style={{ flex: "0 0 auto", padding: "8px 22px" }}
-                            onClick={() => handleLoadVersion(previewVersion)}
+                            onClick={() => setRestoreConfirm(previewVersion)}
                         >
-                            载入编辑
+                            恢复版本
                         </button>
                     </div>
                 </>
@@ -455,22 +330,6 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
                         </span>
                     </div>
                 </>
-            )}
-
-            {undoBackup && (
-                <div className="undo-banner">
-                    <span>已载入历史版本</span>
-                    <button
-                        type="button"
-                        onClick={() => {
-                            setTitle(undoBackup.title);
-                            setContent(undoBackup.content);
-                            setUndoBackup(null);
-                        }}
-                    >
-                        撤销
-                    </button>
-                </div>
             )}
 
             {/* ---- Folder selector ---- */}
@@ -508,7 +367,20 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
 
             {/* ---- Version list ---- */}
             {versionsOpen && (
-                <Modal title="历史版本" onClose={() => setVersionsOpen(false)}>
+                <Modal
+                    title="历史版本"
+                    onClose={() => setVersionsOpen(false)}
+                    headerAction={
+                        <button
+                            type="button"
+                            className="icon-btn accent"
+                            onClick={() => void handleCreateVersion()}
+                            aria-label="新建版本"
+                        >
+                            <IconPlus size={20} />
+                        </button>
+                    }
+                >
                     {versions.length === 0 && (
                         <div className="empty-state">暂无版本</div>
                     )}
@@ -566,6 +438,14 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
                                 >
                                     <IconCompare size={18} />
                                 </button>
+                                <button
+                                    type="button"
+                                    className="icon-btn"
+                                    aria-label="删除版本"
+                                    onClick={() => setDeleteVersionConfirm(v)}
+                                >
+                                    <IconTrash size={18} />
+                                </button>
                             </div>
                         </div>
                     ))}
@@ -597,152 +477,6 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
                 </Modal>
             )}
 
-            {/* ---- Create label ---- */}
-            {createLabelOpen && (
-                <Modal
-                    title="新建标签"
-                    onClose={() => setCreateLabelOpen(false)}
-                    footer={
-                        <button
-                            type="button"
-                            className="btn btn-primary"
-                            onClick={() => void handleCreateLabel()}
-                        >
-                            创建标签
-                        </button>
-                    }
-                >
-                    <div className="form-field">
-                        <label className="form-label" htmlFor="label-name">
-                            标签名称（必填，最多50字）
-                        </label>
-                        <input
-                            id="label-name"
-                            className="form-input"
-                            value={newLabelName}
-                            maxLength={50}
-                            onChange={(e) => setNewLabelName(e.target.value)}
-                            placeholder="例如：重要里程碑"
-                        />
-                    </div>
-                    <div className="form-field">
-                        <label className="form-label" htmlFor="label-desc">
-                            标签描述（可选）
-                        </label>
-                        <textarea
-                            id="label-desc"
-                            className="form-textarea"
-                            value={newLabelDesc}
-                            onChange={(e) => setNewLabelDesc(e.target.value)}
-                            placeholder="补充说明这个版本的用途"
-                        />
-                    </div>
-                </Modal>
-            )}
-
-            {/* ---- Label list ---- */}
-            {labelListOpen && (
-                <Modal title="标签列表" onClose={() => setLabelListOpen(false)}>
-                    {labeledVersions.length === 0 && (
-                        <div className="empty-state">暂无标签</div>
-                    )}
-                    {labeledVersions.map((v) => (
-                        <LabelRow
-                            key={v.id}
-                            version={v}
-                            onPreview={() => {
-                                setLabelListOpen(false);
-                                setPreviewVersion(v);
-                            }}
-                            onActions={() => setLabelSheet(v)}
-                        />
-                    ))}
-                </Modal>
-            )}
-
-            {/* ---- Label item actions ---- */}
-            {labelSheet && (
-                <ActionSheet
-                    actions={[
-                        {
-                            text: "编辑标签",
-                            onClick: () => {
-                                setEditLabelTarget(labelSheet);
-                                setEditLabelName(labelSheet.label ?? "");
-                                setEditLabelDesc(
-                                    labelSheet.labelDescription ?? "",
-                                );
-                            },
-                        },
-                        {
-                            text: "删除标签",
-                            danger: true,
-                            onClick: () => setDeleteLabelConfirm(labelSheet),
-                        },
-                        {
-                            text: "恢复到此版本",
-                            onClick: () => {
-                                setLabelListOpen(false);
-                                setRestoreConfirm(labelSheet);
-                            },
-                        },
-                    ]}
-                    onCancel={() => setLabelSheet(null)}
-                />
-            )}
-
-            {/* ---- Edit label ---- */}
-            {editLabelTarget && (
-                <Modal
-                    title="编辑标签"
-                    onClose={() => setEditLabelTarget(null)}
-                    footer={
-                        <button
-                            type="button"
-                            className="btn btn-primary"
-                            onClick={() => void handleUpdateLabel()}
-                        >
-                            保存
-                        </button>
-                    }
-                >
-                    <div className="form-field">
-                        <label className="form-label" htmlFor="edit-label-name">
-                            标签名称
-                        </label>
-                        <input
-                            id="edit-label-name"
-                            className="form-input"
-                            value={editLabelName}
-                            maxLength={50}
-                            onChange={(e) => setEditLabelName(e.target.value)}
-                        />
-                    </div>
-                    <div className="form-field">
-                        <label className="form-label" htmlFor="edit-label-desc">
-                            标签描述
-                        </label>
-                        <textarea
-                            id="edit-label-desc"
-                            className="form-textarea"
-                            value={editLabelDesc}
-                            onChange={(e) => setEditLabelDesc(e.target.value)}
-                        />
-                    </div>
-                </Modal>
-            )}
-
-            {deleteLabelConfirm && (
-                <ConfirmDialog
-                    title="删除标签"
-                    message={`确定删除标签"${deleteLabelConfirm.label}"吗？版本内容会保留。`}
-                    confirmText="删除"
-                    danger
-                    onConfirm={() => void handleDeleteLabel()}
-                    onCancel={() => setDeleteLabelConfirm(null)}
-                />
-            )}
-
             {restoreConfirm && (
                 <ConfirmDialog
                     title="恢复版本"
@@ -753,66 +487,16 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
                 />
             )}
 
-            {loadConfirm && loadVersion && (
+            {deleteVersionConfirm && (
                 <ConfirmDialog
-                    title="载入历史版本"
-                    message="当前存在未保存的更改，加载历史版本将覆盖这些内容。"
-                    confirmText="继续加载"
-                    onConfirm={() => performLoadVersion(loadVersion)}
-                    onCancel={() => setLoadConfirm(false)}
+                    title="删除版本"
+                    message={`确定要删除 ${fmtVersion(deleteVersionConfirm.versionNumber)} 这个版本吗？此操作不可撤销。`}
+                    confirmText="删除"
+                    onConfirm={() => void handleDeleteVersion(deleteVersionConfirm)}
+                    onCancel={() => setDeleteVersionConfirm(null)}
                 />
             )}
         </div>
     );
 }
 
-/** A single labeled version row with long-press for actions. */
-function LabelRow({
-    version,
-    onPreview,
-    onActions,
-}: {
-    version: NoteVersion;
-    onPreview: () => void;
-    onActions: () => void;
-}) {
-    const { longPressProps, didLongPress } = useLongPress(onActions);
-    return (
-        <div
-            className="version-item"
-            onClick={() => {
-                if (!didLongPress()) onPreview();
-            }}
-            {...longPressProps}
-        >
-            <div className="version-main">
-                <div className="version-head">
-                    <span className="version-label" style={{ maxWidth: 200 }}>
-                        {version.label}
-                    </span>
-                    <span className="version-no">
-                        {fmtVersion(version.versionNumber)}
-                    </span>
-                </div>
-                {version.labelDescription && (
-                    <div className="version-title">
-                        {version.labelDescription}
-                    </div>
-                )}
-                <div className="version-time">
-                    {formatDateTime(version.createdAt)}
-                </div>
-            </div>
-            <div className="version-actions">
-                <button
-                    type="button"
-                    className="icon-btn"
-                    aria-label="更多操作"
-                    onClick={onActions}
-                >
-                    <IconDots size={18} />
-                </button>
-            </div>
-        </div>
-    );
-}

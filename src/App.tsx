@@ -35,16 +35,24 @@ function App() {
 
   if (overlay?.kind === 'editor') {
     return (
-      <NoteEditorPage
-        key={overlay.noteId ?? 'new'}
-        noteId={overlay.noteId}
-        folderId={overlay.folderId}
-        onBack={closeOverlay}
-      />
+      <>
+        <NoteEditorPage
+          key={overlay.noteId ?? 'new'}
+          noteId={overlay.noteId}
+          folderId={overlay.folderId}
+          onBack={closeOverlay}
+        />
+        <ToastHost />
+      </>
     )
   }
   if (overlay?.kind === 'folders') {
-    return <FolderManagePage onBack={closeOverlay} />
+    return (
+      <>
+        <FolderManagePage onBack={closeOverlay} />
+        <ToastHost />
+      </>
+    )
   }
 
   return (

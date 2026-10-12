@@ -26,11 +26,8 @@ export const api = {
   // ---- Versions & labels ----
   listVersions: (noteId: number) => invoke<NoteVersion[]>('list_versions', { noteId }),
   restoreVersion: (versionId: number) => invoke<Note>('restore_version', { versionId }),
-  createLabel: (params: { noteId: number; label: string; description?: string | null }) =>
-    invoke<NoteVersion>('create_label', params),
-  updateLabel: (params: { versionId: number; label: string; description?: string | null }) =>
-    invoke<void>('update_label', params),
-  deleteLabel: (versionId: number) => invoke<void>('delete_label', { versionId }),
+  createVersion: (noteId: number) => invoke<NoteVersion>('create_version', { noteId }),
+  deleteVersion: (versionId: number) => invoke<void>('delete_version', { versionId }),
 
   // ---- Folders ----
   listFolders: () => invoke<FolderStats>('list_folders'),

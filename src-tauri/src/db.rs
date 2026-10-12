@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS note_versions (
     label TEXT,
     label_description TEXT,
     is_manual INTEGER NOT NULL DEFAULT 0,
+    delta_base INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
     UNIQUE(note_id, version_number)
 );
@@ -85,5 +86,19 @@ pub fn init(app: &tauri::AppHandle) -> Result<Connection, Box<dyn std::error::Er
     let conn = Connection::open(dir.join("notes.db"))?;
     conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
     conn.execute_batch(SCHEMA)?;
+    // One-time migration: add the reverse-delta column to note_versions tables
+    // created before incremental version storage was introduced. Existing rows
+    // keep NULL (full content), which is a valid chain anchor.
+    let has_delta_base: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('note_versions') WHERE name = 'delta_base'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .unwrap_or(false);
+    if !has_delta_base {
+        conn.execute_batch("ALTER TABLE note_versions ADD COLUMN delta_base INTEGER;")?;
+    }
     Ok(conn)
 }
