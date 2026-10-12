@@ -1,9 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../../api'
+import { useDebouncedSearch } from '../../hooks'
 import { parseDbTime } from '../../utils'
 import type { Todo } from '../../types'
 import { ConfirmDialog, Modal, toast } from '../../components/ui'
-import { IconBell, IconCheck, IconPlus, IconSearch, IconTodo, IconTrash } from '../../components/Icons'
+import { IconBell, IconCheck, IconTodo, IconTrash } from '../../components/Icons'
+import PageHeader from '../../components/PageHeader'
+import FAB from '../../components/FAB'
+import EmptyState from '../../components/EmptyState'
+import ChipRow from '../../components/ChipRow'
 
 const PRESET_CATEGORIES = ['默认', '工作', '生活', '学习']
 
@@ -29,18 +34,12 @@ const EMPTY_FORM: TodoForm = { title: '', category: '默认', dueDate: '', remin
 
 export default function TodoPage() {
   const [todos, setTodos] = useState<Todo[]>([])
-  const [searchInput, setSearchInput] = useState('')
-  const [query, setQuery] = useState('')
+  const [searchInput, setSearchInput, query] = useDebouncedSearch()
   const [category, setCategory] = useState('全部')
   const [editOpen, setEditOpen] = useState(false)
   const [editing, setEditing] = useState<Todo | null>(null)
   const [form, setForm] = useState<TodoForm>(EMPTY_FORM)
   const [deleteConfirm, setDeleteConfirm] = useState<Todo | null>(null)
-
-  useEffect(() => {
-    const t = setTimeout(() => setQuery(searchInput.trim()), 300)
-    return () => clearTimeout(t)
-  }, [searchInput])
 
   const load = useCallback(async () => {
     try {
@@ -135,37 +134,23 @@ export default function TodoPage() {
 
   return (
     <div className="page">
-      <div className="page-header">
-        <h1 className="page-title">待办</h1>
-        <div className="search-bar">
-          <IconSearch size={17} />
-          <input
-            value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
-            placeholder="搜索待办"
-          />
-        </div>
-      </div>
+      <PageHeader
+        title="待办"
+        search={{ placeholder: '搜索待办', value: searchInput, onChange: setSearchInput }}
+      />
 
-      <div className="chips">
-        {categories.map((c) => (
-          <button
-            key={c}
-            type="button"
-            className={`chip ${category === c ? 'active' : ''}`}
-            onClick={() => setCategory(c)}
-          >
-            {c}
-          </button>
-        ))}
-      </div>
+      <ChipRow
+        items={categories.map((c) => ({ key: c, label: c }))}
+        value={category}
+        onChange={setCategory}
+      />
 
       <div className="page-scroll">
         {visible.length === 0 && (
-          <div className="empty-state">
-            <IconTodo size={44} />
-            <div>{query || category !== '全部' ? '没有匹配的待办' : '还没有待办，点击 + 创建'}</div>
-          </div>
+          <EmptyState
+            icon={<IconTodo size={44} />}
+            text={query || category !== '全部' ? '没有匹配的待办' : '还没有待办，点击 + 创建'}
+          />
         )}
 
         {active.length > 0 && <div className="section-title">进行中 · {active.length}</div>}
@@ -241,9 +226,7 @@ export default function TodoPage() {
         ))}
       </div>
 
-      <button type="button" className="fab" aria-label="新建待办" onClick={openCreate}>
-        <IconPlus size={26} />
-      </button>
+      <FAB label="新建待办" onClick={openCreate} />
 
       {deleteConfirm && (
         <ConfirmDialog
@@ -280,18 +263,15 @@ export default function TodoPage() {
           </div>
           <div className="form-field">
             <span className="form-label">分类</span>
-            <div className="chips" style={{ padding: '4px 0 0' }}>
-              {[...new Set([...PRESET_CATEGORIES, form.category])].map((c) => (
-                <button
-                  key={c}
-                  type="button"
-                  className={`chip ${form.category === c ? 'active' : ''}`}
-                  onClick={() => setForm((f) => ({ ...f, category: c }))}
-                >
-                  {c}
-                </button>
-              ))}
-            </div>
+            <ChipRow
+              className="modal"
+              items={[...new Set([...PRESET_CATEGORIES, form.category])].map((c) => ({
+                key: c,
+                label: c,
+              }))}
+              value={form.category}
+              onChange={(c) => setForm((f) => ({ ...f, category: c }))}
+            />
           </div>
           <div className="form-field">
             <label className="form-label" htmlFor="todo-due">

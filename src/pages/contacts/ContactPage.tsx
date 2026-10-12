@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../../api'
+import { useDebouncedSearch } from '../../hooks'
 import type { Contact } from '../../types'
 import { ConfirmDialog, Modal, toast } from '../../components/ui'
-import { IconPlus, IconSearch, IconUsers } from '../../components/Icons'
+import { IconUsers } from '../../components/Icons'
+import PageHeader from '../../components/PageHeader'
+import FAB from '../../components/FAB'
+import EmptyState from '../../components/EmptyState'
+import ChipRow from '../../components/ChipRow'
 
 const PRESET_TAGS = ['默认', '客户', '朋友', '同事']
 
@@ -26,18 +31,12 @@ const EMPTY_FORM: ContactForm = {
 
 export default function ContactPage() {
   const [contacts, setContacts] = useState<Contact[]>([])
-  const [searchInput, setSearchInput] = useState('')
-  const [query, setQuery] = useState('')
+  const [searchInput, setSearchInput, query] = useDebouncedSearch()
   const [tag, setTag] = useState('全部')
   const [editOpen, setEditOpen] = useState(false)
   const [editing, setEditing] = useState<Contact | null>(null)
   const [form, setForm] = useState<ContactForm>(EMPTY_FORM)
   const [deleteConfirm, setDeleteConfirm] = useState<Contact | null>(null)
-
-  useEffect(() => {
-    const t = setTimeout(() => setQuery(searchInput.trim()), 300)
-    return () => clearTimeout(t)
-  }, [searchInput])
 
   const load = useCallback(async () => {
     try {
@@ -128,37 +127,23 @@ export default function ContactPage() {
 
   return (
     <div className="page">
-      <div className="page-header">
-        <h1 className="page-title">人脉</h1>
-        <div className="search-bar">
-          <IconSearch size={17} />
-          <input
-            value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
-            placeholder="搜索姓名、电话、公司"
-          />
-        </div>
-      </div>
+      <PageHeader
+        title="人脉"
+        search={{ placeholder: '搜索姓名、电话、公司', value: searchInput, onChange: setSearchInput }}
+      />
 
-      <div className="chips">
-        {tags.map((t) => (
-          <button
-            key={t}
-            type="button"
-            className={`chip ${tag === t ? 'active' : ''}`}
-            onClick={() => setTag(t)}
-          >
-            {t}
-          </button>
-        ))}
-      </div>
+      <ChipRow
+        items={tags.map((t) => ({ key: t, label: t }))}
+        value={tag}
+        onChange={setTag}
+      />
 
       <div className="page-scroll">
         {contacts.length === 0 ? (
-          <div className="empty-state">
-            <IconUsers size={44} />
-            <div>{query || tag !== '全部' ? '没有匹配的联系人' : '还没有联系人，点击 + 添加'}</div>
-          </div>
+          <EmptyState
+            icon={<IconUsers size={44} />}
+            text={query || tag !== '全部' ? '没有匹配的联系人' : '还没有联系人，点击 + 添加'}
+          />
         ) : (
           contacts.map((c) => (
             <div key={c.id} className="contact-row" onClick={() => openEdit(c)}>
@@ -177,9 +162,7 @@ export default function ContactPage() {
         )}
       </div>
 
-      <button type="button" className="fab" aria-label="添加联系人" onClick={openCreate}>
-        <IconPlus size={26} />
-      </button>
+      <FAB label="添加联系人" onClick={openCreate} />
 
       {deleteConfirm && (
         <ConfirmDialog
@@ -231,18 +214,12 @@ export default function ContactPage() {
           </div>
           <div className="form-field">
             <span className="form-label">标签</span>
-            <div className="chips" style={{ padding: '4px 0 0' }}>
-              {[...new Set([...PRESET_TAGS, form.tag])].map((t) => (
-                <button
-                  key={t}
-                  type="button"
-                  className={`chip ${form.tag === t ? 'active' : ''}`}
-                  onClick={() => setForm((f) => ({ ...f, tag: t }))}
-                >
-                  {t}
-                </button>
-              ))}
-            </div>
+            <ChipRow
+              className="modal"
+              items={[...new Set([...PRESET_TAGS, form.tag])].map((t) => ({ key: t, label: t }))}
+              value={form.tag}
+              onChange={(t) => setForm((f) => ({ ...f, tag: t }))}
+            />
           </div>
           <div className="form-field">
             <label className="form-label" htmlFor="contact-phone">

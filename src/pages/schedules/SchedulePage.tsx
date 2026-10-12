@@ -1,15 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '../../api'
+import { useDebouncedSearch } from '../../hooks'
 import { dateStr, monthStr, shortTime } from '../../utils'
 import type { Schedule } from '../../types'
 import { ConfirmDialog, Modal, toast } from '../../components/ui'
-import {
-  IconBell,
-  IconCalendar,
-  IconChevronLeft,
-  IconChevronRight,
-  IconPlus,
-} from '../../components/Icons'
+import { IconBell, IconCalendar, IconChevronLeft, IconChevronRight } from '../../components/Icons'
+import PageHeader from '../../components/PageHeader'
+import FAB from '../../components/FAB'
+import EmptyState from '../../components/EmptyState'
 
 const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六']
 
@@ -26,6 +24,7 @@ export default function SchedulePage() {
   const [viewMonth, setViewMonth] = useState(() => new Date())
   const [selectedDate, setSelectedDate] = useState(() => dateStr(new Date()))
   const [schedules, setSchedules] = useState<Schedule[]>([])
+  const [searchInput, setSearchInput, query] = useDebouncedSearch()
   const [editOpen, setEditOpen] = useState(false)
   const [editing, setEditing] = useState<Schedule | null>(null)
   const [form, setForm] = useState<ScheduleForm | null>(null)
@@ -70,7 +69,11 @@ export default function SchedulePage() {
   )
   const today = dateStr(new Date())
   const daySchedules = schedules
-    .filter((s) => s.date === selectedDate)
+    .filter(
+      (s) =>
+        s.date === selectedDate &&
+        (!query || s.title.includes(query) || (s.note ?? '').includes(query)),
+    )
     .sort((a, b) => (a.startTime ?? '').localeCompare(b.startTime ?? ''))
 
   const openCreate = () => {
@@ -154,9 +157,10 @@ export default function SchedulePage() {
 
   return (
     <div className="page">
-      <div className="page-header">
-        <h1 className="page-title">日程</h1>
-      </div>
+      <PageHeader
+        title="日程"
+        search={{ placeholder: '搜索日程', value: searchInput, onChange: setSearchInput }}
+      />
 
       <div style={{ padding: '0 14px' }}>
         <div className="cal-header">
@@ -204,10 +208,10 @@ export default function SchedulePage() {
           {daySchedules.length} 个日程
         </div>
         {daySchedules.length === 0 ? (
-          <div className="empty-state">
-            <IconCalendar size={44} />
-            <div>当日暂无日程，点击 + 添加</div>
-          </div>
+          <EmptyState
+            icon={<IconCalendar size={44} />}
+            text={query ? '没有匹配的日程' : '当日暂无日程，点击 + 添加'}
+          />
         ) : (
           daySchedules.map((s) => (
             <div key={s.id} className="schedule-card" onClick={() => openEdit(s)}>
@@ -231,9 +235,7 @@ export default function SchedulePage() {
         )}
       </div>
 
-      <button type="button" className="fab" aria-label="新建日程" onClick={openCreate}>
-        <IconPlus size={26} />
-      </button>
+      <FAB label="新建日程" onClick={openCreate} />
 
       {deleteConfirm && (
         <ConfirmDialog

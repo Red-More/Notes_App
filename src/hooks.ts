@@ -1,4 +1,21 @@
-import { useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
+
+/**
+ * Debounced search state: returns the raw input value, its setter and a
+ * debounced query that updates `delay` ms after the last change.
+ */
+export function useDebouncedSearch(
+  initial = '',
+  delay = 300,
+): [string, (v: string) => void, string] {
+  const [value, setValue] = useState(initial)
+  const [query, setQuery] = useState(initial)
+  useEffect(() => {
+    const t = setTimeout(() => setQuery(value.trim()), delay)
+    return () => clearTimeout(t)
+  }, [value, delay])
+  return [value, setValue, query]
+}
 
 /**
  * Long-press detection via pointer events (works for touch and mouse).
