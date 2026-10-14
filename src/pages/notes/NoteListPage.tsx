@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { save } from '@tauri-apps/plugin-dialog'
 import { api } from '../../api'
 import { useDebouncedSearch, useLongPress } from '../../hooks'
-import { formatRelative } from '../../utils'
+import { exportTs, formatRelative, friendlyError } from '../../utils'
 import type { FolderStats, Note } from '../../types'
-import { ConfirmDialog, Modal, toast } from '../../components/ui'
+import { ConfirmDialog, Modal } from '../../components/ui'
+import { toast } from '../../toast'
 import {
   IconCheck,
+  IconExport,
   IconFolder,
   IconMove,
   IconNote,
@@ -36,6 +39,7 @@ export default function NoteListPage({ version, onOpenNote, onOpenFolders }: Pro
   const [moveOpen, setMoveOpen] = useState(false)
   const [deleteConfirm, setDeleteConfirm] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
+  const [loading, setLoading] = useState(true)
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const pullStartY = useRef(0)
@@ -53,12 +57,37 @@ export default function NoteListPage({ version, onOpenNote, onOpenFolders }: Pro
       setStats(await api.listFolders())
     } catch (e) {
       console.error('加载笔记失败', e)
+      toast(friendlyError(e))
+    } finally {
+      setLoading(false)
     }
   }, [filter, query])
 
   useEffect(() => {
-    void load()
-  }, [load, version])
+    let cancelled = false
+    const run = async () => {
+      try {
+        const list = await api.listNotes({
+          folderId: typeof filter === 'number' ? filter : undefined,
+          unclassified: filter === 'uncat' || undefined,
+          search: query || undefined,
+        })
+        if (cancelled) return
+        setNotes(list)
+        if (cancelled) return
+        setStats(await api.listFolders())
+      } catch (e) {
+        console.error('加载笔记失败', e)
+        if (!cancelled) toast(friendlyError(e))
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    void run()
+    return () => {
+      cancelled = true
+    }
+  }, [filter, query, version])
 
   const exitSelect = () => {
     setSelectMode(false)
@@ -105,7 +134,7 @@ export default function NoteListPage({ version, onOpenNote, onOpenFolders }: Pro
       await load()
     } catch (e) {
       console.error(e)
-      toast('操作失败')
+      toast(friendlyError(e))
     }
   }
 
@@ -118,7 +147,7 @@ export default function NoteListPage({ version, onOpenNote, onOpenFolders }: Pro
       await load()
     } catch (e) {
       console.error(e)
-      toast('移动失败')
+      toast(friendlyError(e))
     }
   }
 
@@ -126,12 +155,29 @@ export default function NoteListPage({ version, onOpenNote, onOpenFolders }: Pro
     setDeleteConfirm(false)
     try {
       await api.deleteNotes(selectedIds)
-      toast('已删除')
+      toast('已移入回收站')
       exitSelect()
       await load()
     } catch (e) {
       console.error(e)
-      toast('删除失败')
+      toast(friendlyError(e))
+    }
+  }
+
+  const handleExport = async () => {
+    if (!selected.size) return
+    try {
+      const path = await save({
+        defaultPath: `笔记导出-${exportTs()}.zip`,
+        filters: [{ name: 'ZIP', extensions: ['zip'] }],
+      })
+      if (path == null) return
+      await api.exportNotesTo({ ids: selectedIds, destPath: path })
+      toast('已导出')
+      exitSelect()
+    } catch (e) {
+      console.error(e)
+      toast(friendlyError(e))
     }
   }
 
@@ -197,7 +243,9 @@ export default function NoteListPage({ version, onOpenNote, onOpenFolders }: Pro
             {refreshing ? '正在刷新…' : pullDist > 45 ? '释放刷新' : '下拉刷新'}
           </div>
         )}
-        {notes.length === 0 ? (
+        {loading && notes.length === 0 ? (
+          <div className="list-loading">加载中…</div>
+        ) : notes.length === 0 ? (
           <EmptyState
             icon={<IconNote size={44} />}
             text={query ? '没有匹配的笔记' : '还没有笔记，点击 + 创建'}
@@ -252,6 +300,10 @@ export default function NoteListPage({ version, onOpenNote, onOpenFolders }: Pro
             <IconMove size={19} />
             移动到
           </button>
+          <button type="button" className="action-bar-btn" onClick={() => void handleExport()}>
+            <IconExport size={19} />
+            导出
+          </button>
           <button
             type="button"
             className="action-bar-btn danger"
@@ -269,7 +321,7 @@ export default function NoteListPage({ version, onOpenNote, onOpenFolders }: Pro
       {deleteConfirm && (
         <ConfirmDialog
           title="删除笔记"
-          message={`确定删除选中的 ${selected.size} 篇笔记吗？删除后无法恢复。`}
+          message={`确定删除选中的 ${selected.size} 篇笔记吗？将移入回收站，可从回收站恢复。`}
           confirmText="删除"
           danger
           onConfirm={() => void handleDelete()}

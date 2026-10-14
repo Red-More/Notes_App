@@ -39,6 +39,33 @@ export function dateStr(d: Date): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
 }
 
+/** "YYYYMMDD-HHmm" timestamp for export file names. */
+export function exportTs(d = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`
+}
+
+/** Replace illegal filename chars /\\:*?"<>| and control chars with _, fallback on empty, truncate to 60 chars. */
+export function safeFileName(name: string, fallback = '未命名'): string {
+  // \p{Cc} covers control characters; literal control escapes trip no-control-regex.
+  const cleaned = name.replace(/[\\/:*?"<>|\p{Cc}]/gu, '_').trim()
+  const base = cleaned || fallback
+  return base.slice(0, 60)
+}
+
+/**
+ * Map a backend or unknown error to a friendly Chinese message.
+ * Known friendly messages pass through unchanged.
+ */
+export function friendlyError(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e)
+  if (msg.includes('数据库错误')) return '操作失败，请重试'
+  if (msg.includes('笔记不存在')) return '笔记不存在或已删除'
+  if (msg.includes('没有可导出的笔记')) return '没有可导出的笔记'
+  if (msg.includes('不能为空')) return msg
+  return '操作失败，请稍后重试'
+}
+
 /** Local month string "YYYY-MM". */
 export function monthStr(d: Date): string {
   const p = (n: number) => String(n).padStart(2, '0')

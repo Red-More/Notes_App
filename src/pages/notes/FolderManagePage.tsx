@@ -1,14 +1,19 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { save } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
 import { useLongPress } from "../../hooks";
+import { exportTs, safeFileName, friendlyError } from "../../utils";
 import type { Folder, FolderStats } from "../../types";
-import { ConfirmDialog, Modal, toast } from "../../components/ui";
+import { ConfirmDialog, Modal } from "../../components/ui";
+import { toast } from "../../toast";
 import {
     IconBack,
+    IconExport,
     IconFolder,
     IconPin,
     IconTrash,
 } from "../../components/Icons";
+import RecycleBinPage from "./RecycleBinPage";
 
 interface Props {
     onBack: () => void;
@@ -23,18 +28,33 @@ export default function FolderManagePage({ onBack }: Props) {
     const [renameTarget, setRenameTarget] = useState<Folder | null>(null);
     const [renameName, setRenameName] = useState("");
     const [deleteConfirm, setDeleteConfirm] = useState(false);
+    const [trashOpen, setTrashOpen] = useState(false);
 
     const load = useCallback(async () => {
         try {
             setStats(await api.listFolders());
         } catch (e) {
             console.error("加载文件夹失败", e);
+            toast(friendlyError(e));
         }
     }, []);
 
     useEffect(() => {
-        void load();
-    }, [load]);
+        let cancelled = false;
+        const run = async () => {
+            try {
+                const stats = await api.listFolders();
+                if (!cancelled) setStats(stats);
+            } catch (e) {
+                console.error("加载文件夹失败", e);
+                if (!cancelled) toast(friendlyError(e));
+            }
+        };
+        void run();
+        return () => {
+            cancelled = true;
+        };
+    }, []);
 
     const { longPressProps, didLongPress } = useLongPress(() => {
         if (!selectMode) setSelectMode(true);
@@ -63,7 +83,7 @@ export default function FolderManagePage({ onBack }: Props) {
             toast("文件夹已创建");
             await load();
         } catch (e) {
-            toast(String(e));
+            toast(friendlyError(e));
         }
     };
 
@@ -80,7 +100,7 @@ export default function FolderManagePage({ onBack }: Props) {
             toast("已重命名");
             await load();
         } catch (e) {
-            toast(String(e));
+            toast(friendlyError(e));
         }
     };
 
@@ -95,7 +115,7 @@ export default function FolderManagePage({ onBack }: Props) {
             await load();
         } catch (e) {
             console.error(e);
-            toast("删除失败");
+            toast(friendlyError(e));
         }
     };
 
@@ -109,7 +129,7 @@ export default function FolderManagePage({ onBack }: Props) {
             await load();
         } catch (e) {
             console.error(e);
-            toast("操作失败");
+            toast(friendlyError(e));
         }
     };
 
@@ -121,6 +141,28 @@ export default function FolderManagePage({ onBack }: Props) {
         setRenameTarget(selectedFolders[0]);
         setRenameName(selectedFolders[0].name);
     };
+
+    const handleExport = async (f: Folder) => {
+        if (f.noteCount === 0) {
+            toast("该文件夹暂无笔记");
+            return;
+        }
+        try {
+            const path = await save({
+                defaultPath: `${safeFileName(f.name)}-${exportTs()}.zip`,
+                filters: [{ name: "ZIP", extensions: ["zip"] }],
+            });
+            if (path == null) return;
+            await api.exportFolderTo({ folderId: f.id, destPath: path });
+            toast("已导出");
+        } catch (e) {
+            toast(friendlyError(e));
+        }
+    };
+
+    if (trashOpen) {
+        return <RecycleBinPage onBack={() => setTrashOpen(false)} />;
+    }
 
     return (
         <div className="editor-page">
@@ -136,6 +178,15 @@ export default function FolderManagePage({ onBack }: Props) {
                 <span className="modal-title" style={{ marginLeft: 6 }}>
                     文件夹管理
                 </span>
+                <button
+                    type="button"
+                    className="icon-btn"
+                    style={{ marginLeft: "auto" }}
+                    onClick={() => setTrashOpen(true)}
+                    aria-label="回收站"
+                >
+                    <IconTrash size={20} />
+                </button>
             </div>
 
             <div className="page-scroll" style={{ paddingTop: 16 }}>
@@ -202,6 +253,17 @@ export default function FolderManagePage({ onBack }: Props) {
                                 {f.noteCount} 篇笔记
                             </div>
                         </div>
+                        <button
+                            type="button"
+                            className="icon-btn"
+                            aria-label="打包导出"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                void handleExport(f);
+                            }}
+                        >
+                            <IconExport size={19} />
+                        </button>
                     </div>
                 ))}
 

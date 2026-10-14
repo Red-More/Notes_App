@@ -22,6 +22,7 @@ export interface Note {
   isPinned: number
   createdAt: string
   updatedAt: string
+  deletedAt: string | null
 }
 
 export interface NoteVersion {

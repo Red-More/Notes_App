@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { save } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
-import { diffLines, formatDateTime, fmtVersion } from "../../utils";
+import { diffLines, formatDateTime, fmtVersion, friendlyError, safeFileName } from "../../utils";
 import type { Folder, NoteVersion } from "../../types";
-import { ConfirmDialog, Modal, toast } from "../../components/ui";
+import { ConfirmDialog, Modal } from "../../components/ui";
+import { toast } from "../../toast";
 import {
     IconBack,
     IconClock,
     IconCompare,
+    IconExport,
     IconEye,
     IconFolder,
     IconPlus,
@@ -71,7 +74,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
                 }
             } catch (e) {
                 console.error("加载笔记失败", e);
-                toast("加载失败");
+                toast(friendlyError(e));
             }
         })();
     }, []);
@@ -85,6 +88,9 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
                 title === lastSavedRef.current.title &&
                 content === lastSavedRef.current.content
             ) {
+                // Content matches what was last saved (e.g. user reverted during
+                // the debounce window): don't leave the indicator stuck on "saving".
+                setStatus((prev) => (prev === "saving" ? "saved" : prev));
                 return;
             }
             if (noteIdRef.current == null && isBlank) return;
@@ -111,7 +117,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
             } catch (e) {
                 console.error("保存失败", e);
                 setStatus("idle");
-                toast("保存失败");
+                toast(friendlyError(e));
             }
         },
         [title, content, isBlank, currentFolderId],
@@ -122,8 +128,11 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
         if (
             title === lastSavedRef.current.title &&
             content === lastSavedRef.current.content
-        )
+        ) {
+            // Same as doSave: fall back to "saved" if a save was pending.
+            setStatus((prev) => (prev === "saving" ? "saved" : prev));
             return;
+        }
         if (noteIdRef.current == null && isBlank) return;
         setStatus("saving");
         const t = setTimeout(() => void doSave(false), 1000);
@@ -155,7 +164,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
             await refreshVersions();
         } catch (e) {
             console.error(e);
-            toast("加载版本失败");
+            toast(friendlyError(e));
         }
     };
 
@@ -173,7 +182,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
             await refreshVersions();
         } catch (e) {
             console.error(e);
-            toast("恢复失败");
+            toast(friendlyError(e));
         }
     };
 
@@ -189,7 +198,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
             toast("版本已创建");
         } catch (e) {
             console.error(e);
-            toast(String(e));
+            toast(friendlyError(e));
         }
     };
 
@@ -201,7 +210,26 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
             await refreshVersions();
         } catch (e) {
             console.error(e);
-            toast(String(e));
+            toast(friendlyError(e));
+        }
+    };
+
+    const handleExport = async () => {
+        if (noteIdRef.current == null) {
+            toast("请先保存笔记");
+            return;
+        }
+        try {
+            const path = await save({
+                defaultPath: `${safeFileName(title || "未命名")}.md`,
+                filters: [{ name: "Markdown", extensions: ["md"] }],
+            });
+            if (path == null) return;
+            await api.exportNoteTo({ noteId: noteIdRef.current, destPath: path });
+            toast("已导出");
+        } catch (e) {
+            console.error(e);
+            toast(friendlyError(e));
         }
     };
 
@@ -221,7 +249,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
             lastSavedRef.current = { title, content };
         } catch (e) {
             console.error(e);
-            toast("移动失败");
+            toast(friendlyError(e));
         }
     };
 
@@ -271,6 +299,14 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
                     aria-label="历史版本"
                 >
                     <IconClock size={20} />
+                </button>
+                <button
+                    type="button"
+                    className="icon-btn"
+                    onClick={() => void handleExport()}
+                    aria-label="导出"
+                >
+                    <IconExport size={20} />
                 </button>
             </div>
 

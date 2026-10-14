@@ -23,6 +23,20 @@ export const api = {
   moveNotes: (params: { ids: number[]; folderId: number | null }) =>
     invoke<void>('move_notes', params),
 
+  // ---- Export ----
+  exportNoteTo: (params: { noteId: number; destPath: string }) =>
+    invoke<void>('export_note_to', params),
+  exportNotesTo: (params: { ids: number[]; destPath: string }) =>
+    invoke<void>('export_notes_to', params),
+  exportFolderTo: (params: { folderId: number; destPath: string }) =>
+    invoke<void>('export_folder_to', params),
+
+  // ---- Recycle bin ----
+  listDeletedNotes: () => invoke<Note[]>('list_deleted_notes'),
+  restoreNotes: (ids: number[]) => invoke<void>('restore_notes', { ids }),
+  purgeNotes: (ids: number[]) => invoke<void>('purge_notes', { ids }),
+  emptyTrash: () => invoke<void>('empty_trash'),
+
   // ---- Versions & labels ----
   listVersions: (noteId: number) => invoke<NoteVersion[]>('list_versions', { noteId }),
   restoreVersion: (versionId: number) => invoke<Note>('restore_version', { versionId }),
