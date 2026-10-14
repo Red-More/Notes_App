@@ -100,5 +100,19 @@ pub fn init(app: &tauri::AppHandle) -> Result<Connection, Box<dyn std::error::Er
     if !has_delta_base {
         conn.execute_batch("ALTER TABLE note_versions ADD COLUMN delta_base INTEGER;")?;
     }
+    // One-time migration: add the soft-delete column to notes tables created
+    // before the recycle bin was introduced. NULL means the note is active;
+    // a non-NULL value is the deletion timestamp.
+    let has_deleted_at: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('notes') WHERE name = 'deleted_at'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .unwrap_or(false);
+    if !has_deleted_at {
+        conn.execute_batch("ALTER TABLE notes ADD COLUMN deleted_at TEXT;")?;
+    }
     Ok(conn)
 }

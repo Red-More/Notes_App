@@ -9,6 +9,8 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let conn = db::init(app.handle())?;
             app.manage(Db(Mutex::new(conn)));
@@ -29,10 +31,17 @@ pub fn run() {
             commands::notes::delete_notes,
             commands::notes::set_notes_pinned,
             commands::notes::move_notes,
+            commands::notes::list_deleted_notes,
+            commands::notes::restore_notes,
+            commands::notes::purge_notes,
+            commands::notes::empty_trash,
             commands::notes::list_versions,
             commands::notes::restore_version,
             commands::notes::create_version,
             commands::notes::delete_version,
+            commands::export::export_note_to,
+            commands::export::export_notes_to,
+            commands::export::export_folder_to,
             commands::folders::list_folders,
             commands::folders::create_folder,
             commands::folders::rename_folder,

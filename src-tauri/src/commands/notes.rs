@@ -21,6 +21,7 @@ fn note_from_row(r: &Row) -> rusqlite::Result<Note> {
         is_pinned: r.get(5)?,
         created_at: r.get(6)?,
         updated_at: r.get(7)?,
+        deleted_at: r.get(8)?,
     })
 }
 
@@ -45,9 +46,9 @@ pub fn fmt_version(n: i64) -> String {
 
 fn get_note_by_id(conn: &Connection, id: i64) -> Result<Note, String> {
     conn.query_row(
-        "SELECT n.id, n.title, n.content, n.folder_id, f.name, n.is_pinned, n.created_at, n.updated_at
+        "SELECT n.id, n.title, n.content, n.folder_id, f.name, n.is_pinned, n.created_at, n.updated_at, n.deleted_at
          FROM notes n LEFT JOIN folders f ON f.id = n.folder_id
-         WHERE n.id = ?1",
+         WHERE n.id = ?1 AND n.deleted_at IS NULL",
         params![id],
         note_from_row,
     )
@@ -96,7 +97,24 @@ fn decode_delta(from: &str, delta: &str) -> String {
 /// Insert a new version snapshot. The newest version is always stored in full
 /// (the chain anchor); the previously-newest version is converted into a reverse
 /// delta referencing the new one, so storage only keeps the difference content.
+/// The delta update, insert and cleanup run inside one transaction.
 fn insert_version(
+    conn: &mut Connection,
+    note_id: i64,
+    title: &str,
+    content: &str,
+    label: Option<&str>,
+    label_description: Option<&str>,
+    is_manual: bool,
+) -> Result<(), String> {
+    let tx = conn.transaction().map_err(db_err)?;
+    insert_version_tx(&tx, note_id, title, content, label, label_description, is_manual)?;
+    tx.commit().map_err(db_err)
+}
+
+/// Transaction-free body of `insert_version`; callers that already hold a
+/// transaction (e.g. `restore_version_impl`) reuse it to stay atomic.
+fn insert_version_tx(
     conn: &Connection,
     note_id: i64,
     title: &str,
@@ -260,18 +278,16 @@ fn cleanup_versions(conn: &Connection, note_id: i64) -> Result<(), String> {
 
 /// List notes ordered by pinned first, then last-updated first.
 /// `unclassified = true` filters notes without a folder; otherwise
-/// `folder_id = None` means all folders.
-#[tauri::command]
-pub fn list_notes(
-    state: State<Db>,
+/// `folder_id = None` means all folders. Deleted (trash) notes are excluded.
+fn list_notes_impl(
+    conn: &Connection,
     unclassified: Option<bool>,
     folder_id: Option<i64>,
     search: Option<String>,
 ) -> Result<Vec<Note>, String> {
-    let conn = state.0.lock().unwrap();
     let mut sql = String::from(
-        "SELECT n.id, n.title, n.content, n.folder_id, f.name, n.is_pinned, n.created_at, n.updated_at
-         FROM notes n LEFT JOIN folders f ON f.id = n.folder_id WHERE 1 = 1",
+        "SELECT n.id, n.title, n.content, n.folder_id, f.name, n.is_pinned, n.created_at, n.updated_at, n.deleted_at
+         FROM notes n LEFT JOIN folders f ON f.id = n.folder_id WHERE n.deleted_at IS NULL",
     );
     let mut args: Vec<SqlValue> = Vec::new();
     if unclassified == Some(true) {
@@ -303,6 +319,17 @@ pub fn list_notes(
     Ok(notes)
 }
 
+#[tauri::command]
+pub fn list_notes(
+    state: State<Db>,
+    unclassified: Option<bool>,
+    folder_id: Option<i64>,
+    search: Option<String>,
+) -> Result<Vec<Note>, String> {
+    let conn = state.0.lock().unwrap();
+    list_notes_impl(&conn, unclassified, folder_id, search)
+}
+
 /// Fetch a single note by id.
 #[tauri::command]
 pub fn get_note(state: State<Db>, id: i64) -> Result<Note, String> {
@@ -318,14 +345,14 @@ pub fn create_note(
     content: String,
     folder_id: Option<i64>,
 ) -> Result<Note, String> {
-    let conn = state.0.lock().unwrap();
+    let mut conn = state.0.lock().unwrap();
     conn.execute(
         "INSERT INTO notes (title, content, folder_id) VALUES (?1, ?2, ?3)",
         params![title, content, folder_id],
     )
     .map_err(db_err)?;
     let id = conn.last_insert_rowid();
-    insert_version(&conn, id, &title, &content, None, None, false)?;
+    insert_version(&mut *conn, id, &title, &content, None, None, false)?;
     get_note_by_id(&conn, id)
 }
 
@@ -340,7 +367,7 @@ pub fn save_note(
     folder_id: Option<i64>,
     force_version: Option<bool>,
 ) -> Result<Note, String> {
-    let conn = state.0.lock().unwrap();
+    let mut conn = state.0.lock().unwrap();
     let (old_title, old_content): (String, String) = conn
         .query_row(
             "SELECT title, content FROM notes WHERE id = ?1",
@@ -377,15 +404,77 @@ pub fn save_note(
             }
         };
         if force_version.unwrap_or(false) || version_due {
-            insert_version(&conn, id, &title, &content, None, None, false)?;
+            insert_version(&mut *conn, id, &title, &content, None, None, false)?;
         }
     }
     get_note_by_id(&conn, id)
 }
 
+/// Soft-delete notes: mark deleted_at so they move to the recycle bin
+/// instead of being removed immediately. The whole batch shares one
+/// transaction so a failure never leaves a partially soft-deleted set.
+fn soft_delete_notes_impl(conn: &mut Connection, ids: &[i64]) -> Result<(), String> {
+    let tx = conn.transaction().map_err(db_err)?;
+    for id in ids {
+        tx.execute(
+            "UPDATE notes SET deleted_at = datetime('now','localtime') WHERE id = ?1 AND deleted_at IS NULL",
+            params![id],
+        )
+        .map_err(db_err)?;
+    }
+    tx.commit().map_err(db_err)
+}
+
 #[tauri::command]
 pub fn delete_notes(state: State<Db>, ids: Vec<i64>) -> Result<(), String> {
+    let mut conn = state.0.lock().unwrap();
+    soft_delete_notes_impl(&mut *conn, &ids)
+}
+
+/// List notes in the recycle bin (soft-deleted), newest deletion first.
+fn list_deleted_notes_impl(conn: &Connection) -> Result<Vec<Note>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT n.id, n.title, n.content, n.folder_id, f.name, n.is_pinned, n.created_at, n.updated_at, n.deleted_at
+             FROM notes n LEFT JOIN folders f ON f.id = n.folder_id
+             WHERE n.deleted_at IS NOT NULL
+             ORDER BY n.deleted_at DESC, n.id DESC",
+        )
+        .map_err(db_err)?;
+    let rows = stmt.query_map([], note_from_row).map_err(db_err)?;
+    let mut notes = Vec::new();
+    for row in rows {
+        notes.push(row.map_err(db_err)?);
+    }
+    Ok(notes)
+}
+
+#[tauri::command]
+pub fn list_deleted_notes(state: State<Db>) -> Result<Vec<Note>, String> {
     let conn = state.0.lock().unwrap();
+    list_deleted_notes_impl(&conn)
+}
+
+/// Restore soft-deleted notes back to the active list.
+fn restore_notes_impl(conn: &Connection, ids: &[i64]) -> Result<(), String> {
+    for id in ids {
+        conn.execute(
+            "UPDATE notes SET deleted_at = NULL WHERE id = ?1",
+            params![id],
+        )
+        .map_err(db_err)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn restore_notes(state: State<Db>, ids: Vec<i64>) -> Result<(), String> {
+    let conn = state.0.lock().unwrap();
+    restore_notes_impl(&conn, &ids)
+}
+
+/// Permanently delete notes; note_versions rows cascade via the FK.
+fn purge_notes_impl(conn: &Connection, ids: &[i64]) -> Result<(), String> {
     for id in ids {
         conn.execute("DELETE FROM notes WHERE id = ?1", params![id])
             .map_err(db_err)?;
@@ -394,30 +483,61 @@ pub fn delete_notes(state: State<Db>, ids: Vec<i64>) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn set_notes_pinned(state: State<Db>, ids: Vec<i64>, pinned: bool) -> Result<(), String> {
+pub fn purge_notes(state: State<Db>, ids: Vec<i64>) -> Result<(), String> {
     let conn = state.0.lock().unwrap();
+    purge_notes_impl(&conn, &ids)
+}
+
+/// Permanently delete every soft-deleted note (empty the recycle bin).
+fn empty_trash_impl(conn: &Connection) -> Result<(), String> {
+    conn.execute("DELETE FROM notes WHERE deleted_at IS NOT NULL", [])
+        .map_err(db_err)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn empty_trash(state: State<Db>) -> Result<(), String> {
+    let conn = state.0.lock().unwrap();
+    empty_trash_impl(&conn)
+}
+
+#[tauri::command]
+pub fn set_notes_pinned(state: State<Db>, ids: Vec<i64>, pinned: bool) -> Result<(), String> {
+    let mut conn = state.0.lock().unwrap();
+    let tx = conn.transaction().map_err(db_err)?;
     for id in ids {
-        conn.execute(
-            "UPDATE notes SET is_pinned = ?1 WHERE id = ?2",
+        tx.execute(
+            "UPDATE notes SET is_pinned = ?1 WHERE id = ?2 AND deleted_at IS NULL",
             params![pinned as i64, id],
         )
         .map_err(db_err)?;
     }
-    Ok(())
+    tx.commit().map_err(db_err)
 }
 
 /// Move notes to a folder. `folder_id = None` moves them to "默认".
-#[tauri::command]
-pub fn move_notes(state: State<Db>, ids: Vec<i64>, folder_id: Option<i64>) -> Result<(), String> {
-    let conn = state.0.lock().unwrap();
+/// The whole batch shares one transaction so a failure (e.g. a foreign key
+/// violation) rolls back every already-executed move.
+fn move_notes_impl(
+    conn: &mut Connection,
+    ids: &[i64],
+    folder_id: Option<i64>,
+) -> Result<(), String> {
+    let tx = conn.transaction().map_err(db_err)?;
     for id in ids {
-        conn.execute(
-            "UPDATE notes SET folder_id = ?1 WHERE id = ?2",
+        tx.execute(
+            "UPDATE notes SET folder_id = ?1 WHERE id = ?2 AND deleted_at IS NULL",
             params![folder_id, id],
         )
         .map_err(db_err)?;
     }
-    Ok(())
+    tx.commit().map_err(db_err)
+}
+
+#[tauri::command]
+pub fn move_notes(state: State<Db>, ids: Vec<i64>, folder_id: Option<i64>) -> Result<(), String> {
+    let mut conn = state.0.lock().unwrap();
+    move_notes_impl(&mut *conn, &ids, folder_id)
 }
 
 /// List all versions of a note, newest first, with full reconstructed content.
@@ -462,8 +582,9 @@ pub fn list_versions(state: State<Db>, note_id: i64) -> Result<Vec<NoteVersion>,
 
 /// Restore a note to the given version. The note content is updated to the
 /// version's reconstructed full content and a new manual version labeled
-/// "恢复自 vX.Y.Z" is created to record the action.
-fn restore_version_impl(conn: &Connection, version_id: i64) -> Result<Note, String> {
+/// "恢复自 vX.Y.Z" is created to record the action. Both writes share one
+/// transaction so a failure in either step rolls back the whole restore.
+fn restore_version_impl(conn: &mut Connection, version_id: i64) -> Result<Note, String> {
     let v: NoteVersion = conn
         .query_row(
             "SELECT id, note_id, version_number, title, content, label, label_description, is_manual, created_at
@@ -473,26 +594,28 @@ fn restore_version_impl(conn: &Connection, version_id: i64) -> Result<Note, Stri
         )
         .map_err(db_err)?;
     let full_content = reconstruct_version_content(conn, v.note_id, v.version_number)?;
-    conn.execute(
+    let tx = conn.transaction().map_err(db_err)?;
+    tx.execute(
         "UPDATE notes SET title = ?1, content = ?2, updated_at = datetime('now','localtime') WHERE id = ?3",
         params![v.title, full_content, v.note_id],
     )
     .map_err(db_err)?;
     let label = format!("恢复自 {}", fmt_version(v.version_number));
-    insert_version(conn, v.note_id, &v.title, &full_content, Some(&label), None, true)?;
+    insert_version_tx(&tx, v.note_id, &v.title, &full_content, Some(&label), None, true)?;
+    tx.commit().map_err(db_err)?;
     get_note_by_id(conn, v.note_id)
 }
 
 #[tauri::command]
 pub fn restore_version(state: State<Db>, version_id: i64) -> Result<Note, String> {
-    let conn = state.0.lock().unwrap();
-    restore_version_impl(&conn, version_id)
+    let mut conn = state.0.lock().unwrap();
+    restore_version_impl(&mut *conn, version_id)
 }
 
 /// Manually snapshot the note's current title/content as a new version.
 /// Rejects the request when the note content is identical to the newest
 /// version, so an empty snapshot can never be recorded.
-fn create_version_impl(conn: &Connection, note_id: i64) -> Result<NoteVersion, String> {
+fn create_version_impl(conn: &mut Connection, note_id: i64) -> Result<NoteVersion, String> {
     let (title, content): (String, String) = conn
         .query_row(
             "SELECT title, content FROM notes WHERE id = ?1",
@@ -527,8 +650,8 @@ fn create_version_impl(conn: &Connection, note_id: i64) -> Result<NoteVersion, S
 
 #[tauri::command]
 pub fn create_version(state: State<Db>, note_id: i64) -> Result<NoteVersion, String> {
-    let conn = state.0.lock().unwrap();
-    create_version_impl(&conn, note_id)
+    let mut conn = state.0.lock().unwrap();
+    create_version_impl(&mut *conn, note_id)
 }
 
 /// Delete a specific version. If an older version's reverse delta references the
@@ -593,7 +716,8 @@ mod tests {
                 folder_id INTEGER REFERENCES folders(id) ON DELETE SET NULL,
                 is_pinned INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-                updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+                updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                deleted_at TEXT
             );
             CREATE TABLE note_versions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -653,11 +777,11 @@ mod tests {
 
     #[test]
     fn chain_reconstruction_returns_all_original_contents() {
-        let conn = test_conn();
+        let mut conn = test_conn();
         insert_note(&conn, 1, "t1", "c1");
         let contents = ["c1", "c1\nmore", "完全不同内容", "你好世界", "final content 😀"];
         for (i, c) in contents.iter().enumerate() {
-            insert_version(&conn, 1, &format!("t{}", i + 1), c, None, None, true).unwrap();
+            insert_version(&mut conn, 1, &format!("t{}", i + 1), c, None, None, true).unwrap();
         }
         let versions = list_versions_impl(&conn, 1).unwrap();
         assert_eq!(versions.len(), contents.len());
@@ -677,11 +801,11 @@ mod tests {
 
     #[test]
     fn restore_middle_version_updates_note_and_keeps_chain() {
-        let conn = test_conn();
+        let mut conn = test_conn();
         insert_note(&conn, 1, "t1", "content-v1");
         let contents = ["content-v1", "content-v2", "content-v3", "content-v4"];
         for (i, c) in contents.iter().enumerate() {
-            insert_version(&conn, 1, &format!("t{}", i + 1), c, None, None, true).unwrap();
+            insert_version(&mut conn, 1, &format!("t{}", i + 1), c, None, None, true).unwrap();
         }
         let v2_id: i64 = conn
             .query_row(
@@ -690,7 +814,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        let note = restore_version_impl(&conn, v2_id).unwrap();
+        let note = restore_version_impl(&mut conn, v2_id).unwrap();
         assert_eq!(note.content, "content-v2");
         // A manual "恢复自" version is appended and the chain still reconstructs.
         let versions = list_versions_impl(&conn, 1).unwrap();
@@ -705,11 +829,11 @@ mod tests {
 
     #[test]
     fn cleanup_keeps_at_most_max_and_chain_intact() {
-        let conn = test_conn();
+        let mut conn = test_conn();
         insert_note(&conn, 1, "t", "base");
         for i in 0..30 {
             let c = format!("content-version-{i}");
-            insert_version(&conn, 1, "t", &c, None, None, false).unwrap();
+            insert_version(&mut conn, 1, "t", &c, None, None, false).unwrap();
         }
         let total: i64 = conn
             .query_row(
@@ -728,12 +852,12 @@ mod tests {
 
     #[test]
     fn cleanup_protected_oldest_version_is_reanchored() {
-        let conn = test_conn();
+        let mut conn = test_conn();
         insert_note(&conn, 1, "t", "base");
-        insert_version(&conn, 1, "t", "labeled-content", Some("important"), None, true).unwrap();
+        insert_version(&mut conn, 1, "t", "labeled-content", Some("important"), None, true).unwrap();
         for i in 0..30 {
             let c = format!("content-version-{i}");
-            insert_version(&conn, 1, "t", &c, None, None, false).unwrap();
+            insert_version(&mut conn, 1, "t", &c, None, None, false).unwrap();
         }
         let total: i64 = conn
             .query_row(
@@ -757,16 +881,16 @@ mod tests {
 
     #[test]
     fn cleanup_interleaved_protected_versions_reanchor_in_chain() {
-        let conn = test_conn();
+        let mut conn = test_conn();
         insert_note(&conn, 1, "t", "base");
         // Protected versions interleave with the unprotected run: v2's and v4's
         // successors are deleted, so both v1 and v3 must be re-anchored.
-        insert_version(&conn, 1, "t", "content-v1", Some("keep-1"), None, true).unwrap();
-        insert_version(&conn, 1, "t", "content-v2", None, None, false).unwrap();
-        insert_version(&conn, 1, "t", "content-v3", Some("keep-2"), None, true).unwrap();
+        insert_version(&mut conn, 1, "t", "content-v1", Some("keep-1"), None, true).unwrap();
+        insert_version(&mut conn, 1, "t", "content-v2", None, None, false).unwrap();
+        insert_version(&mut conn, 1, "t", "content-v3", Some("keep-2"), None, true).unwrap();
         for i in 4..34 {
             let c = format!("content-version-{i}");
-            insert_version(&conn, 1, "t", &c, None, None, false).unwrap();
+            insert_version(&mut conn, 1, "t", &c, None, None, false).unwrap();
         }
         let total: i64 = conn
             .query_row(
@@ -788,10 +912,10 @@ mod tests {
 
     #[test]
     fn version_numbers_are_monotonic() {
-        let conn = test_conn();
+        let mut conn = test_conn();
         insert_note(&conn, 1, "t", "c");
         for i in 0..10 {
-            insert_version(&conn, 1, "t", &format!("c{i}"), None, None, true).unwrap();
+            insert_version(&mut conn, 1, "t", &format!("c{i}"), None, None, true).unwrap();
         }
         let numbers: Vec<i64> = {
             let mut stmt = conn
@@ -814,26 +938,26 @@ mod tests {
 
     #[test]
     fn create_version_rejects_identical_content() {
-        let conn = test_conn();
+        let mut conn = test_conn();
         insert_note(&conn, 1, "t", "c1");
-        insert_version(&conn, 1, "t", "c1", None, None, false).unwrap();
+        insert_version(&mut conn, 1, "t", "c1", None, None, false).unwrap();
         // Note content matches the newest version -> must be rejected.
-        assert!(create_version_impl(&conn, 1).is_err());
+        assert!(create_version_impl(&mut conn, 1).is_err());
         // Changing the content allows a new manual version.
         conn.execute("UPDATE notes SET content = 'c2' WHERE id = 1", [])
             .unwrap();
-        let v = create_version_impl(&conn, 1).unwrap();
+        let v = create_version_impl(&mut conn, 1).unwrap();
         assert_eq!(v.content, "c2");
         assert_eq!(v.is_manual, 1);
     }
 
     #[test]
     fn delete_version_reanchors_chain_and_keeps_history() {
-        let conn = test_conn();
+        let mut conn = test_conn();
         insert_note(&conn, 1, "t", "content-v1");
         let contents = ["content-v1", "content-v2", "content-v3", "content-v4"];
         for (i, c) in contents.iter().enumerate() {
-            insert_version(&conn, 1, &format!("t{}", i + 1), c, None, None, true).unwrap();
+            insert_version(&mut conn, 1, &format!("t{}", i + 1), c, None, None, true).unwrap();
         }
         // Delete v2 (middle): v1 holds a delta against it and must be re-anchored.
         let v2_id: i64 = conn
@@ -871,10 +995,10 @@ mod tests {
 
     #[test]
     fn delete_note_cascades_versions() {
-        let conn = test_conn();
+        let mut conn = test_conn();
         insert_note(&conn, 1, "t", "c1");
-        insert_version(&conn, 1, "t", "c1", None, None, true).unwrap();
-        insert_version(&conn, 1, "t", "c2", None, None, true).unwrap();
+        insert_version(&mut conn, 1, "t", "c1", None, None, true).unwrap();
+        insert_version(&mut conn, 1, "t", "c2", None, None, true).unwrap();
         // Mirrors the delete_notes command body; the FK cascade must remove
         // every version of the deleted note.
         conn.execute("DELETE FROM notes WHERE id = 1", []).unwrap();
@@ -886,6 +1010,93 @@ mod tests {
             )
             .unwrap();
         assert_eq!(cnt, 0);
+    }
+
+    #[test]
+    fn trash_soft_delete_restore_purge_and_empty() {
+        let mut conn = test_conn();
+        insert_note(&conn, 1, "t1", "c1");
+        insert_note(&conn, 2, "t2", "c2");
+        insert_version(&mut conn, 1, "t1", "c1", None, None, true).unwrap();
+        insert_version(&mut conn, 2, "t2", "c2", None, None, true).unwrap();
+
+        // Soft delete note 1; it must vanish from the active list but appear
+        // in the trash, and the active note 2 must be unaffected.
+        soft_delete_notes_impl(&mut conn, &[1]).unwrap();
+        let active = list_notes_impl(&conn, None, None, None).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, 2);
+        let trash = list_deleted_notes_impl(&conn).unwrap();
+        assert_eq!(trash.len(), 1);
+        assert_eq!(trash[0].id, 1);
+        assert!(trash[0].deleted_at.is_some());
+        // Active list searches must also skip deleted notes.
+        let hits = list_notes_impl(&conn, None, None, Some("t1".into())).unwrap();
+        assert!(hits.is_empty());
+
+        // Restore note 1: it is active again and the trash is empty.
+        restore_notes_impl(&conn, &[1]).unwrap();
+        let active = list_notes_impl(&conn, None, None, None).unwrap();
+        assert_eq!(active.len(), 2);
+        assert!(list_deleted_notes_impl(&conn).unwrap().is_empty());
+
+        // Soft delete both, then purge note 1: note_versions cascade away.
+        soft_delete_notes_impl(&mut conn, &[1, 2]).unwrap();
+        purge_notes_impl(&conn, &[1]).unwrap();
+        let versions: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM note_versions WHERE note_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(versions, 0);
+        assert_eq!(list_deleted_notes_impl(&conn).unwrap().len(), 1);
+
+        // empty_trash removes every remaining soft-deleted note.
+        empty_trash_impl(&conn).unwrap();
+        assert!(list_deleted_notes_impl(&conn).unwrap().is_empty());
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM notes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn move_notes_batch_rolls_back_on_mid_batch_failure() {
+        let mut conn = test_conn();
+        conn.execute(
+            "INSERT INTO folders (id, name) VALUES (1, 'work'), (2, 'archive')",
+            [],
+        )
+        .unwrap();
+        insert_note(&conn, 1, "t1", "c1");
+        insert_note(&conn, 2, "t2", "c2");
+        conn.execute("UPDATE notes SET folder_id = 1", []).unwrap();
+        // A single folder_id applies to every row, so a plain foreign key
+        // violation would fail on the very first matched row. To prove
+        // mid-batch atomicity, abort only the second row's move after the
+        // first one already ran inside the transaction.
+        conn.execute_batch(
+            "CREATE TRIGGER fail_move_note2
+             BEFORE UPDATE OF folder_id ON notes
+             WHEN NEW.id = 2 AND NEW.folder_id = 2
+             BEGIN
+                 SELECT RAISE(ABORT, 'boom');
+             END;",
+        )
+        .unwrap();
+        let err = move_notes_impl(&mut conn, &[1, 2], Some(2)).unwrap_err();
+        assert!(err.contains("boom"), "unexpected error: {err}");
+        // Atomicity: note 1's already-executed move must be rolled back too.
+        let f1: Option<i64> = conn
+            .query_row("SELECT folder_id FROM notes WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        let f2: Option<i64> = conn
+            .query_row("SELECT folder_id FROM notes WHERE id = 2", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(f1, Some(1));
+        assert_eq!(f2, Some(1));
     }
 }
 

@@ -11,6 +11,7 @@ pub struct Note {
     pub is_pinned: i64,
     pub created_at: String,
     pub updated_at: String,
+    pub deleted_at: Option<String>,
 }
 
 #[derive(Serialize, Clone)]

@@ -24,17 +24,23 @@ fn folder_from_row(r: &Row) -> rusqlite::Result<Folder> {
 pub fn list_folders(state: State<Db>) -> Result<FolderStats, String> {
     let conn = state.0.lock().unwrap();
     let total: i64 = conn
-        .query_row("SELECT COUNT(*) FROM notes", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM notes WHERE deleted_at IS NULL",
+            [],
+            |r| r.get(0),
+        )
         .map_err(db_err)?;
     let unclassified: i64 = conn
-        .query_row("SELECT COUNT(*) FROM notes WHERE folder_id IS NULL", [], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM notes WHERE folder_id IS NULL AND deleted_at IS NULL",
+            [],
+            |r| r.get(0),
+        )
         .map_err(db_err)?;
     let mut stmt = conn
         .prepare(
             "SELECT f.id, f.name, f.is_pinned, f.sort_order,
-                    (SELECT COUNT(*) FROM notes n WHERE n.folder_id = f.id),
+                    (SELECT COUNT(*) FROM notes n WHERE n.folder_id = f.id AND n.deleted_at IS NULL),
                     f.created_at
              FROM folders f
              ORDER BY f.is_pinned DESC, f.sort_order ASC, f.created_at ASC",
@@ -79,7 +85,7 @@ pub fn create_folder(state: State<Db>, name: String) -> Result<Folder, String> {
     let id = conn.last_insert_rowid();
     conn.query_row(
         "SELECT f.id, f.name, f.is_pinned, f.sort_order,
-                (SELECT COUNT(*) FROM notes n WHERE n.folder_id = f.id),
+                (SELECT COUNT(*) FROM notes n WHERE n.folder_id = f.id AND n.deleted_at IS NULL),
                 f.created_at
          FROM folders f WHERE f.id = ?1",
         params![id],
