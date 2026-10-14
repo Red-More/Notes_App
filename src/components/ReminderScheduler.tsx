@@ -1,15 +1,51 @@
 import { useEffect } from 'react'
 import { api } from '../api'
-import { toast } from './ui'
+import { toast } from '../toast'
+import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification'
 import { dateStr, monthStr, parseDbTime } from '../utils'
 
 const CHECK_INTERVAL_MS = 30_000
 const TODO_WINDOW_MS = 30 * 60_000
 const SCHEDULE_EARLY_MS = 5 * 60_000
 const SCHEDULE_LATE_MS = 15 * 60_000
+const REMINDED_KEY_TTL_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
 
 const notified = (key: string) => localStorage.getItem(`reminded:${key}`) === '1'
 const markNotified = (key: string) => localStorage.setItem(`reminded:${key}`, '1')
+
+// Memoize the notification permission so it is only requested once per app run.
+let permissionPromise: Promise<boolean> | null = null
+
+function ensurePermission(): Promise<boolean> {
+  if (!permissionPromise) {
+    permissionPromise = (async () => {
+      if (await isPermissionGranted()) return true
+      return (await requestPermission()) === 'granted'
+    })()
+  }
+  return permissionPromise
+}
+
+/** Remove reminded dedupe keys older than 7 days, plus any malformed ones. */
+function cleanupRemindedKeys() {
+  const expired: string[] = []
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i)
+    if (!key || !key.startsWith('reminded:')) continue
+    const ts = Number(key.slice(key.lastIndexOf(':') + 1))
+    if (Number.isNaN(ts) || Date.now() - ts > REMINDED_KEY_TTL_MS) expired.push(key)
+  }
+  for (const key of expired) localStorage.removeItem(key)
+}
+
+/** Send a system notification when permitted, otherwise fall back to the in-app toast. */
+async function notify(text: string) {
+  if (await ensurePermission()) {
+    sendNotification({ title: 'Notes 提醒', body: text })
+  } else {
+    toast(text)
+  }
+}
 
 async function checkReminders() {
   const now = Date.now()
@@ -24,7 +60,7 @@ async function checkReminders() {
         const key = `todo:${t.id}:${due}`
         if (!notified(key)) {
           markNotified(key)
-          toast(`⏰ 待办提醒：${t.title}`)
+          await notify(`⏰ 待办提醒：${t.title}`)
         }
       }
     }
@@ -40,7 +76,7 @@ async function checkReminders() {
         const key = `schedule:${s.id}:${start}`
         if (!notified(key)) {
           markNotified(key)
-          toast(`⏰ 日程提醒：${s.title}`)
+          await notify(`⏰ 日程提醒：${s.title}`)
         }
       }
     }
@@ -51,10 +87,11 @@ async function checkReminders() {
 
 /**
  * In-app reminder: while the app is running, periodically checks
- * todos / schedules with reminders enabled and toasts when due.
+ * todos / schedules with reminders enabled and notifies when due.
  */
 export default function ReminderScheduler() {
   useEffect(() => {
+    cleanupRemindedKeys()
     void checkReminders()
     const timer = setInterval(() => void checkReminders(), CHECK_INTERVAL_MS)
     return () => clearInterval(timer)
