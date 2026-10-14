@@ -1,7 +1,11 @@
 import { useEffect } from 'react'
 import { api } from '../api'
 import { toast } from '../toast'
-import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification'
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from '@tauri-apps/plugin-notification'
 import { dateStr, monthStr, parseDbTime } from '../utils'
 
 const CHECK_INTERVAL_MS = 30_000

@@ -14,13 +14,27 @@ pub fn run() {
         .setup(|app| {
             let conn = db::init(app.handle())?;
             app.manage(Db(Mutex::new(conn)));
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
+            // Log to the console and a rotating file under the OS log dir in
+            // every build mode, so diagnostics exist on user machines too.
+            let log_dir = app.path().app_log_dir()?;
+            std::fs::create_dir_all(&log_dir)?;
+            let log_file = tauri_plugin_log::Target::new(
+                tauri_plugin_log::TargetKind::Folder {
+                    path: log_dir,
+                    file_name: Some("notes".into()),
+                },
+            );
+            app.handle().plugin(
+                tauri_plugin_log::Builder::new()
+                    .targets([
+                        tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                        log_file,
+                    ])
+                    .level(log::LevelFilter::Info)
+                    .max_file_size(1024 * 1024)
+                    .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(5))
+                    .build(),
+            )?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

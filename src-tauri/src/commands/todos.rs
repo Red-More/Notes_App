@@ -1,12 +1,9 @@
+use crate::commands::db_err;
 use crate::db::Db;
 use crate::models::Todo;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, Row};
 use tauri::State;
-
-fn db_err(e: rusqlite::Error) -> String {
-    format!("数据库错误: {e}")
-}
 
 fn todo_from_row(r: &Row) -> rusqlite::Result<Todo> {
     Ok(Todo {

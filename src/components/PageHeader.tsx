@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import { IconSearch } from './Icons'
 
-interface PageHeaderAction {
+export interface PageHeaderAction {
   icon: ReactNode
   label: string
   onClick: () => void
@@ -10,24 +10,32 @@ interface PageHeaderAction {
 interface PageHeaderProps {
   title: string
   action?: PageHeaderAction
+  /** Multiple right-side actions; when provided, `action` is ignored. */
+  actions?: PageHeaderAction[]
   search?: { placeholder: string; value: string; onChange: (v: string) => void }
 }
 
-/** Shared page header: title row + optional right action + optional search bar. */
-export default function PageHeader({ title, action, search }: PageHeaderProps) {
+/** Shared page header: title row + optional right actions + optional search bar. */
+export default function PageHeader({ title, action, actions, search }: PageHeaderProps) {
+  const headerActions = actions ?? (action ? [action] : [])
   return (
     <div className="page-header">
       <div className="page-title-row">
         <h1 className="page-title">{title}</h1>
-        {action && (
-          <button
-            type="button"
-            className="icon-btn"
-            onClick={action.onClick}
-            aria-label={action.label}
-          >
-            {action.icon}
-          </button>
+        {headerActions.length > 0 && (
+          <div className="page-header-actions">
+            {headerActions.map((a) => (
+              <button
+                key={a.label}
+                type="button"
+                className="icon-btn"
+                onClick={a.onClick}
+                aria-label={a.label}
+              >
+                {a.icon}
+              </button>
+            ))}
+          </div>
         )}
       </div>
       {search && (

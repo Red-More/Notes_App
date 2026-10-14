@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../../api'
 import { useDebouncedSearch } from '../../hooks'
 import { parseDbTime, friendlyError } from '../../utils'
@@ -12,6 +12,9 @@ import EmptyState from '../../components/EmptyState'
 import ChipRow from '../../components/ChipRow'
 
 const PRESET_CATEGORIES = ['默认', '工作', '生活', '学习']
+
+/** Items rendered per batch before the sentinel triggers the next one. */
+const PAGE = 50
 
 /** Format a due date as "M月d日 HH:mm" (or with year when not current year). */
 function formatDue(s: string): string {
@@ -42,6 +45,9 @@ export default function TodoPage() {
   const [form, setForm] = useState<TodoForm>(EMPTY_FORM)
   const [deleteConfirm, setDeleteConfirm] = useState<Todo | null>(null)
   const [loading, setLoading] = useState(true)
+  const [visible, setVisible] = useState(PAGE)
+
+  const sentinelRef = useRef<HTMLDivElement>(null)
 
   const load = useCallback(async () => {
     try {
@@ -60,6 +66,7 @@ export default function TodoPage() {
       try {
         const todos = await api.listTodos(query || undefined)
         if (!cancelled) setTodos(todos)
+        if (!cancelled) setVisible(PAGE)
       } catch (e) {
         console.error('加载待办失败', e)
         if (!cancelled) toast(friendlyError(e))
@@ -81,9 +88,21 @@ export default function TodoPage() {
       .sort(),
   ]
 
-  const visible = todos.filter((t) => category === '全部' || t.category === category)
-  const active = visible.filter((t) => t.isCompleted === 0)
-  const done = visible.filter((t) => t.isCompleted === 1)
+  const filtered = todos.filter((t) => category === '全部' || t.category === category)
+  const active = filtered.filter((t) => t.isCompleted === 0)
+  const done = filtered.filter((t) => t.isCompleted === 1)
+
+  // Grow the rendered slice when the sentinel scrolls into view.
+  const hasMore = visible < active.length + done.length
+  useEffect(() => {
+    const el = sentinelRef.current
+    if (!el) return
+    const io = new IntersectionObserver((entries) => {
+      if (entries[0]?.isIntersecting) setVisible((v) => v + PAGE)
+    })
+    io.observe(el)
+    return () => io.disconnect()
+  }, [active.length, done.length, hasMore])
 
   const openCreate = () => {
     setEditing(null)
@@ -163,14 +182,17 @@ export default function TodoPage() {
       <ChipRow
         items={categories.map((c) => ({ key: c, label: c }))}
         value={category}
-        onChange={setCategory}
+        onChange={(c) => {
+          setCategory(c)
+          setVisible(PAGE)
+        }}
       />
 
       <div className="page-scroll">
-        {loading && visible.length === 0 ? (
+        {loading && filtered.length === 0 ? (
           <div className="list-loading">加载中…</div>
         ) : (
-          visible.length === 0 && (
+          filtered.length === 0 && (
             <EmptyState
               icon={<IconTodo size={44} />}
               text={query || category !== '全部' ? '没有匹配的待办' : '还没有待办，点击 + 创建'}
@@ -179,7 +201,7 @@ export default function TodoPage() {
         )}
 
         {active.length > 0 && <div className="section-title">进行中 · {active.length}</div>}
-        {active.map((t) => (
+        {active.slice(0, visible).map((t) => (
           <div key={t.id} className="todo-row" onClick={() => openEdit(t)}>
             <button
               type="button"
@@ -217,7 +239,7 @@ export default function TodoPage() {
         ))}
 
         {done.length > 0 && <div className="section-title">已完成 · {done.length}</div>}
-        {done.map((t) => (
+        {done.slice(0, visible).map((t) => (
           <div key={t.id} className="todo-row done" onClick={() => openEdit(t)}>
             <button
               type="button"
@@ -249,6 +271,7 @@ export default function TodoPage() {
             </button>
           </div>
         ))}
+        {hasMore && <div ref={sentinelRef} className="list-sentinel" />}
       </div>
 
       <FAB label="新建待办" onClick={openCreate} />
@@ -311,7 +334,11 @@ export default function TodoPage() {
             />
           </div>
           <div className="form-field">
-            <label className="form-label" htmlFor="todo-reminder" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <label
+              className="form-label"
+              htmlFor="todo-reminder"
+              style={{ display: 'flex', alignItems: 'center', gap: 8 }}
+            >
               <input
                 id="todo-reminder"
                 type="checkbox"

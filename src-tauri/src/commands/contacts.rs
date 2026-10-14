@@ -1,12 +1,9 @@
+use crate::commands::db_err;
 use crate::db::Db;
 use crate::models::Contact;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, Row};
 use tauri::State;
-
-fn db_err(e: rusqlite::Error) -> String {
-    format!("数据库错误: {e}")
-}
 
 fn contact_from_row(r: &Row) -> rusqlite::Result<Contact> {
     Ok(Contact {
@@ -24,6 +21,15 @@ fn contact_from_row(r: &Row) -> rusqlite::Result<Contact> {
 
 const CONTACT_COLS: &str =
     "id, name, phone, email, company, notes, tag, created_at, updated_at";
+
+/// Minimal email check: contains '@' with a non-empty part on both sides and
+/// no whitespace anywhere.
+fn is_valid_email(s: &str) -> bool {
+    let Some(at) = s.find('@') else {
+        return false;
+    };
+    at > 0 && at < s.len() - 1 && !s.chars().any(char::is_whitespace)
+}
 
 /// List contacts optionally filtered by tag and fuzzy-searched by
 /// name / phone / company.
@@ -78,6 +84,11 @@ pub fn create_contact(
     if name.is_empty() {
         return Err("联系人姓名不能为空".into());
     }
+    if let Some(email) = email.as_deref() {
+        if !email.is_empty() && !is_valid_email(email) {
+            return Err("邮箱格式不正确".into());
+        }
+    }
     let tag = tag
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
@@ -112,6 +123,11 @@ pub fn update_contact(
     if name.is_empty() {
         return Err("联系人姓名不能为空".into());
     }
+    if let Some(email) = email.as_deref() {
+        if !email.is_empty() && !is_valid_email(email) {
+            return Err("邮箱格式不正确".into());
+        }
+    }
     let tag = tag
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
@@ -138,4 +154,57 @@ pub fn delete_contact(state: State<Db>, id: i64) -> Result<(), String> {
     conn.execute("DELETE FROM contacts WHERE id = ?1", params![id])
         .map_err(db_err)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn test_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        // Mirrors db::SCHEMA for the contacts table.
+        conn.execute_batch(
+            "CREATE TABLE contacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                phone TEXT,
+                email TEXT,
+                company TEXT,
+                notes TEXT,
+                tag TEXT NOT NULL DEFAULT '默认',
+                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn email_validation_accepts_plain_addresses_and_rejects_others() {
+        for e in ["a@b.com", "user.name+tag@example.cn", "x@y"] {
+            assert!(is_valid_email(e), "{e} should be valid");
+        }
+        for e in ["", "no-at-sign", "@leading", "trailing@", "a b@c.com", "a@b c.com"] {
+            assert!(!is_valid_email(e), "{e} should be invalid");
+        }
+    }
+
+    #[test]
+    fn valid_email_is_insertable_into_contacts() {
+        // The shape create_contact would insert after validation must be
+        // accepted by the contacts schema.
+        assert!(is_valid_email("alice@example.com"));
+        let conn = test_conn();
+        conn.execute(
+            "INSERT INTO contacts (name, email) VALUES (?1, ?2)",
+            params!["爱丽丝", "alice@example.com"],
+        )
+        .unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM contacts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
 }

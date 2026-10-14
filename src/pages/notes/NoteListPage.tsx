@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { save } from '@tauri-apps/plugin-dialog'
-import { api } from '../../api'
+import { api, type NoteSort } from '../../api'
 import { useDebouncedSearch, useLongPress } from '../../hooks'
 import { exportTs, formatRelative, friendlyError } from '../../utils'
 import type { FolderStats, Note } from '../../types'
@@ -13,12 +13,14 @@ import {
   IconMove,
   IconNote,
   IconPin,
+  IconSettings,
   IconTrash,
 } from '../../components/Icons'
 import PageHeader from '../../components/PageHeader'
 import FAB from '../../components/FAB'
 import EmptyState from '../../components/EmptyState'
 import ChipRow from '../../components/ChipRow'
+import SettingsPage from '../settings/SettingsPage'
 
 interface Props {
   version: number
@@ -29,19 +31,32 @@ interface Props {
 /** Tab filter: all notes, unclassified notes, or a specific folder. */
 type FolderFilter = 'all' | 'uncat' | number
 
+/** Items rendered per batch before the sentinel triggers the next one. */
+const PAGE = 50
+
+const SORT_OPTIONS: Array<{ key: NoteSort; label: string }> = [
+  { key: 'updated', label: '更新时间' },
+  { key: 'created', label: '创建时间' },
+  { key: 'title', label: '标题' },
+]
+
 export default function NoteListPage({ version, onOpenNote, onOpenFolders }: Props) {
   const [notes, setNotes] = useState<Note[]>([])
   const [stats, setStats] = useState<FolderStats | null>(null)
   const [filter, setFilter] = useState<FolderFilter>('all')
   const [searchInput, setSearchInput, query] = useDebouncedSearch()
+  const [sort, setSort] = useState<NoteSort>('updated')
   const [selectMode, setSelectMode] = useState(false)
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [moveOpen, setMoveOpen] = useState(false)
   const [deleteConfirm, setDeleteConfirm] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [visible, setVisible] = useState(PAGE)
 
   const scrollRef = useRef<HTMLDivElement>(null)
+  const sentinelRef = useRef<HTMLDivElement>(null)
   const pullStartY = useRef(0)
   const pulling = useRef(false)
   const [pullDist, setPullDist] = useState(0)
@@ -52,6 +67,7 @@ export default function NoteListPage({ version, onOpenNote, onOpenFolders }: Pro
         folderId: typeof filter === 'number' ? filter : undefined,
         unclassified: filter === 'uncat' || undefined,
         search: query || undefined,
+        sort,
       })
       setNotes(list)
       setStats(await api.listFolders())
@@ -61,7 +77,7 @@ export default function NoteListPage({ version, onOpenNote, onOpenFolders }: Pro
     } finally {
       setLoading(false)
     }
-  }, [filter, query])
+  }, [filter, query, sort])
 
   useEffect(() => {
     let cancelled = false
@@ -71,9 +87,11 @@ export default function NoteListPage({ version, onOpenNote, onOpenFolders }: Pro
           folderId: typeof filter === 'number' ? filter : undefined,
           unclassified: filter === 'uncat' || undefined,
           search: query || undefined,
+          sort,
         })
         if (cancelled) return
         setNotes(list)
+        setVisible(PAGE)
         if (cancelled) return
         setStats(await api.listFolders())
       } catch (e) {
@@ -87,7 +105,20 @@ export default function NoteListPage({ version, onOpenNote, onOpenFolders }: Pro
     return () => {
       cancelled = true
     }
-  }, [filter, query, version])
+  }, [filter, query, sort, version])
+
+  // Grow the rendered slice when the sentinel scrolls into view.
+  // Re-runs when the list (re)mounts — e.g. after closing the settings page.
+  const hasMore = visible < notes.length
+  useEffect(() => {
+    const el = sentinelRef.current
+    if (!el) return
+    const io = new IntersectionObserver((entries) => {
+      if (entries[0]?.isIntersecting) setVisible((v) => v + PAGE)
+    })
+    io.observe(el)
+    return () => io.disconnect()
+  }, [notes.length, hasMore, settingsOpen])
 
   const exitSelect = () => {
     setSelectMode(false)
@@ -121,9 +152,7 @@ export default function NoteListPage({ version, onOpenNote, onOpenFolders }: Pro
 
   const selectedIds = useMemo(() => [...selected], [selected])
   const allSelected = notes.length > 0 && selected.size === notes.length
-  const pinnedTarget = !notes
-    .filter((n) => selected.has(n.id))
-    .every((n) => n.isPinned === 1)
+  const pinnedTarget = !notes.filter((n) => selected.has(n.id)).every((n) => n.isPinned === 1)
 
   const handlePin = async () => {
     if (!selected.size) return
@@ -217,19 +246,28 @@ export default function NoteListPage({ version, onOpenNote, onOpenFolders }: Pro
 
   const activeFolderId = typeof filter === 'number' ? filter : null
 
+  if (settingsOpen) {
+    return <SettingsPage onBack={() => setSettingsOpen(false)} />
+  }
+
   return (
     <div className="page">
       <PageHeader
         title="笔记"
-        action={{
-          icon: <IconFolder size={22} />,
-          label: '文件夹管理',
-          onClick: onOpenFolders,
-        }}
+        actions={[
+          {
+            icon: <IconSettings size={22} />,
+            label: '设置',
+            onClick: () => setSettingsOpen(true),
+          },
+          { icon: <IconFolder size={22} />, label: '文件夹管理', onClick: onOpenFolders },
+        ]}
         search={{ placeholder: '搜索笔记标题和内容', value: searchInput, onChange: setSearchInput }}
       />
 
       <ChipRow items={tabs} value={filter} onChange={setFilter} />
+
+      <ChipRow items={SORT_OPTIONS} value={sort} onChange={setSort} />
 
       <div
         className="page-scroll"
@@ -251,29 +289,32 @@ export default function NoteListPage({ version, onOpenNote, onOpenFolders }: Pro
             text={query ? '没有匹配的笔记' : '还没有笔记，点击 + 创建'}
           />
         ) : (
-          notes.map((note) => (
-            <div
-              key={note.id}
-              className={`note-card ${selectMode && selected.has(note.id) ? 'selected' : ''}`}
-              onClick={() => handleCardClick(note)}
-              {...longPressProps}
-            >
-              {selectMode && (
-                <span className="check-dot">
-                  {selected.has(note.id) && <IconCheck size={14} />}
-                </span>
-              )}
-              <div className="note-card-title">
-                {note.isPinned === 1 && <span className="pin-badge">📌</span>}
-                <span className="title-text">{note.title || '无标题'}</span>
+          <>
+            {notes.slice(0, visible).map((note) => (
+              <div
+                key={note.id}
+                className={`note-card ${selectMode && selected.has(note.id) ? 'selected' : ''}`}
+                onClick={() => handleCardClick(note)}
+                {...longPressProps}
+              >
+                {selectMode && (
+                  <span className="check-dot">
+                    {selected.has(note.id) && <IconCheck size={14} />}
+                  </span>
+                )}
+                <div className="note-card-title">
+                  {note.isPinned === 1 && <span className="pin-badge">📌</span>}
+                  <span className="title-text">{note.title || '无标题'}</span>
+                </div>
+                {note.content && <div className="note-card-content">{note.content}</div>}
+                <div className="note-card-meta">
+                  {note.folderName && <span className="chip mini">{note.folderName}</span>}
+                  <span>{formatRelative(note.updatedAt)}</span>
+                </div>
               </div>
-              {note.content && <div className="note-card-content">{note.content}</div>}
-              <div className="note-card-meta">
-                {note.folderName && <span className="chip mini">{note.folderName}</span>}
-                <span>{formatRelative(note.updatedAt)}</span>
-              </div>
-            </div>
-          ))
+            ))}
+            {hasMore && <div ref={sentinelRef} className="list-sentinel" />}
+          </>
         )}
       </div>
 
@@ -285,9 +326,7 @@ export default function NoteListPage({ version, onOpenNote, onOpenFolders }: Pro
           <button
             type="button"
             className="action-bar-btn"
-            onClick={() =>
-              setSelected(allSelected ? new Set() : new Set(notes.map((n) => n.id)))
-            }
+            onClick={() => setSelected(allSelected ? new Set() : new Set(notes.map((n) => n.id)))}
           >
             <IconCheck size={19} />
             {allSelected ? '全不选' : '全选'}

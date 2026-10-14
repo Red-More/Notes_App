@@ -1,12 +1,19 @@
 import { invoke } from '@tauri-apps/api/core'
 import type { Contact, Folder, FolderStats, Note, NoteVersion, Schedule, Todo } from './types'
 
+/** Note list ordering supported by the backend list_notes command. */
+export type NoteSort = 'updated' | 'created' | 'title'
+
 // Typed wrappers around Tauri commands. Tauri converts camelCase
 // JS arguments to snake_case Rust parameters automatically.
 export const api = {
   // ---- Notes ----
-  listNotes: (params: { folderId?: number; unclassified?: boolean; search?: string }) =>
-    invoke<Note[]>('list_notes', params),
+  listNotes: (params: {
+    folderId?: number
+    unclassified?: boolean
+    search?: string
+    sort?: NoteSort
+  }) => invoke<Note[]>('list_notes', params),
   getNote: (id: number) => invoke<Note>('get_note', { id }),
   createNote: (params: { title: string; content: string; folderId: number | null }) =>
     invoke<Note>('create_note', params),

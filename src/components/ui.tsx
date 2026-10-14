@@ -96,34 +96,3 @@ export function ConfirmDialog({
     </div>
   )
 }
-
-interface ActionSheetProps {
-  actions: Array<{ text: string; danger?: boolean; onClick: () => void }>
-  onCancel: () => void
-}
-
-/** Bottom action sheet with a list of options. */
-export function ActionSheet({ actions, onCancel }: ActionSheetProps) {
-  return (
-    <div className="modal-overlay" onClick={onCancel}>
-      <div className="action-sheet" onClick={(e) => e.stopPropagation()}>
-        {actions.map((a) => (
-          <button
-            key={a.text}
-            type="button"
-            className={`action-sheet-item ${a.danger ? 'danger' : ''}`}
-            onClick={() => {
-              onCancel()
-              a.onClick()
-            }}
-          >
-            {a.text}
-          </button>
-        ))}
-        <button type="button" className="action-sheet-cancel" onClick={onCancel}>
-          取消
-        </button>
-      </div>
-    </div>
-  )
-}

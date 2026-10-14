@@ -82,9 +82,7 @@ export default function ContactPage() {
   const tags = [
     '全部',
     ...PRESET_TAGS,
-    ...[...new Set(contacts.map((c) => c.tag))]
-      .filter((t) => !PRESET_TAGS.includes(t))
-      .sort(),
+    ...[...new Set(contacts.map((c) => c.tag))].filter((t) => !PRESET_TAGS.includes(t)).sort(),
   ]
 
   const openCreate = () => {
@@ -154,14 +152,14 @@ export default function ContactPage() {
     <div className="page">
       <PageHeader
         title="人脉"
-        search={{ placeholder: '搜索姓名、电话、公司', value: searchInput, onChange: setSearchInput }}
+        search={{
+          placeholder: '搜索姓名、电话、公司',
+          value: searchInput,
+          onChange: setSearchInput,
+        }}
       />
 
-      <ChipRow
-        items={tags.map((t) => ({ key: t, label: t }))}
-        value={tag}
-        onChange={setTag}
-      />
+      <ChipRow items={tags.map((t) => ({ key: t, label: t }))} value={tag} onChange={setTag} />
 
       <div className="page-scroll">
         {loading && contacts.length === 0 ? (

@@ -1,3 +1,4 @@
+use crate::commands::db_err;
 use crate::db::Db;
 use crate::models::{Note, NoteVersion};
 use rusqlite::types::Value as SqlValue;
@@ -6,10 +7,6 @@ use tauri::State;
 
 const MAX_VERSIONS: i64 = 20;
 const VERSION_INTERVAL_SECONDS: f64 = 30.0;
-
-fn db_err(e: rusqlite::Error) -> String {
-    format!("数据库错误: {e}")
-}
 
 fn note_from_row(r: &Row) -> rusqlite::Result<Note> {
     Ok(Note {
@@ -276,14 +273,16 @@ fn cleanup_versions(conn: &Connection, note_id: i64) -> Result<(), String> {
     Ok(())
 }
 
-/// List notes ordered by pinned first, then last-updated first.
-/// `unclassified = true` filters notes without a folder; otherwise
-/// `folder_id = None` means all folders. Deleted (trash) notes are excluded.
+/// List notes ordered by pinned first, then by the requested `sort` criterion
+/// ("updated" by default, or "created" / "title"). `unclassified = true` filters
+/// notes without a folder; otherwise `folder_id = None` means all folders.
+/// Deleted (trash) notes are excluded.
 fn list_notes_impl(
     conn: &Connection,
     unclassified: Option<bool>,
     folder_id: Option<i64>,
     search: Option<String>,
+    sort: Option<String>,
 ) -> Result<Vec<Note>, String> {
     let mut sql = String::from(
         "SELECT n.id, n.title, n.content, n.folder_id, f.name, n.is_pinned, n.created_at, n.updated_at, n.deleted_at
@@ -306,7 +305,13 @@ fn list_notes_impl(
             args.push(SqlValue::Text(pat));
         }
     }
-    sql.push_str(" ORDER BY n.is_pinned DESC, n.updated_at DESC");
+    // Fixed ORDER BY branches (never interpolated from user input).
+    let order_by = match sort.as_deref() {
+        Some("created") => " ORDER BY n.is_pinned DESC, n.created_at DESC",
+        Some("title") => " ORDER BY n.is_pinned DESC, n.title COLLATE NOCASE ASC, n.updated_at DESC",
+        _ => " ORDER BY n.is_pinned DESC, n.updated_at DESC",
+    };
+    sql.push_str(order_by);
 
     let mut stmt = conn.prepare(&sql).map_err(db_err)?;
     let rows = stmt
@@ -325,9 +330,10 @@ pub fn list_notes(
     unclassified: Option<bool>,
     folder_id: Option<i64>,
     search: Option<String>,
+    sort: Option<String>,
 ) -> Result<Vec<Note>, String> {
     let conn = state.0.lock().unwrap();
-    list_notes_impl(&conn, unclassified, folder_id, search)
+    list_notes_impl(&conn, unclassified, folder_id, search, sort)
 }
 
 /// Fetch a single note by id.
@@ -1023,7 +1029,7 @@ mod tests {
         // Soft delete note 1; it must vanish from the active list but appear
         // in the trash, and the active note 2 must be unaffected.
         soft_delete_notes_impl(&mut conn, &[1]).unwrap();
-        let active = list_notes_impl(&conn, None, None, None).unwrap();
+        let active = list_notes_impl(&conn, None, None, None, None).unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].id, 2);
         let trash = list_deleted_notes_impl(&conn).unwrap();
@@ -1031,12 +1037,12 @@ mod tests {
         assert_eq!(trash[0].id, 1);
         assert!(trash[0].deleted_at.is_some());
         // Active list searches must also skip deleted notes.
-        let hits = list_notes_impl(&conn, None, None, Some("t1".into())).unwrap();
+        let hits = list_notes_impl(&conn, None, None, Some("t1".into()), None).unwrap();
         assert!(hits.is_empty());
 
         // Restore note 1: it is active again and the trash is empty.
         restore_notes_impl(&conn, &[1]).unwrap();
-        let active = list_notes_impl(&conn, None, None, None).unwrap();
+        let active = list_notes_impl(&conn, None, None, None, None).unwrap();
         assert_eq!(active.len(), 2);
         assert!(list_deleted_notes_impl(&conn).unwrap().is_empty());
 
@@ -1097,6 +1103,35 @@ mod tests {
             .unwrap();
         assert_eq!(f1, Some(1));
         assert_eq!(f2, Some(1));
+    }
+
+    #[test]
+    fn list_notes_sort_variants_order_notes() {
+        let conn = test_conn();
+        // Identical content, distinct timestamps/titles.
+        conn.execute_batch(
+            "INSERT INTO notes (id, title, content, created_at, updated_at) VALUES
+             (1, 'apple',  'c', '2024-01-01 10:00:00', '2024-01-03 10:00:00'),
+             (2, 'Banana', 'c', '2024-01-02 10:00:00', '2024-01-01 10:00:00'),
+             (3, 'cherry', 'c', '2024-01-03 10:00:00', '2024-01-02 10:00:00');",
+        )
+        .unwrap();
+        let ids = |sort: Option<&str>| -> Vec<i64> {
+            list_notes_impl(&conn, None, None, None, sort.map(String::from))
+                .unwrap()
+                .into_iter()
+                .map(|n| n.id)
+                .collect()
+        };
+        // "updated" (and the default) sort by updated_at DESC: 1, 3, 2.
+        assert_eq!(ids(Some("updated")), vec![1, 3, 2]);
+        assert_eq!(ids(None), vec![1, 3, 2]);
+        // "created" sorts by created_at DESC: 3, 2, 1.
+        assert_eq!(ids(Some("created")), vec![3, 2, 1]);
+        // "title" sorts case-insensitively by title ASC: apple, Banana, cherry.
+        assert_eq!(ids(Some("title")), vec![1, 2, 3]);
+        // Unknown values fall back to the default ordering.
+        assert_eq!(ids(Some("bogus")), vec![1, 3, 2]);
     }
 }
 

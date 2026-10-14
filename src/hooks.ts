@@ -50,10 +50,7 @@ export function useLongPress(callback: () => void, ms = 500) {
     onPointerCancel: cancel,
     onPointerMove: (e: React.PointerEvent) => {
       // Cancel once the pointer drifts beyond a small slop radius.
-      if (
-        Math.abs(e.clientX - pos.current.x) > 10 ||
-        Math.abs(e.clientY - pos.current.y) > 10
-      ) {
+      if (Math.abs(e.clientX - pos.current.x) > 10 || Math.abs(e.clientY - pos.current.y) > 10) {
         cancel()
       }
     },

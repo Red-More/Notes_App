@@ -83,10 +83,7 @@ export default function SchedulePage() {
     )
   }, [viewMonth])
 
-  const datesWithSchedules = useMemo(
-    () => new Set(schedules.map((s) => s.date)),
-    [schedules],
-  )
+  const datesWithSchedules = useMemo(() => new Set(schedules.map((s) => s.date)), [schedules])
   const today = dateStr(new Date())
   const daySchedules = schedules
     .filter(
@@ -185,7 +182,12 @@ export default function SchedulePage() {
 
       <div style={{ padding: '0 14px' }}>
         <div className="cal-header">
-          <button type="button" className="icon-btn" onClick={() => changeMonth(-1)} aria-label="上个月">
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => changeMonth(-1)}
+            aria-label="上个月"
+          >
             <IconChevronLeft size={20} />
           </button>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -194,7 +196,12 @@ export default function SchedulePage() {
               今天
             </button>
           </div>
-          <button type="button" className="icon-btn" onClick={() => changeMonth(1)} aria-label="下个月">
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => changeMonth(1)}
+            aria-label="下个月"
+          >
             <IconChevronRight size={20} />
           </button>
         </div>

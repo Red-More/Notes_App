@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { ToastHost } from './components/ui'
 import ReminderScheduler from './components/ReminderScheduler'
 import { IconCalendar, IconNote, IconTodo, IconUsers } from './components/Icons'
+import { applyTheme, getStoredTheme } from './theme'
 import NoteListPage from './pages/notes/NoteListPage'
 import NoteEditorPage from './pages/notes/NoteEditorPage'
 import FolderManagePage from './pages/notes/FolderManagePage'
@@ -12,8 +13,7 @@ import ContactPage from './pages/contacts/ContactPage'
 type Tab = 'notes' | 'todos' | 'schedules' | 'contacts'
 
 type Overlay =
-  | { kind: 'editor'; noteId: number | null; folderId: number | null }
-  | { kind: 'folders' }
+  { kind: 'editor'; noteId: number | null; folderId: number | null } | { kind: 'folders' }
 
 const TABS: Array<{ key: Tab; label: string; icon: typeof IconNote }> = [
   { key: 'notes', label: '笔记', icon: IconNote },
@@ -27,6 +27,11 @@ function App() {
   const [overlay, setOverlay] = useState<Overlay | null>(null)
   // Bumped when the editor / folder pages close so lists reload.
   const [dataVersion, setDataVersion] = useState(0)
+
+  // Apply the persisted theme once on mount.
+  useEffect(() => {
+    applyTheme(getStoredTheme())
+  }, [])
 
   const closeOverlay = () => {
     setOverlay(null)
