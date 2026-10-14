@@ -1,11 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { IconClose } from './Icons'
 
-/** Show a transient toast message from anywhere. */
-export function toast(msg: string) {
-  window.dispatchEvent(new CustomEvent('app-toast', { detail: msg }))
-}
-
 /** Global toast renderer; mount once in App. */
 export function ToastHost() {
   const [msg, setMsg] = useState<string | null>(null)

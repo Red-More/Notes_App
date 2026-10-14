@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '../../api'
 import { useDebouncedSearch } from '../../hooks'
-import { dateStr, monthStr, shortTime } from '../../utils'
+import { dateStr, monthStr, shortTime, friendlyError } from '../../utils'
 import type { Schedule } from '../../types'
-import { ConfirmDialog, Modal, toast } from '../../components/ui'
+import { ConfirmDialog, Modal } from '../../components/ui'
+import { toast } from '../../toast'
 import { IconBell, IconCalendar, IconChevronLeft, IconChevronRight } from '../../components/Icons'
 import PageHeader from '../../components/PageHeader'
 import FAB from '../../components/FAB'
@@ -29,18 +30,37 @@ export default function SchedulePage() {
   const [editing, setEditing] = useState<Schedule | null>(null)
   const [form, setForm] = useState<ScheduleForm | null>(null)
   const [deleteConfirm, setDeleteConfirm] = useState<Schedule | null>(null)
+  const [loading, setLoading] = useState(true)
 
   const load = useCallback(async () => {
     try {
       setSchedules(await api.listSchedules(monthStr(viewMonth)))
     } catch (e) {
       console.error('加载日程失败', e)
+      toast(friendlyError(e))
+    } finally {
+      setLoading(false)
     }
   }, [viewMonth])
 
   useEffect(() => {
-    void load()
-  }, [load])
+    let cancelled = false
+    const run = async () => {
+      try {
+        const list = await api.listSchedules(monthStr(viewMonth))
+        if (!cancelled) setSchedules(list)
+      } catch (e) {
+        console.error('加载日程失败', e)
+        if (!cancelled) toast(friendlyError(e))
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    void run()
+    return () => {
+      cancelled = true
+    }
+  }, [viewMonth])
 
   const changeMonth = (delta: number) => {
     setViewMonth((d) => new Date(d.getFullYear(), d.getMonth() + delta, 1))
@@ -135,7 +155,8 @@ export default function SchedulePage() {
       }
       await load()
     } catch (e) {
-      toast(String(e))
+      console.error(e)
+      toast(friendlyError(e))
     }
   }
 
@@ -149,7 +170,7 @@ export default function SchedulePage() {
       await load()
     } catch (e) {
       console.error(e)
-      toast('删除失败')
+      toast(friendlyError(e))
     }
   }
 
@@ -207,7 +228,9 @@ export default function SchedulePage() {
           {selectedDate === today ? '今天' : selectedDate.slice(5).replace('-', '月')} ·{' '}
           {daySchedules.length} 个日程
         </div>
-        {daySchedules.length === 0 ? (
+        {loading && daySchedules.length === 0 ? (
+          <div className="list-loading">加载中…</div>
+        ) : daySchedules.length === 0 ? (
           <EmptyState
             icon={<IconCalendar size={44} />}
             text={query ? '没有匹配的日程' : '当日暂无日程，点击 + 添加'}

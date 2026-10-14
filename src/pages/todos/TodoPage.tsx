@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../../api'
 import { useDebouncedSearch } from '../../hooks'
-import { parseDbTime } from '../../utils'
+import { parseDbTime, friendlyError } from '../../utils'
 import type { Todo } from '../../types'
-import { ConfirmDialog, Modal, toast } from '../../components/ui'
+import { ConfirmDialog, Modal } from '../../components/ui'
+import { toast } from '../../toast'
 import { IconBell, IconCheck, IconTodo, IconTrash } from '../../components/Icons'
 import PageHeader from '../../components/PageHeader'
 import FAB from '../../components/FAB'
@@ -40,18 +41,37 @@ export default function TodoPage() {
   const [editing, setEditing] = useState<Todo | null>(null)
   const [form, setForm] = useState<TodoForm>(EMPTY_FORM)
   const [deleteConfirm, setDeleteConfirm] = useState<Todo | null>(null)
+  const [loading, setLoading] = useState(true)
 
   const load = useCallback(async () => {
     try {
       setTodos(await api.listTodos(query || undefined))
     } catch (e) {
       console.error('加载待办失败', e)
+      toast(friendlyError(e))
+    } finally {
+      setLoading(false)
     }
   }, [query])
 
   useEffect(() => {
-    void load()
-  }, [load])
+    let cancelled = false
+    const run = async () => {
+      try {
+        const todos = await api.listTodos(query || undefined)
+        if (!cancelled) setTodos(todos)
+      } catch (e) {
+        console.error('加载待办失败', e)
+        if (!cancelled) toast(friendlyError(e))
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    void run()
+    return () => {
+      cancelled = true
+    }
+  }, [query])
 
   const categories = [
     '全部',
@@ -104,7 +124,8 @@ export default function TodoPage() {
       toast(editing ? '已保存' : '待办已创建')
       await load()
     } catch (e) {
-      toast(String(e))
+      console.error(e)
+      toast(friendlyError(e))
     }
   }
 
@@ -114,7 +135,7 @@ export default function TodoPage() {
       await load()
     } catch (e) {
       console.error(e)
-      toast('操作失败')
+      toast(friendlyError(e))
     }
   }
 
@@ -128,7 +149,7 @@ export default function TodoPage() {
       await load()
     } catch (e) {
       console.error(e)
-      toast('删除失败')
+      toast(friendlyError(e))
     }
   }
 
@@ -146,11 +167,15 @@ export default function TodoPage() {
       />
 
       <div className="page-scroll">
-        {visible.length === 0 && (
-          <EmptyState
-            icon={<IconTodo size={44} />}
-            text={query || category !== '全部' ? '没有匹配的待办' : '还没有待办，点击 + 创建'}
-          />
+        {loading && visible.length === 0 ? (
+          <div className="list-loading">加载中…</div>
+        ) : (
+          visible.length === 0 && (
+            <EmptyState
+              icon={<IconTodo size={44} />}
+              text={query || category !== '全部' ? '没有匹配的待办' : '还没有待办，点击 + 创建'}
+            />
+          )
         )}
 
         {active.length > 0 && <div className="section-title">进行中 · {active.length}</div>}

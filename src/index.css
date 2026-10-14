@@ -1168,6 +1168,13 @@ textarea {
 }
 
 /* ============ Misc ============ */
+.list-loading {
+  text-align: center;
+  color: var(--text-3);
+  padding: 40px 20px;
+  font-size: 14px;
+}
+
 .empty-state {
   text-align: center;
   color: var(--text-3);

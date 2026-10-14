@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../../api'
 import { useDebouncedSearch } from '../../hooks'
+import { friendlyError } from '../../utils'
 import type { Contact } from '../../types'
-import { ConfirmDialog, Modal, toast } from '../../components/ui'
+import { ConfirmDialog, Modal } from '../../components/ui'
+import { toast } from '../../toast'
 import { IconUsers } from '../../components/Icons'
 import PageHeader from '../../components/PageHeader'
 import FAB from '../../components/FAB'
@@ -37,6 +39,7 @@ export default function ContactPage() {
   const [editing, setEditing] = useState<Contact | null>(null)
   const [form, setForm] = useState<ContactForm>(EMPTY_FORM)
   const [deleteConfirm, setDeleteConfirm] = useState<Contact | null>(null)
+  const [loading, setLoading] = useState(true)
 
   const load = useCallback(async () => {
     try {
@@ -48,12 +51,33 @@ export default function ContactPage() {
       )
     } catch (e) {
       console.error('加载联系人失败', e)
+      toast(friendlyError(e))
+    } finally {
+      setLoading(false)
     }
   }, [tag, query])
 
   useEffect(() => {
-    void load()
-  }, [load])
+    let cancelled = false
+    const run = async () => {
+      try {
+        const list = await api.listContacts({
+          tag: tag === '全部' ? undefined : tag,
+          search: query || undefined,
+        })
+        if (!cancelled) setContacts(list)
+      } catch (e) {
+        console.error('加载联系人失败', e)
+        if (!cancelled) toast(friendlyError(e))
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    void run()
+    return () => {
+      cancelled = true
+    }
+  }, [tag, query])
 
   const tags = [
     '全部',
@@ -107,7 +131,8 @@ export default function ContactPage() {
       toast(editing ? '已保存' : '联系人已创建')
       await load()
     } catch (e) {
-      toast(String(e))
+      console.error(e)
+      toast(friendlyError(e))
     }
   }
 
@@ -121,7 +146,7 @@ export default function ContactPage() {
       await load()
     } catch (e) {
       console.error(e)
-      toast('删除失败')
+      toast(friendlyError(e))
     }
   }
 
@@ -139,7 +164,9 @@ export default function ContactPage() {
       />
 
       <div className="page-scroll">
-        {contacts.length === 0 ? (
+        {loading && contacts.length === 0 ? (
+          <div className="list-loading">加载中…</div>
+        ) : contacts.length === 0 ? (
           <EmptyState
             icon={<IconUsers size={44} />}
             text={query || tag !== '全部' ? '没有匹配的联系人' : '还没有联系人，点击 + 添加'}
