@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { save } from '@tauri-apps/plugin-dialog'
-import { api, type NoteSort } from '../../api'
+import { api } from '../../api'
 import { useDebouncedSearch, useLongPress } from '../../hooks'
 import { exportTs, formatRelative, friendlyError } from '../../utils'
 import type { FolderStats, Note } from '../../types'
@@ -14,6 +14,7 @@ import {
   IconNote,
   IconPin,
   IconSettings,
+  IconSort,
   IconTrash,
 } from '../../components/Icons'
 import PageHeader from '../../components/PageHeader'
@@ -34,18 +35,33 @@ type FolderFilter = 'all' | 'uncat' | number
 /** Items rendered per batch before the sentinel triggers the next one. */
 const PAGE = 50
 
-const SORT_OPTIONS: Array<{ key: NoteSort; label: string }> = [
+/** Sort dimensions offered in the sort popover. */
+type SortKey = 'updated' | 'created' | 'title' | 'size'
+type SortDir = 'asc' | 'desc'
+
+const SORT_DIMENSIONS: Array<{ key: SortKey; label: string }> = [
   { key: 'updated', label: '更新时间' },
   { key: 'created', label: '创建时间' },
-  { key: 'title', label: '标题' },
+  { key: 'title', label: '名称' },
+  { key: 'size', label: '大小' },
 ]
+
+/** Default direction per dimension, preserving the previous backend order. */
+const SORT_DIR_DEFAULT: Record<SortKey, SortDir> = {
+  updated: 'desc',
+  created: 'desc',
+  title: 'asc',
+  size: 'desc',
+}
 
 export default function NoteListPage({ version, onOpenNote, onOpenFolders }: Props) {
   const [notes, setNotes] = useState<Note[]>([])
   const [stats, setStats] = useState<FolderStats | null>(null)
   const [filter, setFilter] = useState<FolderFilter>('all')
   const [searchInput, setSearchInput, query] = useDebouncedSearch()
-  const [sort, setSort] = useState<NoteSort>('updated')
+  const [sortKey, setSortKey] = useState<SortKey>('updated')
+  const [sortDir, setSortDir] = useState<SortDir>('desc')
+  const [sortOpen, setSortOpen] = useState(false)
   const [selectMode, setSelectMode] = useState(false)
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [moveOpen, setMoveOpen] = useState(false)
@@ -57,9 +73,9 @@ export default function NoteListPage({ version, onOpenNote, onOpenFolders }: Pro
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const sentinelRef = useRef<HTMLDivElement>(null)
-  const pullStartY = useRef(0)
-  const pulling = useRef(false)
+  // Elastic overscroll: current downward offset and whether it is springing back.
   const [pullDist, setPullDist] = useState(0)
+  const [springing, setSpringing] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -67,7 +83,6 @@ export default function NoteListPage({ version, onOpenNote, onOpenFolders }: Pro
         folderId: typeof filter === 'number' ? filter : undefined,
         unclassified: filter === 'uncat' || undefined,
         search: query || undefined,
-        sort,
       })
       setNotes(list)
       setStats(await api.listFolders())
@@ -77,7 +92,7 @@ export default function NoteListPage({ version, onOpenNote, onOpenFolders }: Pro
     } finally {
       setLoading(false)
     }
-  }, [filter, query, sort])
+  }, [filter, query])
 
   useEffect(() => {
     let cancelled = false
@@ -87,7 +102,6 @@ export default function NoteListPage({ version, onOpenNote, onOpenFolders }: Pro
           folderId: typeof filter === 'number' ? filter : undefined,
           unclassified: filter === 'uncat' || undefined,
           search: query || undefined,
-          sort,
         })
         if (cancelled) return
         setNotes(list)
@@ -105,7 +119,32 @@ export default function NoteListPage({ version, onOpenNote, onOpenFolders }: Pro
     return () => {
       cancelled = true
     }
-  }, [filter, query, sort, version])
+  }, [filter, query, version])
+
+  // Re-sort the current (already filtered/searched) result set on the client:
+  // pinned notes stay on top, then the chosen dimension and direction apply.
+  const sortedNotes = useMemo(() => {
+    const arr = [...notes]
+    arr.sort((a, b) => {
+      if (a.isPinned !== b.isPinned) return b.isPinned - a.isPinned
+      let cmp = 0
+      switch (sortKey) {
+        case 'title':
+          cmp = a.title.localeCompare(b.title, undefined, { sensitivity: 'base' })
+          break
+        case 'created':
+          cmp = a.createdAt.localeCompare(b.createdAt)
+          break
+        case 'size':
+          cmp = a.content.length - b.content.length
+          break
+        default:
+          cmp = a.updatedAt.localeCompare(b.updatedAt)
+      }
+      return sortDir === 'asc' ? cmp : -cmp
+    })
+    return arr
+  }, [notes, sortKey, sortDir])
 
   // Grow the rendered slice when the sentinel scrolls into view.
   // Re-runs when the list (re)mounts — e.g. after closing the settings page.
@@ -210,29 +249,82 @@ export default function NoteListPage({ version, onOpenNote, onOpenFolders }: Pro
     }
   }
 
-  // ---- Pull to refresh ----
-  const onTouchStart = (e: React.TouchEvent) => {
-    if ((scrollRef.current?.scrollTop ?? 1) <= 0) {
-      pullStartY.current = e.touches[0].clientY
-      pulling.current = true
+  // ---- Elastic overscroll (pull down past the top edge) ----
+  // Native listeners with a non-passive touchmove so the default scroll can be
+  // suppressed while the finger drags the content below scrollTop 0. On release
+  // the offset springs back to 0; beyond the threshold it also refreshes.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    let startY = 0
+    let active = false
+    let dist = 0
+    let springTimer: ReturnType<typeof setTimeout> | undefined
+
+    const springBack = () => {
+      setSpringing(true)
+      // Two frames later the transition class is committed; only then drop the offset.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => setPullDist(0))
+      })
+      clearTimeout(springTimer)
+      springTimer = setTimeout(() => setSpringing(false), 450)
     }
+
+    const onTouchStart = (e: TouchEvent) => {
+      if (el.scrollTop <= 0) {
+        startY = e.touches[0].clientY
+        active = true
+      } else {
+        active = false
+      }
+    }
+    const onTouchMove = (e: TouchEvent) => {
+      if (!active) return
+      const dy = e.touches[0].clientY - startY
+      if (dy > 0 && el.scrollTop <= 0) {
+        e.preventDefault()
+        dist = Math.min(dy * 0.45, 90)
+        setPullDist(dist)
+      } else if (dy < 0) {
+        active = false
+      }
+    }
+    const onTouchEnd = () => {
+      const shouldRefresh = active && dist > 45
+      const hadPull = dist > 0
+      active = false
+      dist = 0
+      if (hadPull) springBack()
+      if (shouldRefresh) {
+        setRefreshing(true)
+        void load().finally(() => setRefreshing(false))
+      }
+    }
+
+    el.addEventListener('touchstart', onTouchStart, { passive: true })
+    el.addEventListener('touchmove', onTouchMove, { passive: false })
+    el.addEventListener('touchend', onTouchEnd)
+    el.addEventListener('touchcancel', onTouchEnd)
+    return () => {
+      clearTimeout(springTimer)
+      el.removeEventListener('touchstart', onTouchStart)
+      el.removeEventListener('touchmove', onTouchMove)
+      el.removeEventListener('touchend', onTouchEnd)
+      el.removeEventListener('touchcancel', onTouchEnd)
+    }
+    // Re-bind after the settings page unmounts/remounts the scroll container.
+  }, [load, settingsOpen])
+
+  // ---- Sort popover ----
+  const selectSortKey = (key: SortKey) => {
+    setSortKey(key)
+    setSortDir(SORT_DIR_DEFAULT[key])
+    setSortOpen(false)
   }
-  const onTouchMove = (e: React.TouchEvent) => {
-    if (!pulling.current) return
-    const dy = e.touches[0].clientY - pullStartY.current
-    if (dy > 0 && (scrollRef.current?.scrollTop ?? 1) <= 0) {
-      setPullDist(Math.min(dy * 0.4, 64))
-    }
-  }
-  const onTouchEnd = async () => {
-    if (!pulling.current) return
-    pulling.current = false
-    if (pullDist > 45) {
-      setRefreshing(true)
-      await load()
-      setRefreshing(false)
-    }
-    setPullDist(0)
+  const selectSortDir = (dir: SortDir) => {
+    setSortDir(dir)
+    setSortOpen(false)
   }
 
   const tabs: Array<{ key: FolderFilter; label: string }> = [
@@ -252,70 +344,121 @@ export default function NoteListPage({ version, onOpenNote, onOpenFolders }: Pro
 
   return (
     <div className="page">
-      <PageHeader
-        title="笔记"
-        actions={[
-          {
-            icon: <IconSettings size={22} />,
-            label: '设置',
-            onClick: () => setSettingsOpen(true),
-          },
-          { icon: <IconFolder size={22} />, label: '文件夹管理', onClick: onOpenFolders },
-        ]}
-        search={{ placeholder: '搜索笔记标题和内容', value: searchInput, onChange: setSearchInput }}
-      />
+      <div className="note-header-wrap">
+        <PageHeader
+          title="笔记"
+          actions={[
+            {
+              icon: <IconSettings size={22} />,
+              label: '设置',
+              onClick: () => setSettingsOpen(true),
+            },
+            { icon: <IconFolder size={22} />, label: '文件夹管理', onClick: onOpenFolders },
+          ]}
+          search={{
+            placeholder: '搜索笔记标题和内容',
+            value: searchInput,
+            onChange: setSearchInput,
+            action: (
+              <button
+                type="button"
+                className={`icon-btn sort-trigger ${sortKey !== 'updated' || sortDir !== 'desc' ? 'active' : ''}`}
+                onClick={() => setSortOpen((o) => !o)}
+                aria-label="排序"
+                aria-expanded={sortOpen}
+              >
+                <IconSort size={18} />
+              </button>
+            ),
+          }}
+        />
+        {sortOpen && (
+          <>
+            <div className="popover-backdrop" onClick={() => setSortOpen(false)} />
+            <div className="sort-popover">
+              <div className="sort-popover-title">排序方式</div>
+              {SORT_DIMENSIONS.map((d) => (
+                <button
+                  key={d.key}
+                  type="button"
+                  className={`sort-option ${sortKey === d.key ? 'active' : ''}`}
+                  onClick={() => selectSortKey(d.key)}
+                >
+                  {d.label}
+                  {sortKey === d.key && <IconCheck size={16} />}
+                </button>
+              ))}
+              <div className="sort-popover-divider" />
+              <div className="sort-popover-title">排序方向</div>
+              <button
+                type="button"
+                className={`sort-option ${sortDir === 'asc' ? 'active' : ''}`}
+                onClick={() => selectSortDir('asc')}
+              >
+                升序（A-Z / 旧 → 新）
+                {sortDir === 'asc' && <IconCheck size={16} />}
+              </button>
+              <button
+                type="button"
+                className={`sort-option ${sortDir === 'desc' ? 'active' : ''}`}
+                onClick={() => selectSortDir('desc')}
+              >
+                降序（Z-A / 新 → 旧）
+                {sortDir === 'desc' && <IconCheck size={16} />}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
 
       <ChipRow items={tabs} value={filter} onChange={setFilter} />
 
-      <ChipRow items={SORT_OPTIONS} value={sort} onChange={setSort} />
-
-      <div
-        className="page-scroll"
-        ref={scrollRef}
-        onTouchStart={onTouchStart}
-        onTouchMove={onTouchMove}
-        onTouchEnd={onTouchEnd}
-      >
+      <div className="page-scroll" ref={scrollRef}>
         {(pullDist > 0 || refreshing) && (
           <div className="pull-indicator">
             {refreshing ? '正在刷新…' : pullDist > 45 ? '释放刷新' : '下拉刷新'}
           </div>
         )}
-        {loading && notes.length === 0 ? (
-          <div className="list-loading">加载中…</div>
-        ) : notes.length === 0 ? (
-          <EmptyState
-            icon={<IconNote size={44} />}
-            text={query ? '没有匹配的笔记' : '还没有笔记，点击 + 创建'}
-          />
-        ) : (
-          <>
-            {notes.slice(0, visible).map((note) => (
-              <div
-                key={note.id}
-                className={`note-card ${selectMode && selected.has(note.id) ? 'selected' : ''}`}
-                onClick={() => handleCardClick(note)}
-                {...longPressProps}
-              >
-                {selectMode && (
-                  <span className="check-dot">
-                    {selected.has(note.id) && <IconCheck size={14} />}
-                  </span>
-                )}
-                <div className="note-card-title">
-                  {note.isPinned === 1 && <span className="pin-badge">📌</span>}
-                  <span className="title-text">{note.title || '无标题'}</span>
+        <div
+          className={`scroll-content ${springing ? 'springing' : ''}`}
+          style={{ transform: pullDist > 0 ? `translateY(${pullDist}px)` : undefined }}
+        >
+          {loading && notes.length === 0 ? (
+            <div className="list-loading">加载中…</div>
+          ) : notes.length === 0 ? (
+            <EmptyState
+              icon={<IconNote size={44} />}
+              text={query ? '没有匹配的笔记' : '还没有笔记，点击 + 创建'}
+            />
+          ) : (
+            <>
+              {sortedNotes.slice(0, visible).map((note) => (
+                <div
+                  key={note.id}
+                  className={`note-card ${selectMode && selected.has(note.id) ? 'selected' : ''}`}
+                  onClick={() => handleCardClick(note)}
+                  {...longPressProps}
+                >
+                  {selectMode && (
+                    <span className="check-dot">
+                      {selected.has(note.id) && <IconCheck size={14} />}
+                    </span>
+                  )}
+                  <div className="note-card-title">
+                    {note.isPinned === 1 && <span className="pin-badge">📌</span>}
+                    <span className="title-text">{note.title || '无标题'}</span>
+                  </div>
+                  {note.content && <div className="note-card-content">{note.content}</div>}
+                  <div className="note-card-meta">
+                    {note.folderName && <span className="chip mini">{note.folderName}</span>}
+                    <span>{formatRelative(note.updatedAt)}</span>
+                  </div>
                 </div>
-                {note.content && <div className="note-card-content">{note.content}</div>}
-                <div className="note-card-meta">
-                  {note.folderName && <span className="chip mini">{note.folderName}</span>}
-                  <span>{formatRelative(note.updatedAt)}</span>
-                </div>
-              </div>
-            ))}
-            {hasMore && <div ref={sentinelRef} className="list-sentinel" />}
-          </>
-        )}
+              ))}
+              {hasMore && <div ref={sentinelRef} className="list-sentinel" />}
+            </>
+          )}
+        </div>
       </div>
 
       <FAB label="新建笔记" onClick={() => onOpenNote(null, activeFolderId)} />

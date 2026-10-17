@@ -12,7 +12,13 @@ interface PageHeaderProps {
   action?: PageHeaderAction
   /** Multiple right-side actions; when provided, `action` is ignored. */
   actions?: PageHeaderAction[]
-  search?: { placeholder: string; value: string; onChange: (v: string) => void }
+  search?: {
+    placeholder: string
+    value: string
+    onChange: (v: string) => void
+    /** Optional trailing element inside the search bar (e.g. a sort trigger). */
+    action?: ReactNode
+  }
 }
 
 /** Shared page header: title row + optional right actions + optional search bar. */
@@ -46,6 +52,7 @@ export default function PageHeader({ title, action, actions, search }: PageHeade
             onChange={(e) => search.onChange(e.target.value)}
             placeholder={search.placeholder}
           />
+          {search.action}
         </div>
       )}
     </div>

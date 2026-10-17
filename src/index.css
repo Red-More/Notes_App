@@ -133,6 +133,16 @@ textarea {
   display: none;
 }
 
+/* Content wrapper translated by the elastic overscroll offset. */
+.scroll-content {
+  will-change: transform;
+}
+
+.scroll-content.springing {
+  /* Slight overshoot (1.2) gives the spring-like snap-back feel. */
+  transition: transform 0.38s cubic-bezier(0.22, 1.2, 0.36, 1);
+}
+
 .tabbar {
   position: absolute;
   bottom: var(--nav-clearance);
@@ -219,6 +229,93 @@ textarea {
 
 .search-bar input::placeholder {
   color: var(--text-3);
+}
+
+/* ============ Sort toolbar (search bar + sort popover) ============ */
+.note-header-wrap {
+  position: relative;
+  z-index: 45;
+}
+
+.sort-trigger {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  color: var(--text-2);
+  flex-shrink: 0;
+}
+
+.sort-trigger.active {
+  color: var(--accent);
+}
+
+.popover-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+}
+
+.sort-popover {
+  position: absolute;
+  top: calc(100% - 2px);
+  right: 16px;
+  z-index: 60;
+  min-width: 210px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 8px 30px rgba(20, 22, 28, 0.12);
+  padding: 6px;
+  animation: pop-in 0.15s ease;
+}
+
+.sort-popover-title {
+  font-size: 12px;
+  color: var(--text-3);
+  padding: 8px 12px 4px;
+}
+
+.sort-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 14px;
+  text-align: left;
+  color: var(--text);
+}
+
+.sort-option:active {
+  background: var(--surface-2);
+}
+
+.sort-option.active {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.sort-option svg {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.sort-popover-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 6px 4px;
+}
+
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 /* ============ Chips / tabs ============ */
@@ -1291,6 +1388,10 @@ textarea {
 @media (prefers-reduced-motion: reduce) {
   .page {
     animation: none;
+  }
+
+  .scroll-content.springing {
+    transition: none;
   }
 }
 
