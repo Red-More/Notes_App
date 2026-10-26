@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import type { ReactNode, Ref } from 'react'
 import { IconSearch } from './Icons'
 
 export interface PageHeaderAction {
@@ -12,6 +12,8 @@ interface PageHeaderProps {
   action?: PageHeaderAction
   /** Multiple right-side actions; when provided, `action` is ignored. */
   actions?: PageHeaderAction[]
+  /** Ref to the collapse wrapper around the search bar, for scroll-collapsing headers. */
+  searchWrapRef?: Ref<HTMLDivElement>
   search?: {
     placeholder: string
     value: string
@@ -22,7 +24,7 @@ interface PageHeaderProps {
 }
 
 /** Shared page header: title row + optional right actions + optional search bar. */
-export default function PageHeader({ title, action, actions, search }: PageHeaderProps) {
+export default function PageHeader({ title, action, actions, search, searchWrapRef }: PageHeaderProps) {
   const headerActions = actions ?? (action ? [action] : [])
   return (
     <div className="page-header">
@@ -45,14 +47,16 @@ export default function PageHeader({ title, action, actions, search }: PageHeade
         )}
       </div>
       {search && (
-        <div className="search-bar">
-          <IconSearch size={17} />
-          <input
-            value={search.value}
-            onChange={(e) => search.onChange(e.target.value)}
-            placeholder={search.placeholder}
-          />
-          {search.action}
+        <div className="search-collapse" ref={searchWrapRef}>
+          <div className="search-bar">
+            <IconSearch size={17} />
+            <input
+              value={search.value}
+              onChange={(e) => search.onChange(e.target.value)}
+              placeholder={search.placeholder}
+            />
+            {search.action}
+          </div>
         </div>
       )}
     </div>

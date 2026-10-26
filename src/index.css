@@ -19,6 +19,10 @@
   --shadow: 0 2px 12px rgba(20, 22, 28, 0.06);
   --radius: 14px;
   --radius-sm: 10px;
+  /* Search bar height and the extra scroll range a short list needs so the
+     scroll-linked collapse can still reach zero (see .scroll-content below). */
+  --search-bar-height: 46px;
+  --search-collapse-travel: 92px;
   /* ===== Mobile safe-area adaptation spec =====
    * --safe-top / --safe-bottom : OS-reported insets (0 when the OS reports none).
    * --tabbar-offset            : fixed lift so bottom bars clear the gesture area
@@ -104,11 +108,43 @@ textarea {
   min-height: 0;
 }
 
-.app-body {
+/* ============ Horizontal pager ============ */
+.pager-body {
   flex: 1;
   min-height: 0;
+  position: relative;
+  overflow: hidden;
+  outline: none;
+}
+
+.pager-track {
   display: flex;
-  flex-direction: column;
+  height: 100%;
+  will-change: transform;
+}
+
+.pager-page {
+  flex: 0 0 100%;
+  height: 100%;
+  min-width: 0;
+  display: flex;
+  /* Anchors absolutely-positioned children (FAB, action bar, modals) to each
+     page instead of the shared pager container, so the four pages never
+     overlap their floating buttons. */
+  position: relative;
+}
+
+.pager-page .page {
+  height: 100%;
+}
+
+/* Children of a pager page (the four list pages and the settings page) must
+   fill the page width. Without `flex: 1`/`min-width: 0` a page whose root is
+   content-sized (e.g. .editor-page in Settings) would shrink with its content
+   instead of spanning the container. */
+.pager-page > * {
+  flex: 1;
+  min-width: 0;
 }
 
 .page {
@@ -124,6 +160,8 @@ textarea {
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
+  /* Anchors the floating pull indicator without adding layout height. */
+  position: relative;
   /* tabbar height + breathing room + bottom clearance. */
   padding: 4px 14px calc(var(--tabbar-height) + 32px + var(--nav-clearance));
   scrollbar-width: none;
@@ -136,6 +174,15 @@ textarea {
 /* Content wrapper translated by the elastic overscroll offset. */
 .scroll-content {
   will-change: transform;
+}
+
+/* A short list must still be able to scroll the search bar away. Collapsing
+   the header grows the scroll viewport, so reaching a fully collapsed bar
+   needs twice the bar height of scroll range (46px to collapse + 46px that
+   the growing viewport would otherwise swallow); without this the browser
+   clamps scrollTop and the bar snaps back open. */
+.page-scroll > .scroll-content {
+  min-height: calc(100% + var(--search-collapse-travel));
 }
 
 .scroll-content.springing {
@@ -207,6 +254,13 @@ textarea {
   gap: 4px;
 }
 
+/* Collapse viewport for the scroll-linked search bar. It has no padding,
+   border or background, so `height: 0` truly removes the row; collapsing the
+   bar itself would stop at its 18px vertical padding + 2px border. */
+.search-collapse {
+  overflow: hidden;
+}
+
 .search-bar {
   display: flex;
   align-items: center;
@@ -216,6 +270,13 @@ textarea {
   border-radius: 12px;
   padding: 9px 12px;
   color: var(--text-3);
+  /* Fixed height so trailing action buttons never stretch the bar and every
+     page's search bar stays visually identical (46px incl. padding/border). */
+  height: var(--search-bar-height);
+  box-sizing: border-box;
+  /* Keeps the row content inside the rounded pill; the collapse wrapper above
+     does the scroll-linked clipping. */
+  overflow: hidden;
 }
 
 .search-bar input {
@@ -237,10 +298,12 @@ textarea {
   z-index: 45;
 }
 
-.sort-trigger {
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
+/* Compact, and more specific than `.icon-btn` (40px) so it never inflates the
+   fixed-height search bar on the notes page. */
+.page-header .sort-trigger {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
   color: var(--text-2);
   flex-shrink: 0;
 }
@@ -538,6 +601,11 @@ textarea {
   background: var(--surface-2);
 }
 
+.icon-btn:disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
 .icon-btn.accent {
   color: var(--accent);
 }
@@ -574,6 +642,21 @@ textarea {
   color: var(--accent);
 }
 
+.save-status.dirty {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.dirty-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-right: 5px;
+  vertical-align: middle;
+}
+
 .editor-body {
   flex: 1;
   min-height: 0;
@@ -607,6 +690,16 @@ textarea {
   font-size: 16px;
   line-height: 1.7;
   min-height: 200px;
+}
+
+/* Hidden clone of the editor text used to measure the caret's line position. */
+.caret-mirror {
+  position: fixed;
+  top: 0;
+  left: 0;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: -1;
 }
 
 /* ============ Markdown preview ============ */
@@ -1024,6 +1117,132 @@ textarea {
   color: var(--accent);
 }
 
+/* ============ Settings: save strategy ============ */
+.settings-section-title {
+  font-size: 13px;
+  color: var(--text-2);
+  margin: 10px 2px 12px;
+  font-weight: 600;
+}
+
+.save-option {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  padding: 12px 2px 4px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.save-option:last-of-type {
+  border-bottom: none;
+}
+
+.save-radio-input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.save-radio-dot {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.15s;
+}
+
+.save-option.active .save-radio-dot {
+  border-color: var(--accent);
+}
+
+.save-option.active .save-radio-dot::after {
+  content: '';
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.save-label {
+  flex: 1;
+  font-size: 15px;
+  min-width: 0;
+}
+
+.save-option.active .save-label {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.save-info {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  color: var(--text-3);
+  flex-shrink: 0;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.save-info:active {
+  background: var(--surface-2);
+  color: var(--text-2);
+}
+
+.save-desc {
+  flex-basis: 100%;
+  font-size: 12px;
+  color: var(--text-3);
+  padding: 2px 0 8px 28px;
+}
+
+.hint-bubble {
+  position: absolute;
+  top: calc(100% - 6px);
+  right: 0;
+  z-index: 70;
+  width: 250px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(20, 22, 28, 0.14);
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
+  font-weight: 400;
+  animation: pop-in 0.15s ease;
+  /* Clicks land on the backdrop below (closing the bubble), never the row's radio. */
+  pointer-events: none;
+}
+
+.hint-bubble.tooltip {
+  width: 190px;
+  font-size: 12px;
+  padding: 8px 10px;
+}
+
+.save-interval {
+  padding: 10px 0 6px;
+}
+
+.restore-default {
+  font-size: 13px;
+  color: var(--accent);
+  padding: 12px 2px;
+}
+
 /* ============ Folder rows ============ */
 .folder-row {
   display: flex;
@@ -1351,13 +1570,24 @@ textarea {
   text-align: center;
 }
 
+/* Floating label: out of flow so the elastic gap comes only from the drag
+   transform and never jumps when the indicator appears/disappears. */
 .pull-indicator {
-  text-align: center;
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
   color: var(--text-3);
   font-size: 12px;
-  padding: 4px 0;
-  transition: height 0.2s;
-  overflow: hidden;
+  line-height: 1.4;
+  pointer-events: none;
+  animation: fade-in 0.15s ease;
+  white-space: nowrap;
 }
 
 /* Height placeholder for the batch-render sentinel. */

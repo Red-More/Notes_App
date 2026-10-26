@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../../api'
-import { useDebouncedSearch } from '../../hooks'
+import { useCollapsibleSearch, useDebouncedSearch } from '../../hooks'
 import { friendlyError } from '../../utils'
 import type { Contact } from '../../types'
 import { ConfirmDialog, Modal } from '../../components/ui'
@@ -31,7 +31,7 @@ const EMPTY_FORM: ContactForm = {
   tag: '默认',
 }
 
-export default function ContactPage() {
+export default function ContactPage({ isActive }: { isActive: boolean }) {
   const [contacts, setContacts] = useState<Contact[]>([])
   const [searchInput, setSearchInput, query] = useDebouncedSearch()
   const [tag, setTag] = useState('全部')
@@ -40,6 +40,9 @@ export default function ContactPage() {
   const [form, setForm] = useState<ContactForm>(EMPTY_FORM)
   const [deleteConfirm, setDeleteConfirm] = useState<Contact | null>(null)
   const [loading, setLoading] = useState(true)
+
+  // Scroll-linked collapsing search bar (same behavior as the notes page).
+  const { searchWrapRef, scrollRef } = useCollapsibleSearch()
 
   const load = useCallback(async () => {
     try {
@@ -56,6 +59,14 @@ export default function ContactPage() {
       setLoading(false)
     }
   }, [tag, query])
+
+  // Refresh data when the page becomes active again (stays mounted in the pager).
+  const prevActiveRef = useRef(isActive)
+  useEffect(() => {
+    const wasActive = prevActiveRef.current
+    prevActiveRef.current = isActive
+    if (isActive && !wasActive) void load()
+  }, [isActive, load])
 
   useEffect(() => {
     let cancelled = false
@@ -152,6 +163,7 @@ export default function ContactPage() {
     <div className="page">
       <PageHeader
         title="人脉"
+        searchWrapRef={searchWrapRef}
         search={{
           placeholder: '搜索姓名、电话、公司',
           value: searchInput,
@@ -161,30 +173,32 @@ export default function ContactPage() {
 
       <ChipRow items={tags.map((t) => ({ key: t, label: t }))} value={tag} onChange={setTag} />
 
-      <div className="page-scroll">
-        {loading && contacts.length === 0 ? (
-          <div className="list-loading">加载中…</div>
-        ) : contacts.length === 0 ? (
-          <EmptyState
-            icon={<IconUsers size={44} />}
-            text={query || tag !== '全部' ? '没有匹配的联系人' : '还没有联系人，点击 + 添加'}
-          />
-        ) : (
-          contacts.map((c) => (
-            <div key={c.id} className="contact-row" onClick={() => openEdit(c)}>
-              <div className="avatar">{c.name.charAt(0)}</div>
-              <div className="contact-main">
-                <div className="contact-name">
-                  {c.name}
-                  <span className="chip mini">{c.tag}</span>
-                </div>
-                <div className="contact-sub">
-                  {[c.company, c.phone].filter(Boolean).join(' · ') || '暂无信息'}
+      <div className="page-scroll" ref={scrollRef}>
+        <div className="scroll-content">
+          {loading && contacts.length === 0 ? (
+            <div className="list-loading">加载中…</div>
+          ) : contacts.length === 0 ? (
+            <EmptyState
+              icon={<IconUsers size={44} />}
+              text={query || tag !== '全部' ? '没有匹配的联系人' : '还没有联系人，点击 + 添加'}
+            />
+          ) : (
+            contacts.map((c) => (
+              <div key={c.id} className="contact-row" onClick={() => openEdit(c)}>
+                <div className="avatar">{c.name.charAt(0)}</div>
+                <div className="contact-main">
+                  <div className="contact-name">
+                    {c.name}
+                    <span className="chip mini">{c.tag}</span>
+                  </div>
+                  <div className="contact-sub">
+                    {[c.company, c.phone].filter(Boolean).join(' · ') || '暂无信息'}
+                  </div>
                 </div>
               </div>
-            </div>
-          ))
-        )}
+            ))
+          )}
+        </div>
       </div>
 
       <FAB label="添加联系人" onClick={openCreate} />

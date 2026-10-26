@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  computeKbInset,
   dateStr,
   diffLines,
   exportTs,
@@ -14,6 +15,30 @@ import {
   safeFileName,
   shortTime,
 } from './utils'
+
+describe('computeKbInset', () => {
+  it('桌面环境（无触摸）且视口未收缩时为 0', () => {
+    expect(computeKbInset(900, 900, 900, 0, false)).toBe(0)
+  })
+
+  it('overlay 模型：可视视口大幅收缩即为键盘（maxTouchPoints=0 的 WebView 也可识别）', () => {
+    expect(computeKbInset(844, 844, 600, 0, true)).toBe(244)
+    expect(computeKbInset(844, 844, 600, 0, false)).toBe(244)
+  })
+
+  it('无触摸环境下的小幅视口收缩忽略（桌面窗口缩小不算键盘）', () => {
+    expect(computeKbInset(844, 844, 820, 0, false)).toBe(0)
+  })
+
+  it('adjustResize 模型：布局视口自身收缩，取与最高基线的差值', () => {
+    // 键盘弹起后 innerHeight 从 844 收缩到 600，vv 同步收缩 → overlay 为 0
+    expect(computeKbInset(844, 600, 600, 0, true)).toBe(244)
+  })
+
+  it('键盘收起后恢复为 0', () => {
+    expect(computeKbInset(844, 844, 844, 0, true)).toBe(0)
+  })
+})
 
 describe('parseDbTime', () => {
   it('解析 SQLite 本地时间字符串为 Date', () => {

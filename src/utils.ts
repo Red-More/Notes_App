@@ -5,6 +5,35 @@ export interface DiffRow {
   newNo: number | null
 }
 
+/**
+ * Soft-keyboard inset for the editor, covering both Android models:
+ * - overlay (adjustNothing/pan): the layout viewport stays put, the visual
+ *   viewport shrinks → `innerHeight - (vvHeight + vvOffsetTop)`.
+ * - adjustResize: the layout viewport itself shrinks → the delta from the last
+ *   tall `innerHeight` is the inset.
+ * On environments without a soft keyboard the inset is always 0 so a plain
+ * window shrink (e.g. desktop resize) is never mistaken for a keyboard.
+ */
+export function computeKbInset(
+  tallInnerHeight: number,
+  innerHeight: number,
+  vvHeight: number,
+  vvOffsetTop: number,
+  canHaveSoftKeyboard: boolean,
+): number {
+  const overlayInset = Math.max(0, Math.round(innerHeight - (vvHeight + vvOffsetTop)))
+  // A large visual-viewport shrink is a keyboard signal even on WebViews that
+  // report no touch capability (maxTouchPoints = 0); small shinks are ignored
+  // outside touch environments so a desktop window resize is never mistaken
+  // for a keyboard.
+  if (overlayInset > 0) {
+    if (overlayInset >= 150 || canHaveSoftKeyboard) return overlayInset
+    return 0
+  }
+  if (!canHaveSoftKeyboard) return 0
+  return Math.max(0, Math.round(tallInnerHeight - innerHeight))
+}
+
 /** Parse a SQLite local datetime string ("YYYY-MM-DD HH:MM:SS"). */
 export function parseDbTime(s: string): Date {
   return new Date(s.replace(' ', 'T'))
