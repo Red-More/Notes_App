@@ -1,5 +1,16 @@
 import { useEffect, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { IconClose } from './Icons'
+
+/**
+ * Renders overlays into the layer created by main.tsx. The pager track is a
+ * transformed stacking context, so overlays nested inside a page would paint
+ * beneath the tabbar, which then wins the hit test and swallows their taps.
+ */
+export function OverlayPortal({ children }: { children: ReactNode }) {
+  const layer = document.getElementById('overlay-layer')
+  return layer ? createPortal(children, layer) : null
+}
 
 /** Global toast renderer; mount once in App. */
 export function ToastHost() {
@@ -41,20 +52,22 @@ export function Modal({ title, onClose, children, footer, headerAction }: ModalP
   }, [onClose])
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <span className="modal-title">{title}</span>
-          {headerAction ?? (
-            <button type="button" className="icon-btn" onClick={onClose} aria-label="关闭">
-              <IconClose size={20} />
-            </button>
-          )}
+    <OverlayPortal>
+      <div className="modal-overlay" onClick={onClose}>
+        <div className="modal" onClick={(e) => e.stopPropagation()}>
+          <div className="modal-header">
+            <span className="modal-title">{title}</span>
+            {headerAction ?? (
+              <button type="button" className="icon-btn" onClick={onClose} aria-label="关闭">
+                <IconClose size={20} />
+              </button>
+            )}
+          </div>
+          <div className="modal-body">{children}</div>
+          {footer && <div className="modal-footer">{footer}</div>}
         </div>
-        <div className="modal-body">{children}</div>
-        {footer && <div className="modal-footer">{footer}</div>}
       </div>
-    </div>
+    </OverlayPortal>
   )
 }
 
@@ -76,23 +89,25 @@ export function ConfirmDialog({
   onCancel,
 }: ConfirmProps) {
   return (
-    <div className="modal-overlay" onClick={onCancel}>
-      <div className="dialog" onClick={(e) => e.stopPropagation()}>
-        <div className="dialog-title">{title}</div>
-        <div className="dialog-message">{message}</div>
-        <div className="dialog-actions">
-          <button type="button" className="btn" onClick={onCancel}>
-            取消
-          </button>
-          <button
-            type="button"
-            className={`btn ${danger ? 'btn-danger' : 'btn-primary'}`}
-            onClick={onConfirm}
-          >
-            {confirmText}
-          </button>
+    <OverlayPortal>
+      <div className="modal-overlay" onClick={onCancel}>
+        <div className="dialog" onClick={(e) => e.stopPropagation()}>
+          <div className="dialog-title">{title}</div>
+          <div className="dialog-message">{message}</div>
+          <div className="dialog-actions">
+            <button type="button" className="btn" onClick={onCancel}>
+              取消
+            </button>
+            <button
+              type="button"
+              className={`btn ${danger ? 'btn-danger' : 'btn-primary'}`}
+              onClick={onConfirm}
+            >
+              {confirmText}
+            </button>
+          </div>
         </div>
       </div>
-    </div>
+    </OverlayPortal>
   )
 }

@@ -44,7 +44,7 @@ function SaveOptionRow({
   onToggleHint,
   onToggleTip,
 }: RowProps) {
-  const { longPressProps, didLongPress } = useLongPress(onToggleTip)
+  const { bind, didLongPress } = useLongPress(onToggleTip)
   return (
     <label className={`save-option ${selected ? 'active' : ''}`}>
       <input
@@ -72,7 +72,7 @@ function SaveOptionRow({
             onToggleHint()
           }
         }}
-        {...longPressProps}
+        {...bind()}
       >
         <IconInfo size={16} />
       </span>

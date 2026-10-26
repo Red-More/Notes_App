@@ -95,6 +95,14 @@ export const IconCheck = (p: IconProps) => (
   </svg>
 )
 
+/** Select-all: a check leaving the list frame. */
+export const IconSelectAll = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M21 10.5V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9.5" />
+    <path d="m9 11 3 3L22 4" />
+  </svg>
+)
+
 export const IconCalendar = (p: IconProps) => (
   <svg {...base(p)}>
     <rect x="3" y="4" width="18" height="18" rx="2" />

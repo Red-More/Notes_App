@@ -50,7 +50,7 @@ export default function FolderManagePage({ onBack }: Props) {
     }
   }, [])
 
-  const { longPressProps, didLongPress } = useLongPress(() => {
+  const { bind, didLongPress } = useLongPress(() => {
     if (!selectMode) setSelectMode(true)
   })
 
@@ -217,7 +217,7 @@ export default function FolderManagePage({ onBack }: Props) {
                 })
               }
             }}
-            {...longPressProps}
+            {...bind()}
           >
             {selectMode && <span className="check-dot">{selected.has(f.id) && '✓'}</span>}
             <div className="folder-icon">

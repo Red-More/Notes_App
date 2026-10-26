@@ -108,6 +108,20 @@ textarea {
   min-height: 0;
 }
 
+/* Portaled action bars / dialogs render here. The pager track is a transformed
+   stacking context, so overlays nested inside a page would paint beneath the
+   tabbar; this layer sits above it while keeping the app's centered width. */
+.overlay-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  pointer-events: none;
+}
+
+.overlay-layer > * {
+  pointer-events: auto;
+}
+
 /* ============ Horizontal pager ============ */
 .pager-body {
   flex: 1;
@@ -232,10 +246,10 @@ textarea {
 }
 
 .page-title-row {
+  position: relative;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  justify-content: center;
   margin-bottom: 10px;
   /* Uniform row height across pages with/without a header action button. */
   min-height: 40px;
@@ -246,9 +260,16 @@ textarea {
   font-weight: 700;
   margin: 0;
   letter-spacing: 0.2px;
+  text-align: center;
 }
 
+/* Actions float on the right so the title stays optically centered on every
+   page regardless of how many actions a page has. */
 .page-header-actions {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
   display: flex;
   align-items: center;
   gap: 4px;
@@ -296,6 +317,32 @@ textarea {
 .note-header-wrap {
   position: relative;
   z-index: 45;
+}
+
+/* Entering selection mode hides the normal header instead of unmounting it:
+   the scroll-collapse ref must stay attached to the live search wrapper. */
+.note-header-wrap.is-hidden {
+  display: none;
+}
+
+/* Selection toolbar: cancel on the left, count centered, select-all on the
+   right. Equal side columns keep the count optically centered. */
+.selection-bar {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) 40px;
+  align-items: center;
+  min-height: 40px;
+}
+
+.selection-count {
+  text-align: center;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
 }
 
 /* Compact, and more specific than `.icon-btn` (40px) so it never inflates the
@@ -437,6 +484,11 @@ textarea {
   box-shadow: var(--shadow);
   transition: border-color 0.15s;
   touch-action: pan-y;
+  /* Long-press is the multi-select gesture; native text selection / callouts
+     would otherwise fire pointercancel and swallow it on touch devices. */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
 }
 
 .note-card.selected {
@@ -567,6 +619,27 @@ textarea {
 
 .action-bar-btn:active {
   background: var(--surface-2);
+}
+
+.action-bar-btn:disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+/* Note selection bar: four equal-width actions, each a 48px tap target. */
+.action-bar.selection-actions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 8px;
+  padding: 8px 12px;
+}
+
+.selection-actions .action-bar-btn {
+  justify-content: center;
+  min-width: 0;
+  min-height: 48px;
+  padding: 6px 4px;
 }
 
 /* ============ Editor page ============ */

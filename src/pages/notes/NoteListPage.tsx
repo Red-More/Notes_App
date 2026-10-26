@@ -4,15 +4,17 @@ import { api } from '../../api'
 import { useDebouncedSearch, useLongPress, useCollapsibleSearch } from '../../hooks'
 import { exportTs, formatRelative, friendlyError } from '../../utils'
 import type { FolderStats, Note } from '../../types'
-import { ConfirmDialog, Modal } from '../../components/ui'
+import { ConfirmDialog, Modal, OverlayPortal } from '../../components/ui'
 import { toast } from '../../toast'
 import {
   IconCheck,
+  IconClose,
   IconExport,
   IconFolder,
   IconMove,
   IconNote,
   IconPin,
+  IconSelectAll,
   IconSettings,
   IconSort,
   IconTrash,
@@ -185,10 +187,6 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
     setSelected(new Set())
   }
 
-  const { longPressProps, didLongPress } = useLongPress(() => {
-    if (!selectMode) setSelectMode(true)
-  })
-
   const toggleSelected = (id: number) => {
     setSelected((prev) => {
       const next = new Set(prev)
@@ -201,6 +199,17 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
     })
   }
 
+  const { bind, didLongPress } = useLongPress((note: Note) => {
+    // A completed hold always acts on the pressed note: enter selection mode
+    // with it selected, or toggle it when selection is already active.
+    if (selectMode) {
+      toggleSelected(note.id)
+    } else {
+      setSelectMode(true)
+      setSelected(new Set([note.id]))
+    }
+  })
+
   const handleCardClick = (note: Note) => {
     if (didLongPress()) return
     if (selectMode) {
@@ -212,7 +221,9 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
 
   const selectedIds = useMemo(() => [...selected], [selected])
   const allSelected = notes.length > 0 && selected.size === notes.length
-  const pinnedTarget = !notes.filter((n) => selected.has(n.id)).every((n) => n.isPinned === 1)
+  const pinnedTarget =
+    selected.size === 0 ||
+    !notes.filter((n) => selected.has(n.id)).every((n) => n.isPinned === 1)
 
   const handlePin = async () => {
     if (!selected.size) return
@@ -392,7 +403,7 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
 
   return (
     <div className="page">
-      <div className="note-header-wrap">
+      <div className={`note-header-wrap${selectMode ? ' is-hidden' : ''}`}>
         <PageHeader
           title="笔记"
           searchWrapRef={searchWrapRef}
@@ -460,6 +471,30 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
         )}
       </div>
 
+      {selectMode && (
+        <div className="page-header">
+          <div className="selection-bar">
+            <button type="button" className="icon-btn" onClick={exitSelect} aria-label="退出选择">
+              <IconClose size={22} />
+            </button>
+            <span className="selection-count" aria-live="polite">
+              已选择 {selected.size} 项
+            </span>
+            <button
+              type="button"
+              className={`icon-btn ${allSelected ? 'accent' : ''}`}
+              onClick={() =>
+                setSelected(allSelected ? new Set() : new Set(notes.map((n) => n.id)))
+              }
+              aria-label={allSelected ? '取消全选' : '全选'}
+              aria-pressed={allSelected}
+            >
+              <IconSelectAll size={22} />
+            </button>
+          </div>
+        </div>
+      )}
+
       <ChipRow items={tabs} value={filter} onChange={setFilter} />
 
       <div className="page-scroll" ref={attachScrollRef}>
@@ -486,7 +521,7 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
                   key={note.id}
                   className={`note-card ${selectMode && selected.has(note.id) ? 'selected' : ''}`}
                   onClick={() => handleCardClick(note)}
-                  {...longPressProps}
+                  {...bind(note)}
                 >
                   {selectMode && (
                     <span className="check-dot">
@@ -512,41 +547,47 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
 
       <FAB label="新建笔记" onClick={() => onOpenNote(null, activeFolderId)} />
 
-      {selectMode && (
-        <div className="action-bar">
-          <span className="action-bar-info">已选择 {selected.size} 项</span>
-          <button
-            type="button"
-            className="action-bar-btn"
-            onClick={() => setSelected(allSelected ? new Set() : new Set(notes.map((n) => n.id)))}
-          >
-            <IconCheck size={19} />
-            {allSelected ? '全不选' : '全选'}
-          </button>
-          <button type="button" className="action-bar-btn" onClick={() => void handlePin()}>
-            <IconPin size={19} />
-            {pinnedTarget ? '置顶' : '取消置顶'}
-          </button>
-          <button type="button" className="action-bar-btn" onClick={() => setMoveOpen(true)}>
-            <IconMove size={19} />
-            移动到
-          </button>
-          <button type="button" className="action-bar-btn" onClick={() => void handleExport()}>
-            <IconExport size={19} />
-            导出
-          </button>
-          <button
-            type="button"
-            className="action-bar-btn danger"
-            onClick={() => setDeleteConfirm(true)}
-          >
-            <IconTrash size={19} />
-            删除
-          </button>
-          <button type="button" className="action-bar-btn" onClick={exitSelect}>
-            取消
-          </button>
-        </div>
+      {selectMode && isActive && (
+        <OverlayPortal>
+          <div className="action-bar selection-actions">
+            <button
+              type="button"
+              className="action-bar-btn"
+              onClick={() => void handlePin()}
+              disabled={selected.size === 0}
+            >
+              <IconPin size={19} />
+              {pinnedTarget ? '置顶' : '取消置顶'}
+            </button>
+            <button
+              type="button"
+              className="action-bar-btn"
+              onClick={() => setMoveOpen(true)}
+              disabled={selected.size === 0}
+            >
+              <IconMove size={19} />
+              移动到
+            </button>
+            <button
+              type="button"
+              className="action-bar-btn"
+              onClick={() => void handleExport()}
+              disabled={selected.size === 0}
+            >
+              <IconExport size={19} />
+              导出
+            </button>
+            <button
+              type="button"
+              className="action-bar-btn danger"
+              onClick={() => setDeleteConfirm(true)}
+              disabled={selected.size === 0}
+            >
+              <IconTrash size={19} />
+              删除
+            </button>
+          </div>
+        </OverlayPortal>
       )}
 
       {deleteConfirm && (

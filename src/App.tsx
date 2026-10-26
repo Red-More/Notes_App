@@ -201,11 +201,6 @@ function App() {
       g.lastX = g.startX
       g.lastT = performance.now()
       g.vx = 0
-      try {
-        el.setPointerCapture(e.pointerId)
-      } catch {
-        // Capture can fail on synthetic pointers; dragging still works.
-      }
     }
 
     const onPointerMove = (e: PointerEvent) => {
@@ -215,8 +210,16 @@ function App() {
       const under = document.elementFromPoint(e.clientX, e.clientY)
       const before = g.locked
       drag(e.clientX, e.clientY, under ?? (e.target as Element), () => e.preventDefault())
-      // Disable native text selection while a horizontal mouse drag is locked.
+      // Locking horizontal is the first moment capture is needed. Capturing on
+      // pointerdown would retarget mouseup/click to the pager and swallow taps
+      // on list items (note cards, rows, buttons).
       if (g.locked === 'h' && before !== 'h') {
+        try {
+          el.setPointerCapture(e.pointerId)
+        } catch {
+          // Capture can fail on synthetic pointers; dragging still works.
+        }
+        // Disable native text selection while a horizontal mouse drag is locked.
         savedUserSelect = document.body.style.userSelect
         document.body.style.userSelect = 'none'
       }

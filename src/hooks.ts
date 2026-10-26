@@ -19,10 +19,12 @@ export function useDebouncedSearch(
 
 /**
  * Long-press detection via pointer events (works for touch and mouse).
- * Returns spreadable props and a guard to suppress the click that
- * follows a completed long-press.
+ * `bind(payload)` returns spreadable props for one pressable element; the
+ * payload is handed back to `callback` when the press completes, so a list can
+ * tell which item was held. `didLongPress` suppresses the click that follows a
+ * completed long-press.
  */
-export function useLongPress(callback: () => void, ms = 500) {
+export function useLongPress<T = undefined>(callback: (payload: T) => void, ms = 500) {
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fired = useRef(false)
   const pos = useRef({ x: 0, y: 0 })
@@ -34,15 +36,17 @@ export function useLongPress(callback: () => void, ms = 500) {
     }
   }
 
-  const longPressProps = {
+  const bind = (payload?: T) => ({
     onPointerDown: (e: React.PointerEvent) => {
+      // Secondary mouse buttons open the context menu, never a selection.
+      if (e.pointerType === 'mouse' && e.button !== 0) return
       fired.current = false
       pos.current = { x: e.clientX, y: e.clientY }
       cancel()
       timer.current = setTimeout(() => {
         timer.current = null
         fired.current = true
-        callback()
+        callback(payload as T)
       }, ms)
     },
     onPointerUp: cancel,
@@ -56,9 +60,9 @@ export function useLongPress(callback: () => void, ms = 500) {
     },
     // Suppress the browser context menu triggered by long-press.
     onContextMenu: (e: React.MouseEvent) => e.preventDefault(),
-  }
+  })
 
-  return { longPressProps, didLongPress: () => fired.current }
+  return { bind, didLongPress: () => fired.current }
 }
 
 /**
