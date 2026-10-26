@@ -3,7 +3,9 @@ use crate::db::Db;
 use crate::models::Note;
 use rusqlite::{params, Connection, Row};
 use std::io::Write;
-use tauri::State;
+use std::str::FromStr;
+use tauri::{AppHandle, Runtime, State};
+use tauri_plugin_fs::{FilePath, FsExt, OpenOptions};
 use zip::write::SimpleFileOptions;
 use zip::CompressionMethod;
 
@@ -108,12 +110,9 @@ fn notes_to_zip_entries(notes: &[Note]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Write the given `(file name, content)` entries into a ZIP archive at
-/// `dest_path`, deflating every entry, then finish (flush) the archive.
-fn write_zip(dest_path: &str, entries: &[(String, String)]) -> Result<(), String> {
-    let file = std::fs::File::create(dest_path)
-        .map_err(|e| format!("无法创建导出文件 {dest_path}: {e}"))?;
-    let mut zip = zip::ZipWriter::new(file);
+/// Build a deflated ZIP archive in memory from `(file name, content)` entries.
+fn zip_bytes(entries: &[(String, String)]) -> Result<Vec<u8>, String> {
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     for (name, content) in entries {
         zip.start_file(name, options)
@@ -121,8 +120,29 @@ fn write_zip(dest_path: &str, entries: &[(String, String)]) -> Result<(), String
         zip.write_all(content.as_bytes())
             .map_err(|e| format!("导出 ZIP 写入失败: {e}"))?;
     }
-    zip.finish().map_err(|e| format!("导出 ZIP 写入失败: {e}"))?;
-    Ok(())
+    zip.finish()
+        .map(|cursor| cursor.into_inner())
+        .map_err(|e| format!("导出 ZIP 写入失败: {e}"))
+}
+
+/// Write export bytes to `dest_path`. On desktop this is a regular filesystem
+/// path; on Android the save dialog returns a `content://` SAF URI, which
+/// tauri-plugin-fs resolves through the ContentResolver.
+fn write_export<R: Runtime>(
+    app: &AppHandle<R>,
+    dest_path: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let mut options = OpenOptions::new();
+    options.read(false).write(true).create(true).truncate(true);
+    // FilePath parsing is infallible (its error type is Infallible).
+    let path = FilePath::from_str(dest_path).unwrap();
+    let mut file = app
+        .fs()
+        .open(path, options)
+        .map_err(|e| format!("无法创建导出文件 {dest_path}: {e}"))?;
+    file.write_all(bytes)
+        .map_err(|e| format!("无法写入导出文件 {dest_path}: {e}"))
 }
 
 /// Fetch a single non-deleted note with its folder name. Missing or already
@@ -164,36 +184,49 @@ fn fetch_notes(conn: &Connection, ids: &[i64]) -> Result<Vec<Note>, String> {
     Ok(notes)
 }
 
-/// Export a single note as a Markdown file with YAML front matter.
-fn export_note_to_impl(conn: &Connection, note_id: i64, dest_path: &str) -> Result<(), String> {
+/// Render a single non-deleted note as Markdown with YAML front matter.
+fn note_markdown(conn: &Connection, note_id: i64) -> Result<String, String> {
     let note = fetch_note(conn, note_id)?;
-    std::fs::write(dest_path, note_to_markdown(&note))
-        .map_err(|e| format!("无法写入导出文件 {dest_path}: {e}"))
+    Ok(note_to_markdown(&note))
 }
 
+/// Export a single note as a Markdown file with YAML front matter.
 #[tauri::command]
-pub fn export_note_to(state: State<Db>, note_id: i64, dest_path: String) -> Result<(), String> {
+pub fn export_note_to<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<Db>,
+    note_id: i64,
+    dest_path: String,
+) -> Result<(), String> {
     let conn = state.0.lock().unwrap();
-    export_note_to_impl(&conn, note_id, &dest_path)
+    let markdown = note_markdown(&conn, note_id)?;
+    write_export(&app, &dest_path, markdown.as_bytes())
 }
 
-/// Export multiple notes as a ZIP archive of Markdown files.
-fn export_notes_to_impl(conn: &Connection, ids: &[i64], dest_path: &str) -> Result<(), String> {
+/// Build a ZIP archive of the given note ids, skipping deleted notes.
+fn notes_zip_bytes(conn: &Connection, ids: &[i64]) -> Result<Vec<u8>, String> {
     let notes = fetch_notes(conn, ids)?;
     if notes.is_empty() {
         return Err("没有可导出的笔记".to_string());
     }
-    write_zip(dest_path, &notes_to_zip_entries(&notes))
+    zip_bytes(&notes_to_zip_entries(&notes))
 }
 
+/// Export multiple notes as a ZIP archive of Markdown files.
 #[tauri::command]
-pub fn export_notes_to(state: State<Db>, ids: Vec<i64>, dest_path: String) -> Result<(), String> {
+pub fn export_notes_to<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<Db>,
+    ids: Vec<i64>,
+    dest_path: String,
+) -> Result<(), String> {
     let conn = state.0.lock().unwrap();
-    export_notes_to_impl(&conn, &ids, &dest_path)
+    let bytes = notes_zip_bytes(&conn, &ids)?;
+    write_export(&app, &dest_path, &bytes)
 }
 
-/// Export every non-deleted note of a folder as a ZIP archive.
-fn export_folder_to_impl(conn: &Connection, folder_id: i64, dest_path: &str) -> Result<(), String> {
+/// Build a ZIP archive of every non-deleted note in a folder.
+fn folder_zip_bytes(conn: &Connection, folder_id: i64) -> Result<Vec<u8>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT n.id, n.title, n.content, n.folder_id, f.name, n.is_pinned, n.created_at, n.updated_at, n.deleted_at
@@ -212,13 +245,20 @@ fn export_folder_to_impl(conn: &Connection, folder_id: i64, dest_path: &str) -> 
     if notes.is_empty() {
         return Err("没有可导出的笔记".to_string());
     }
-    write_zip(dest_path, &notes_to_zip_entries(&notes))
+    zip_bytes(&notes_to_zip_entries(&notes))
 }
 
+/// Export every non-deleted note of a folder as a ZIP archive.
 #[tauri::command]
-pub fn export_folder_to(state: State<Db>, folder_id: i64, dest_path: String) -> Result<(), String> {
+pub fn export_folder_to<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<Db>,
+    folder_id: i64,
+    dest_path: String,
+) -> Result<(), String> {
     let conn = state.0.lock().unwrap();
-    export_folder_to_impl(&conn, folder_id, &dest_path)
+    let bytes = folder_zip_bytes(&conn, folder_id)?;
+    write_export(&app, &dest_path, &bytes)
 }
 
 #[cfg(test)]
@@ -264,14 +304,6 @@ mod tests {
             params![id, title, content, folder_id],
         )
         .unwrap();
-    }
-
-    fn temp_zip_path(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "notes_export_test_{}_{}.zip",
-            std::process::id(),
-            name
-        ))
     }
 
     #[test]
@@ -333,11 +365,9 @@ mod tests {
     fn zip_export_contains_markdown_files_with_front_matter() {
         let conn = test_conn();
         insert_note(&conn, 1, "测试 笔记", "第一行\n第二行", None);
-        let path = temp_zip_path("basic");
-        export_notes_to_impl(&conn, &[1], path.to_str().unwrap()).unwrap();
+        let bytes = notes_zip_bytes(&conn, &[1]).unwrap();
 
-        let file = std::fs::File::open(&path).unwrap();
-        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
         assert_eq!(archive.len(), 1);
         let mut content = String::new();
         archive
@@ -350,7 +380,6 @@ mod tests {
         assert!(content.contains("pinned: false\n"));
         assert!(content.contains("created: "));
         assert!(content.ends_with("---\n\n第一行\n第二行"));
-        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
@@ -363,22 +392,19 @@ mod tests {
             [],
         )
         .unwrap();
-        let path = temp_zip_path("trash");
         // Exporting only a deleted note yields no exportable notes.
         assert_eq!(
-            export_notes_to_impl(&conn, &[2], path.to_str().unwrap()),
+            notes_zip_bytes(&conn, &[2]),
             Err("没有可导出的笔记".to_string())
         );
         // Mixed ids skip the deleted note inside the archive.
-        export_notes_to_impl(&conn, &[1, 2], path.to_str().unwrap()).unwrap();
-        let file = std::fs::File::open(&path).unwrap();
-        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let bytes = notes_zip_bytes(&conn, &[1, 2]).unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
         assert_eq!(archive.len(), 1);
         let mut names: Vec<String> = Vec::new();
         for i in 0..archive.len() {
             names.push(archive.by_index(i).unwrap().name().to_string());
         }
         assert!(names.contains(&"1-keep.md".to_string()));
-        std::fs::remove_file(&path).unwrap();
     }
 }
