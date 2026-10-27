@@ -45,6 +45,8 @@ pub struct Folder {
 pub struct FolderStats {
     pub total: i64,
     pub unclassified: i64,
+    /// User-defined display name of the virtual default folder.
+    pub default_folder_name: String,
     pub folders: Vec<Folder>,
 }
 

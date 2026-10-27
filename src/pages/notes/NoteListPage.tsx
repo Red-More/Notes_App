@@ -391,7 +391,7 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
       key: f.id as FolderFilter,
       label: f.name,
     })) ?? []),
-    { key: 'uncat', label: '默认' },
+    { key: 'uncat', label: stats?.defaultFolderName ?? '默认' },
   ]
 
   const activeFolderId = typeof filter === 'number' ? filter : null
@@ -602,7 +602,7 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
       {moveOpen && stats && (
         <Modal title="移动到文件夹" onClose={() => setMoveOpen(false)}>
           <button type="button" className="option-row" onClick={() => void handleMove(null)}>
-            默认
+            {stats.defaultFolderName}
             <span className="count">{stats.unclassified} 篇</span>
           </button>
           {stats.folders.map((f) => (

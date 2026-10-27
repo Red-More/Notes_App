@@ -62,6 +62,7 @@ pub fn run() {
             commands::folders::rename_folder,
             commands::folders::delete_folder,
             commands::folders::set_folder_pinned,
+            commands::folders::rename_default_folder,
             commands::todos::list_todos,
             commands::todos::create_todo,
             commands::todos::update_todo,

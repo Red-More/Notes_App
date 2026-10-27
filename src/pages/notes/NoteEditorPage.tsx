@@ -45,6 +45,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   const [content, setContent] = useState('')
   const [currentFolderId, setCurrentFolderId] = useState<number | null>(folderId)
   const [folders, setFolders] = useState<Folder[]>([])
+  const [defaultFolderName, setDefaultFolderName] = useState('默认')
   const [saveState, setSaveState] = useState<SaveState>('clean')
   const [dirty, setDirty] = useState(false)
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null)
@@ -86,7 +87,9 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   useEffect(() => {
     void (async () => {
       try {
-        setFolders((await api.listFolders()).folders)
+        const stats = await api.listFolders()
+        setFolders(stats.folders)
+        setDefaultFolderName(stats.defaultFolderName)
         if (noteIdRef.current != null) {
           const note = await api.getNote(noteIdRef.current)
           setTitle(note.title)
@@ -538,7 +541,8 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   }
 
   const folderName =
-    folders.find((f) => f.id === currentFolderId)?.name ?? (currentFolderId == null ? '默认' : '')
+    folders.find((f) => f.id === currentFolderId)?.name ??
+    (currentFolderId == null ? defaultFolderName : '')
 
   const wordCount = content.length
   const diffRows = compareVersion ? diffLines(compareVersion.content, content) : []
@@ -713,7 +717,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
             className="option-row"
             onClick={() => void handleSelectFolder(null)}
           >
-            默认
+            {defaultFolderName}
             {currentFolderId == null && <span className="row-check">✓</span>}
           </button>
           {folders.map((f) => (

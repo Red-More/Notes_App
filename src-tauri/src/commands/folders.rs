@@ -1,8 +1,13 @@
 use crate::commands::db_err;
 use crate::db::Db;
 use crate::models::{Folder, FolderStats};
-use rusqlite::{params, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use tauri::State;
+
+/// Settings key holding the display name of the virtual default folder
+/// (notes whose `folder_id` is NULL).
+const DEFAULT_FOLDER_NAME_KEY: &str = "default_folder_name";
+const DEFAULT_FOLDER_NAME: &str = "默认";
 
 fn folder_from_row(r: &Row) -> rusqlite::Result<Folder> {
     Ok(Folder {
@@ -13,6 +18,20 @@ fn folder_from_row(r: &Row) -> rusqlite::Result<Folder> {
         note_count: r.get(4)?,
         created_at: r.get(5)?,
     })
+}
+
+/// Display name of the virtual default folder, falling back to "默认" when the
+/// user never renamed it.
+fn default_folder_name(conn: &Connection) -> Result<String, String> {
+    let name: Option<String> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            params![DEFAULT_FOLDER_NAME_KEY],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(db_err)?;
+    Ok(name.unwrap_or_else(|| DEFAULT_FOLDER_NAME.to_string()))
 }
 
 /// List user folders with note counts, plus totals for the virtual
@@ -53,6 +72,7 @@ pub fn list_folders(state: State<Db>) -> Result<FolderStats, String> {
     Ok(FolderStats {
         total,
         unclassified,
+        default_folder_name: default_folder_name(&conn)?,
         folders,
     })
 }
@@ -135,6 +155,37 @@ pub fn set_folder_pinned(state: State<Db>, id: i64, pinned: bool) -> Result<(), 
     conn.execute(
         "UPDATE folders SET is_pinned = ?1 WHERE id = ?2",
         params![pinned as i64, id],
+    )
+    .map_err(db_err)?;
+    Ok(())
+}
+
+/// Rename the virtual default folder. It has no `folders` row, so the name is
+/// persisted in `settings` and returned via `list_folders`.
+#[tauri::command]
+pub fn rename_default_folder(state: State<Db>, name: String) -> Result<(), String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("文件夹名称不能为空".into());
+    }
+    if name.chars().count() > 50 {
+        return Err("文件夹名称最多50个字符".into());
+    }
+    let conn = state.0.lock().unwrap();
+    let exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM folders WHERE name = ?1",
+            params![name],
+            |r| r.get(0),
+        )
+        .map_err(db_err)?;
+    if exists {
+        return Err("同名文件夹已存在".into());
+    }
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![DEFAULT_FOLDER_NAME_KEY, name],
     )
     .map_err(db_err)?;
     Ok(())

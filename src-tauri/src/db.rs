@@ -7,7 +7,7 @@ pub struct Db(pub Mutex<Connection>);
 
 /// Latest schema version. `run_migrations` applies every pending step below
 /// and bumps `PRAGMA user_version` to match.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS folders (
@@ -80,6 +80,11 @@ CREATE TABLE IF NOT EXISTS contacts (
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
+
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 ";
 
 /// Whether `table` already has a column named `column`. Table/column names are
@@ -121,6 +126,18 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
         if !table_has_column(conn, "notes", "deleted_at")? {
             conn.execute_batch("ALTER TABLE notes ADD COLUMN deleted_at TEXT;")?;
         }
+        version = 3;
+        conn.pragma_update(None, "user_version", version)?;
+    }
+    if version < 4 {
+        // Key/value store for preferences without a dedicated table, e.g. the
+        // user-defined display name of the virtual default folder.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );",
+        )?;
         version = SCHEMA_VERSION;
         conn.pragma_update(None, "user_version", version)?;
     }

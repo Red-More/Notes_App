@@ -9,9 +9,11 @@ import EmptyState from '../../components/EmptyState'
 
 interface Props {
   onBack: () => void
+  /** Display name of the virtual default folder, used for notes without one. */
+  defaultFolderName: string
 }
 
-export default function RecycleBinPage({ onBack }: Props) {
+export default function RecycleBinPage({ onBack, defaultFolderName }: Props) {
   const [notes, setNotes] = useState<Note[]>([])
   const [emptyConfirm, setEmptyConfirm] = useState(false)
   const [purgeTarget, setPurgeTarget] = useState<Note | null>(null)
@@ -109,7 +111,7 @@ export default function RecycleBinPage({ onBack }: Props) {
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div className="folder-name">{n.title || '无标题'}</div>
                 <div className="folder-count">
-                  {n.folderName ?? '默认'} · {formatRelative(n.updatedAt)}
+                  {n.folderName ?? defaultFolderName} · {formatRelative(n.updatedAt)}
                 </div>
               </div>
               <button

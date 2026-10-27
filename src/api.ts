@@ -54,6 +54,7 @@ export const api = {
   listFolders: () => invoke<FolderStats>('list_folders'),
   createFolder: (name: string) => invoke<Folder>('create_folder', { name }),
   renameFolder: (params: { id: number; name: string }) => invoke<void>('rename_folder', params),
+  renameDefaultFolder: (name: string) => invoke<void>('rename_default_folder', { name }),
   deleteFolder: (id: number) => invoke<void>('delete_folder', { id }),
   setFolderPinned: (params: { id: number; pinned: boolean }) =>
     invoke<void>('set_folder_pinned', params),

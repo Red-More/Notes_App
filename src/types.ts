@@ -10,6 +10,7 @@ export interface Folder {
 export interface FolderStats {
   total: number
   unclassified: number
+  defaultFolderName: string
   folders: Folder[]
 }
 

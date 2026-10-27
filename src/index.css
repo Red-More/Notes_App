@@ -657,6 +657,14 @@ textarea {
   flex-shrink: 0;
 }
 
+/* Selection topbar: cancel / live count / select-all. Fixed 40px side columns
+   keep the count optically centered at any viewport width. */
+.editor-topbar.selection-topbar {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) 40px;
+  align-items: center;
+}
+
 .icon-btn {
   width: 40px;
   height: 40px;
@@ -825,6 +833,15 @@ textarea {
   font-size: 12px;
   color: var(--text-3);
   flex-shrink: 0;
+}
+
+/* Folder selection actions: three equal-width buttons in normal flow, so the
+   bar always reserves its own height and never overlaps the list. */
+.editor-bottombar.selection-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 8px 12px var(--safe-bottom-pad);
 }
 
 .preview-banner {
@@ -1315,6 +1332,7 @@ textarea {
 
 /* ============ Folder rows ============ */
 .folder-row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -1325,11 +1343,22 @@ textarea {
   margin-bottom: 10px;
   box-shadow: var(--shadow);
   touch-action: pan-y;
+  /* Selection feedback should land immediately but softly. */
+  transition:
+    border-color 0.15s,
+    background 0.15s;
 }
 
 .folder-row.selected {
   border-color: var(--info);
   background: var(--info-weak);
+}
+
+/* Mirror the note-card check-dot selection state: without this rule the circle
+   keeps its white surface and the white check icon stays invisible. */
+.folder-row.selected .check-dot {
+  border-color: var(--info);
+  background: var(--info);
 }
 
 .folder-row .folder-icon {
@@ -1344,12 +1373,19 @@ textarea {
   flex-shrink: 0;
 }
 
+.folder-row .folder-main {
+  flex: 1;
+  min-width: 0;
+}
+
 .folder-row .folder-name {
   font-size: 15px;
   font-weight: 600;
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .folder-row .folder-count {
