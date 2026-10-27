@@ -22,7 +22,6 @@ export const api = {
     title: string
     content: string
     folderId: number | null
-    forceVersion?: boolean
   }) => invoke<Note>('save_note', params),
   deleteNotes: (ids: number[]) => invoke<void>('delete_notes', { ids }),
   setNotesPinned: (params: { ids: number[]; pinned: boolean }) =>

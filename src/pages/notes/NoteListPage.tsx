@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { save } from '@tauri-apps/plugin-dialog'
 import { api } from '../../api'
 import { useDebouncedSearch, useLongPress, useCollapsibleSearch } from '../../hooks'
-import { exportTs, formatRelative, friendlyError } from '../../utils'
+import { exportTs, formatAmPmDateTime, friendlyError } from '../../utils'
 import type { FolderStats, Note } from '../../types'
 import { ConfirmDialog, Modal, OverlayPortal } from '../../components/ui'
 import { toast } from '../../toast'
@@ -528,12 +528,12 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
                   )}
                   <div className="note-card-title">
                     {note.isPinned === 1 && <span className="pin-badge">📌</span>}
-                    <span className="title-text">{note.title || '无标题'}</span>
+                    <span className="title-text">{note.title}</span>
                   </div>
-                  {note.content && <div className="note-card-content">{note.content}</div>}
+                  <div className="note-card-content">{note.content}</div>
                   <div className="note-card-meta">
-                    {note.folderName && <span className="chip mini">{note.folderName}</span>}
-                    <span>{formatRelative(note.updatedAt)}</span>
+                    <span className="note-card-time">{formatAmPmDateTime(note.updatedAt)}</span>
+                    <span className="note-card-words">{note.content.length}字</span>
                   </div>
                 </div>
               ))}

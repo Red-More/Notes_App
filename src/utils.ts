@@ -46,6 +46,15 @@ export function formatDateTime(s: string): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
+/** Format as "YYYY-MM-DD AM/PM hh:mm" (e.g. "2024-05-20 PM 03:45"). */
+export function formatAmPmDateTime(s: string): string {
+  const d = parseDbTime(s)
+  const p = (n: number) => String(n).padStart(2, '0')
+  const meridiem = d.getHours() < 12 ? 'AM' : 'PM'
+  const hour12 = d.getHours() % 12 || 12
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${meridiem} ${p(hour12)}:${p(d.getMinutes())}`
+}
+
 /** Friendly relative time: 刚刚 / n分钟前 / n小时前 / 昨天 / M月d日 / yyyy年M月d日. */
 export function formatRelative(s: string): string {
   const d = parseDbTime(s)

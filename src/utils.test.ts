@@ -6,6 +6,7 @@ import {
   diffLines,
   exportTs,
   fmtVersion,
+  formatAmPmDateTime,
   formatDateTime,
   formatRelative,
   friendlyError,
@@ -59,6 +60,17 @@ describe('formatDateTime', () => {
 
   it('月份与时间补零', () => {
     expect(formatDateTime('2026-01-05 08:05:59')).toBe('2026-01-05 08:05')
+  })
+})
+
+describe('formatAmPmDateTime', () => {
+  it('格式化为 YYYY-MM-DD AM/PM hh:mm', () => {
+    expect(formatAmPmDateTime('2024-05-20 15:45:00')).toBe('2024-05-20 PM 03:45')
+  })
+
+  it('午夜与正午按 12 小时制处理边界', () => {
+    expect(formatAmPmDateTime('2024-05-20 00:05:00')).toBe('2024-05-20 AM 12:05')
+    expect(formatAmPmDateTime('2024-05-20 12:00:00')).toBe('2024-05-20 PM 12:00')
   })
 })
 

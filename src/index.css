@@ -471,8 +471,15 @@ textarea {
 }
 
 /* ============ Note cards ============ */
+/* Fixed footprint: title (24px) + gap 4px + preview (20px) + gap 8px + meta
+   (18px) inside 14px padding and 1.5px borders. Every card owns all three rows,
+   even when the title or preview is empty. */
 .note-card {
   position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100px;
+  overflow: hidden;
   background: var(--surface);
   border: 1.5px solid transparent;
   border-radius: var(--radius);
@@ -494,7 +501,10 @@ textarea {
 }
 
 .note-card-title {
-  font-size: 16px;
+  flex-shrink: 0;
+  height: 24px;
+  line-height: 24px;
+  font-size: 20px;
   font-weight: 600;
   margin: 0 0 4px;
   display: flex;
@@ -504,6 +514,8 @@ textarea {
 }
 
 .note-card-title .title-text {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -515,22 +527,41 @@ textarea {
 }
 
 .note-card-content {
-  font-size: 13px;
+  flex-shrink: 0;
+  height: 20px;
+  line-height: 20px;
+  font-size: 14px;
   color: var(--text-2);
   margin: 0 0 8px;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  white-space: nowrap;
   overflow: hidden;
-  word-break: break-all;
+  text-overflow: ellipsis;
 }
 
 .note-card-meta {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 8px;
+  height: 18px;
+  line-height: 18px;
   font-size: 12px;
   color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Timestamps ellipsize first on narrow screens; the word count stays intact. */
+.note-card-time {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.note-card-words {
+  flex: none;
 }
 
 .check-dot {
@@ -740,7 +771,7 @@ textarea {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 12px 16px;
+  padding: 12px 16px calc(12px + var(--safe-bottom));
   overflow-y: auto;
 }
 
@@ -752,6 +783,33 @@ textarea {
   font-weight: 700;
   padding: 6px 0;
   margin-bottom: 6px;
+}
+
+/* Note metadata row between the title and the content: created / updated / word count. */
+.editor-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 14px;
+  font-size: 12px;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Let the timestamps ellipsize on narrow screens; the count and separators never shrink. */
+.editor-meta-item {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.editor-meta-sep,
+.editor-meta-count {
+  flex: none;
 }
 
 .editor-title-input::placeholder,

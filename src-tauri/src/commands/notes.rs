@@ -6,7 +6,6 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use tauri::State;
 
 const MAX_VERSIONS: i64 = 20;
-const VERSION_INTERVAL_SECONDS: f64 = 30.0;
 
 fn note_from_row(r: &Row) -> rusqlite::Result<Note> {
     Ok(Note {
@@ -343,7 +342,23 @@ pub fn get_note(state: State<Db>, id: i64) -> Result<Note, String> {
     get_note_by_id(&conn, id)
 }
 
-/// Create a note together with its first version.
+/// Create a note. History versions are only created by explicit user actions,
+/// so creating a note does not snapshot one.
+fn create_note_impl(
+    conn: &Connection,
+    title: &str,
+    content: &str,
+    folder_id: Option<i64>,
+) -> Result<Note, String> {
+    conn.execute(
+        "INSERT INTO notes (title, content, folder_id) VALUES (?1, ?2, ?3)",
+        params![title, content, folder_id],
+    )
+    .map_err(db_err)?;
+    let id = conn.last_insert_rowid();
+    get_note_by_id(conn, id)
+}
+
 #[tauri::command]
 pub fn create_note(
     state: State<Db>,
@@ -351,19 +366,27 @@ pub fn create_note(
     content: String,
     folder_id: Option<i64>,
 ) -> Result<Note, String> {
-    let mut conn = state.0.lock().unwrap();
-    conn.execute(
-        "INSERT INTO notes (title, content, folder_id) VALUES (?1, ?2, ?3)",
-        params![title, content, folder_id],
-    )
-    .map_err(db_err)?;
-    let id = conn.last_insert_rowid();
-    insert_version(&mut *conn, id, &title, &content, None, None, false)?;
-    get_note_by_id(&conn, id)
+    let conn = state.0.lock().unwrap();
+    create_note_impl(&conn, &title, &content, folder_id)
 }
 
-/// Save a note. A new version is created when the content changed AND
-/// (force_version OR the last version is older than 30 seconds).
+/// Save a note's title, content and folder. Saving never creates a history
+/// version; versions are only created explicitly by the user.
+fn save_note_impl(
+    conn: &Connection,
+    id: i64,
+    title: &str,
+    content: &str,
+    folder_id: Option<i64>,
+) -> Result<Note, String> {
+    conn.execute(
+        "UPDATE notes SET title = ?1, content = ?2, folder_id = ?3, updated_at = datetime('now','localtime') WHERE id = ?4",
+        params![title, content, folder_id, id],
+    )
+    .map_err(db_err)?;
+    get_note_by_id(conn, id)
+}
+
 #[tauri::command]
 pub fn save_note(
     state: State<Db>,
@@ -371,49 +394,9 @@ pub fn save_note(
     title: String,
     content: String,
     folder_id: Option<i64>,
-    force_version: Option<bool>,
 ) -> Result<Note, String> {
-    let mut conn = state.0.lock().unwrap();
-    let (old_title, old_content): (String, String) = conn
-        .query_row(
-            "SELECT title, content FROM notes WHERE id = ?1",
-            params![id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .map_err(db_err)?;
-    conn.execute(
-        "UPDATE notes SET title = ?1, content = ?2, folder_id = ?3, updated_at = datetime('now','localtime') WHERE id = ?4",
-        params![title, content, folder_id, id],
-    )
-    .map_err(db_err)?;
-
-    if old_title != title || old_content != content {
-        let last_at: Option<String> = conn
-            .query_row(
-                "SELECT created_at FROM note_versions WHERE note_id = ?1 ORDER BY version_number DESC LIMIT 1",
-                params![id],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(db_err)?;
-        let version_due = match last_at {
-            None => true,
-            Some(t) => {
-                let secs: f64 = conn
-                    .query_row(
-                        "SELECT (julianday('now','localtime') - julianday(?1)) * 86400.0",
-                        params![t],
-                        |r| r.get(0),
-                    )
-                    .map_err(db_err)?;
-                secs >= VERSION_INTERVAL_SECONDS
-            }
-        };
-        if force_version.unwrap_or(false) || version_due {
-            insert_version(&mut *conn, id, &title, &content, None, None, false)?;
-        }
-    }
-    get_note_by_id(&conn, id)
+    let conn = state.0.lock().unwrap();
+    save_note_impl(&conn, id, &title, &content, folder_id)
 }
 
 /// Soft-delete notes: mark deleted_at so they move to the recycle bin
@@ -751,6 +734,15 @@ mod tests {
         .unwrap();
     }
 
+    fn version_count(conn: &Connection, note_id: i64) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM note_versions WHERE note_id = ?1",
+            params![note_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn delta_round_trip_recovers_full_content() {
         let cases: Vec<(&str, &str)> = vec![
@@ -955,6 +947,30 @@ mod tests {
         let v = create_version_impl(&mut conn, 1).unwrap();
         assert_eq!(v.content, "c2");
         assert_eq!(v.is_manual, 1);
+    }
+
+    #[test]
+    fn create_and_save_never_create_versions() {
+        let mut conn = test_conn();
+        let note = create_note_impl(&conn, "t", "c1", None).unwrap();
+        assert_eq!(
+            version_count(&conn, note.id),
+            0,
+            "creating a note must not snapshot a version"
+        );
+
+        // Repeated saves must never append history versions.
+        save_note_impl(&conn, note.id, "t2", "c2", None).unwrap();
+        save_note_impl(&conn, note.id, "t3", "c3", None).unwrap();
+        assert_eq!(
+            version_count(&conn, note.id),
+            0,
+            "saving must not append a history version"
+        );
+
+        // The explicit manual snapshot path is still available.
+        insert_version(&mut conn, note.id, "t3", "c3", None, None, true).unwrap();
+        assert_eq!(version_count(&conn, note.id), 1);
     }
 
     #[test]

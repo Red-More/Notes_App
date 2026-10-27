@@ -4,6 +4,7 @@ import { api } from '../../api'
 import {
   computeKbInset,
   diffLines,
+  formatAmPmDateTime,
   formatDateTime,
   fmtVersion,
   friendlyError,
@@ -49,6 +50,9 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   const [saveState, setSaveState] = useState<SaveState>('clean')
   const [dirty, setDirty] = useState(false)
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null)
+  const [createdAt, setCreatedAt] = useState<string | null>(null)
+  const [updatedAt, setUpdatedAt] = useState<string | null>(null)
+  const [hasNote, setHasNote] = useState(noteId != null)
   const [leaveConfirm, setLeaveConfirm] = useState(false)
   const [strategy] = useState(() => getSaveStrategy())
 
@@ -95,6 +99,8 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
           setTitle(note.title)
           setContent(note.content)
           setCurrentFolderId(note.folderId)
+          setCreatedAt(note.createdAt)
+          setUpdatedAt(note.updatedAt)
           lastSavedRef.current = {
             title: note.title,
             content: note.content,
@@ -111,50 +117,50 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   const isBlank = !title.trim() && !content.trim()
 
   /** Persist current edits; resolves false only when the write failed. */
-  const doSave = useCallback(
-    async (force: boolean) => {
-      const t = title
-      const c = content
-      if (t === lastSavedRef.current.title && c === lastSavedRef.current.content) {
-        // Nothing to write; fall back to "clean" if a save was pending.
-        setSaveState((prev) => (prev === 'saving' ? 'clean' : prev))
-        return true
+  const doSave = useCallback(async () => {
+    const t = title
+    const c = content
+    if (t === lastSavedRef.current.title && c === lastSavedRef.current.content) {
+      // Nothing to write; fall back to "clean" if a save was pending.
+      setSaveState((prev) => (prev === 'saving' ? 'clean' : prev))
+      return true
+    }
+    if (noteIdRef.current == null && isBlank) return true
+    setSaveState('saving')
+    try {
+      if (noteIdRef.current == null) {
+        const note = await api.createNote({
+          title: t,
+          content: c,
+          folderId: currentFolderId,
+        })
+        noteIdRef.current = note.id
+        setHasNote(true)
+        setCreatedAt(note.createdAt)
+        setUpdatedAt(note.updatedAt)
+      } else {
+        const note = await api.saveNote({
+          id: noteIdRef.current,
+          title: t,
+          content: c,
+          folderId: currentFolderId,
+        })
+        setUpdatedAt(note.updatedAt)
       }
-      if (noteIdRef.current == null && isBlank) return true
-      setSaveState('saving')
-      try {
-        if (noteIdRef.current == null) {
-          const note = await api.createNote({
-            title: t,
-            content: c,
-            folderId: currentFolderId,
-          })
-          noteIdRef.current = note.id
-        } else {
-          await api.saveNote({
-            id: noteIdRef.current,
-            title: t,
-            content: c,
-            folderId: currentFolderId,
-            forceVersion: force,
-          })
-        }
-        lastSavedRef.current = { title: t, content: c }
-        // The content may have changed again mid-write; reflect that state.
-        setDirty(title !== t || content !== c)
-        setSaveState(title === t && content === c ? 'clean' : 'dirty')
-        setLastSavedAt(Date.now())
-        return true
-      } catch (e) {
-        console.error('保存失败', e)
-        setDirty(true)
-        setSaveState('dirty')
-        toast(friendlyError(e))
-        return false
-      }
-    },
-    [title, content, isBlank, currentFolderId],
-  )
+      lastSavedRef.current = { title: t, content: c }
+      // The content may have changed again mid-write; reflect that state.
+      setDirty(title !== t || content !== c)
+      setSaveState(title === t && content === c ? 'clean' : 'dirty')
+      setLastSavedAt(Date.now())
+      return true
+    } catch (e) {
+      console.error('保存失败', e)
+      setDirty(true)
+      setSaveState('dirty')
+      toast(friendlyError(e))
+      return false
+    }
+  }, [title, content, isBlank, currentFolderId])
 
   // Mark edits as unsaved (except for a brand-new blank note).
   useEffect(() => {
@@ -172,21 +178,21 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   // Real-time: short debounce write after typing stops.
   useEffect(() => {
     if (strategy.key !== 'realtime' || !dirty) return
-    const t = setTimeout(() => void doSave(false), 1200)
+    const t = setTimeout(() => void doSave(), 1200)
     return () => clearTimeout(t)
   }, [dirty, strategy.key, doSave])
 
   // Interval: write on the configured cadence.
   useEffect(() => {
     if (strategy.key !== 'interval' || !dirty) return
-    const t = setTimeout(() => void doSave(false), strategy.intervalMin * 60_000)
+    const t = setTimeout(() => void doSave(), strategy.intervalMin * 60_000)
     return () => clearTimeout(t)
   }, [dirty, strategy.key, strategy.intervalMin, doSave])
 
   // Smart: edits only mark unsaved; a periodic fallback flushes them.
   useEffect(() => {
     if (strategy.key !== 'smart' || !dirty) return
-    const t = setInterval(() => void doSave(false), 30_000)
+    const t = setInterval(() => void doSave(), 30_000)
     return () => clearInterval(t)
   }, [dirty, strategy.key, doSave])
 
@@ -194,7 +200,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   // unload, so an abrupt exit cannot lose the latest edits.
   useEffect(() => {
     const flush = () => {
-      if (dirty) void doSave(true)
+      if (dirty) void doSave()
     }
     const onVisibility = () => {
       if (document.hidden) flush()
@@ -214,7 +220,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault()
-        void doSave(true)
+        void doSave()
       }
     }
     window.addEventListener('keydown', onKey)
@@ -415,14 +421,14 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
       return
     }
     // Stay on the page when the leave-save fails so edits are not lost.
-    if (await doSave(true)) {
+    if (await doSave()) {
       onBack()
     }
   }
 
   const leaveSaving = async () => {
     // On failure keep the dialog open — the toast explains why.
-    if (await doSave(true)) {
+    if (await doSave()) {
       setLeaveConfirm(false)
       onBack()
     }
@@ -460,6 +466,8 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
       setTitle(note.title)
       setContent(note.content)
       setCurrentFolderId(note.folderId)
+      setCreatedAt(note.createdAt)
+      setUpdatedAt(note.updatedAt)
       lastSavedRef.current = { title: note.title, content: note.content }
       setDirty(false)
       setSaveState('clean')
@@ -524,13 +532,14 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     setCurrentFolderId(fid)
     if (noteIdRef.current == null) return
     try {
-      // Folder-only change: content unchanged so no version is created.
-      await api.saveNote({
+      // Folder-only change: persist the selection without touching the content.
+      const note = await api.saveNote({
         id: noteIdRef.current,
         title,
         content,
         folderId: fid,
       })
+      setUpdatedAt(note.updatedAt)
       lastSavedRef.current = { title, content }
       setDirty(false)
       setSaveState('clean')
@@ -545,6 +554,8 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     (currentFolderId == null ? defaultFolderName : '')
 
   const wordCount = content.length
+  const createdAtLabel = createdAt ? formatAmPmDateTime(createdAt) : '—'
+  const updatedAtLabel = updatedAt ? formatAmPmDateTime(updatedAt) : '—'
   const diffRows = compareVersion ? diffLines(compareVersion.content, content) : []
   const diffAdd = diffRows.filter((r) => r.type === 'add').length
   const diffDel = diffRows.filter((r) => r.type === 'del').length
@@ -552,11 +563,13 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   const statusText =
     saveState === 'saving'
       ? '保存中…'
-      : saveState === 'dirty'
-        ? '未保存'
-        : strategy.key === 'interval' && lastSavedAt
-          ? `已保存 ${hhmm(lastSavedAt)}`
-          : '已保存'
+      : !hasNote
+        ? '未创建'
+        : saveState === 'dirty'
+          ? '未保存'
+          : strategy.key === 'interval' && lastSavedAt
+            ? `已保存 ${hhmm(lastSavedAt)}`
+            : '已保存'
 
   const statusClass =
     saveState === 'saving' ? 'saving' : saveState === 'dirty' ? 'dirty' : ''
@@ -584,7 +597,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
           <button
             type="button"
             className="icon-btn"
-            onClick={() => void doSave(true)}
+            onClick={() => void doSave()}
             aria-label="保存"
             disabled={!dirty}
           >
@@ -656,6 +669,23 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
               onChange={(e) => setTitle(e.target.value)}
               placeholder="标题"
             />
+            <div className="editor-meta">
+              <span className="editor-meta-item" title="创建时间">
+                {createdAtLabel}
+              </span>
+              <span className="editor-meta-sep" aria-hidden="true">
+                |
+              </span>
+              <span className="editor-meta-item" title="上次更新时间">
+                {updatedAtLabel}
+              </span>
+              <span className="editor-meta-sep" aria-hidden="true">
+                |
+              </span>
+              <span className="editor-meta-count" title="正文字数">
+                {wordCount}字
+              </span>
+            </div>
             {previewOpen ? (
               <div
                 className="markdown-preview"
@@ -678,13 +708,6 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
             )}
           </div>
           <div ref={mirrorRef} className="caret-mirror" aria-hidden="true" />
-          <div className="editor-bottombar">
-            <span>{wordCount} 字</span>
-            <span className={`save-status ${statusClass}`}>
-              {saveState === 'dirty' && <span className="dirty-dot" />}
-              {statusText}
-            </span>
-          </div>
         </>
       )}
 
