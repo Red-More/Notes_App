@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { save } from '@tauri-apps/plugin-dialog'
 import { api } from '../../api'
 import {
-  useCollapsibleSearch,
+  useCollapsibleHeader,
   useDebouncedSearch,
   useElasticOverscroll,
   useLongPress,
@@ -79,8 +79,9 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
   const [visible, setVisible] = useState(PAGE)
 
   const sentinelRef = useRef<HTMLDivElement>(null)
-  // Scroll-linked collapsing search bar (features spec: progressive shrink + fade).
-  const { searchWrapRef, scrollRef, contentShiftRef, scrollEl } = useCollapsibleSearch()
+  // Scroll-linked collapsing header (large title + search bar).
+  const { largeTitleRef, searchWrapRef, scrollRef, contentShiftRef, scrollEl } =
+    useCollapsibleHeader()
 
   const load = useCallback(async () => {
     try {
@@ -330,6 +331,7 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
         <PageHeader
           title="笔记"
           searchWrapRef={searchWrapRef}
+          largeTitleRef={largeTitleRef}
           titleRow={selectionTitleRow}
           actions={[
             {

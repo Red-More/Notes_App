@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 /**
  * Debounced search state: returns the raw input value, its setter and a
@@ -78,66 +78,97 @@ export function useScrollContainer() {
 }
 
 /**
- * Scroll-linked collapsing search bar: once the list scrolls past its top,
- * the search area progressively shrinks in height and fades out until fully
- * hidden; scrolling back up expands it in reverse.
+ * Scroll-linked collapsing header: as the list scrolls past its top, the
+ * large left-aligned title and then the search bar shrink in height and fade
+ * out, and expand back in reverse when scrolling up.
  *
- * The collapse target is PageHeader's `.search-collapse` wrapper, which has no
- * padding or border, so its height can truly reach 0. The padded `.search-bar`
- * itself would stop shrinking at ~20px (box-sizing: border-box), leaving an
- * invisible strip behind.
+ * The centered title fades in as the large title collapses: it is hidden while
+ * the large title is expanded and fully visible once the large title is gone, so
+ * the two rows never compete for attention or show redundant text.
+ *
+ * The collapse targets are PageHeader's `.large-title-collapse` and
+ * `.search-collapse` wrappers, which have no padding or border, so their height
+ * can truly reach 0. The padded inner rows would stop shrinking at their own
+ * padding (box-sizing: border-box), leaving an invisible strip behind.
  *
  * Shrinking the header also grows the list viewport by the same amount, so the
  * content would otherwise move at twice the finger speed and slide under the
- * bar before the bar is fully hidden. The consumed scroll is therefore
- * cancelled 1:1 on the separate `.scroll-shift` wrapper: the list only follows
- * the bar's height change and starts scrolling once the bar is collapsed.
+ * header before it is fully hidden. The consumed scroll is therefore cancelled
+ * 1:1 on the separate `.scroll-shift` wrapper: the list only follows the header
+ * height change and starts scrolling once the header is collapsed.
  *
- * Returns a ref for the collapse wrapper (PageHeader's `searchWrapRef`), a
- * callback ref for the scroll container, a ref for the `.scroll-shift` content
- * wrapper (React re-invokes it with the live element whenever the host subtree
- * remounts, e.g. after the settings page closes), and the scroll element itself
- * for other scroll behaviours.
+ * Returns refs for the two collapse wrappers (PageHeader's `largeTitleRef` /
+ * `searchWrapRef`), a callback ref for the scroll container, a ref for the
+ * `.scroll-shift` content wrapper (React re-invokes it with the live element
+ * whenever the host subtree remounts, e.g. after the settings page closes), and
+ * the scroll element itself for other scroll behaviours.
  */
-export function useCollapsibleSearch() {
+export function useCollapsibleHeader() {
   const wrapRef = useRef<HTMLDivElement>(null)
+  const largeRef = useRef<HTMLDivElement>(null)
   const shiftRef = useRef<HTMLDivElement>(null)
   // The scroll container the collapse listens to, kept in sync by the callback
   // ref. Callback-ref + state (instead of object ref + effect) stays
   // React-Compiler-friendly: no ref access during render, no deps-less effect.
   const { scrollRef, scrollEl } = useScrollContainer()
 
-  useEffect(() => {
+  // Layout effect: the collapsed geometry must be applied before the first
+  // paint, otherwise a remount (e.g. returning from settings) flashes the
+  // expanded header for one frame.
+  useLayoutEffect(() => {
     const wrap = wrapRef.current
     const sc = scrollEl
     if (!wrap || !sc) return
+    const header = wrap.parentElement
     const bar = wrap.firstElementChild as HTMLElement | null
-    // The inner bar keeps its natural height while the wrapper is clipped, so
-    // re-attaching (e.g. returning from settings) still yields the full travel.
-    const full = bar?.offsetHeight || wrap.scrollHeight || 46
+    const largeWrap = largeRef.current
+    const largeBar = largeWrap?.firstElementChild as HTMLElement | null
+    // The inner rows keep their natural height while the wrappers are clipped,
+    // so re-attaching (e.g. returning from settings) still yields full travel.
+    const searchH = bar?.offsetHeight || wrap.scrollHeight || 46
+    const largeH = largeWrap ? largeBar?.offsetHeight || largeWrap.scrollHeight || 0 : 0
+    const totalH = largeH + searchH
+
     const update = () => {
       // Clamp: iOS rubber-band overscroll can report a negative scrollTop.
       const scrolled = Math.max(0, sc.scrollTop)
-      const p = Math.max(0, Math.min(1, scrolled / full))
-      wrap.style.height = `${full * (1 - p)}px`
-      wrap.style.opacity = String(1 - p)
+      // Stage 1: the large title collapses first while the centered title
+      // crossfades in; the search bar stays fully expanded until it is gone.
+      const lp = largeH > 0 ? Math.max(0, Math.min(1, scrolled / largeH)) : 1
+      if (largeWrap) {
+        largeWrap.style.height = `${largeH * (1 - lp)}px`
+        // Fade out over the first three quarters of the collapse, so the row is
+        // mostly transparent before the shrinking clip could cut the glyphs.
+        largeWrap.style.opacity = String(Math.max(0, 1 - lp * (4 / 3)))
+        largeWrap.style.visibility = lp >= 1 ? 'hidden' : ''
+      }
+      // The centered title fades in over the second half. The overlap is limited
+      // to faint opacity, so the header never goes blank and the two rows never
+      // read as competing titles. The var lives on .page-header so a remounted
+      // title inherits the current mix immediately (see .page-title).
+      const titleMix = largeH > 0 ? Math.max(0, Math.min(1, (lp - 0.5) * 2)) : 1
+      header?.style.setProperty('--header-title-mix', String(titleMix))
+      // Stage 2: the search bar collapses over the scroll range that follows.
+      const sp = Math.max(0, Math.min(1, (scrolled - largeH) / searchH))
+      wrap.style.height = `${searchH * (1 - sp)}px`
+      wrap.style.opacity = String(1 - sp)
       // A fully collapsed bar must not stay focusable or intercept taps.
-      wrap.style.visibility = p >= 1 ? 'hidden' : ''
-      // Cancel the scroll consumed by the collapse on the content itself, so
-      // the list moves only with the bar and never at double speed. Once the
-      // bar is hidden the offset stays pinned, which keeps the content position
-      // continuous for the rest of the scroll range.
-      const shift = Math.min(scrolled, full)
+      wrap.style.visibility = sp >= 1 ? 'hidden' : ''
+      // Cancel the scroll consumed by both collapse stages on the content, so
+      // the list moves only with the header and never at double speed. Once
+      // the header is hidden the offset stays pinned, which keeps the content
+      // position continuous for the rest of the scroll range.
+      const shift = Math.min(scrolled, totalH)
       if (shiftRef.current) {
         shiftRef.current.style.transform = `translate3d(0, ${shift}px, 0)`
       }
       // Dismiss the soft keyboard once the search bar is fully hidden.
-      if (p >= 1 && wrap.contains(document.activeElement)) {
+      if (sp >= 1 && wrap.contains(document.activeElement)) {
         ;(document.activeElement as HTMLElement).blur?.()
       }
     }
-    // Update synchronously: scroll events fire before paint, so the bar keeps
-    // exact pace with the list. Deferring to rAF adds a visible one-frame lag.
+    // Update synchronously: scroll events fire before paint, so the header
+    // keeps exact pace with the list. Deferring to rAF adds a one-frame lag.
     const onScroll = () => update()
     sc.addEventListener('scroll', onScroll, { passive: true })
     // Sync immediately: the container can already be scrolled on re-attach.
@@ -147,7 +178,13 @@ export function useCollapsibleSearch() {
     }
   }, [scrollEl])
 
-  return { searchWrapRef: wrapRef, scrollRef, contentShiftRef: shiftRef, scrollEl }
+  return {
+    largeTitleRef: largeRef,
+    searchWrapRef: wrapRef,
+    scrollRef,
+    contentShiftRef: shiftRef,
+    scrollEl,
+  }
 }
 
 export interface ElasticOverscrollOptions {

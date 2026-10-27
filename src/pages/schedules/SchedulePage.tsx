@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../api'
-import { useCollapsibleSearch, useDebouncedSearch, useElasticOverscroll } from '../../hooks'
+import { useCollapsibleHeader, useDebouncedSearch, useElasticOverscroll } from '../../hooks'
 import { dateStr, monthStr, shortTime, friendlyError } from '../../utils'
 import type { Schedule } from '../../types'
 import { ConfirmDialog, Modal } from '../../components/ui'
@@ -32,8 +32,9 @@ export default function SchedulePage({ isActive }: { isActive: boolean }) {
   const [deleteConfirm, setDeleteConfirm] = useState<Schedule | null>(null)
   const [loading, setLoading] = useState(true)
 
-  // Scroll-linked collapsing search bar (same behavior as the notes page).
-  const { searchWrapRef, scrollRef, contentShiftRef, scrollEl } = useCollapsibleSearch()
+  // Scroll-linked collapsing header (large title + search bar).
+  const { largeTitleRef, searchWrapRef, scrollRef, contentShiftRef, scrollEl } =
+    useCollapsibleHeader()
   // Same elastic overscroll as the notes page (no pull-to-refresh here).
   const { pullDist, springing } = useElasticOverscroll(scrollEl)
 
@@ -191,6 +192,7 @@ export default function SchedulePage({ isActive }: { isActive: boolean }) {
       <PageHeader
         title="日程"
         searchWrapRef={searchWrapRef}
+        largeTitleRef={largeTitleRef}
         search={{ placeholder: '搜索日程', value: searchInput, onChange: setSearchInput }}
       />
 

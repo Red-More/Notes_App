@@ -19,10 +19,12 @@
   --shadow: 0 2px 12px rgba(20, 22, 28, 0.06);
   --radius: 14px;
   --radius-sm: 10px;
-  /* Search bar height and the extra scroll range a short list needs so the
-     scroll-linked collapse can still reach zero (see .scroll-content below). */
+  /* Large title and search bar heights, plus the extra scroll range a short
+     list needs so the scroll-linked collapse can still reach zero (see
+     .scroll-shift below). */
   --search-bar-height: 46px;
-  --search-collapse-travel: 92px;
+  --large-title-height: 54px;
+  --search-collapse-travel: calc(2 * (var(--large-title-height) + var(--search-bar-height)));
   /* ===== Mobile safe-area adaptation spec =====
    * --safe-top / --safe-bottom : OS-reported insets (0 when the OS reports none).
    * --tabbar-offset            : fixed lift so bottom bars clear the gesture area
@@ -185,22 +187,22 @@ textarea {
   display: none;
 }
 
-/* Wrapper that cancels the scroll consumed by the collapsing search bar, so
-   the list only follows the bar's height change instead of scrolling twice
-   (see useCollapsibleSearch). */
+/* Wrapper that cancels the scroll consumed by the collapsing header, so the
+   list only follows the header's height change instead of scrolling twice
+   (see useCollapsibleHeader). */
 .scroll-shift {
   will-change: transform;
-  /* The wrapper is pushed down by the shift distance when the bar collapses;
+  /* The wrapper is pushed down by the shift distance when the header collapses;
      reserving that distance at the bottom keeps the list's clearance above
      the tabbar unchanged at the end of the scroll range. */
-  padding-bottom: var(--search-bar-height);
+  padding-bottom: calc(var(--large-title-height) + var(--search-bar-height));
 }
 
-/* A short list must still be able to scroll the search bar away. Collapsing
-   the header grows the scroll viewport, so reaching a fully collapsed bar
-   needs twice the bar height of scroll range (46px to collapse + 46px that
-   the growing viewport would otherwise swallow); without this the browser
-   clamps scrollTop and the bar snaps back open. */
+/* A short list must still be able to scroll the header away. Collapsing the
+   header grows the scroll viewport, so reaching a fully collapsed header needs
+   twice its height (large title + search bar) of scroll range — one half to
+   collapse, one half that the growing viewport would otherwise swallow;
+   without this the browser clamps scrollTop and the header snaps back open. */
 .page-scroll > .scroll-shift {
   min-height: calc(100% + var(--search-collapse-travel));
 }
@@ -272,6 +274,9 @@ textarea {
   margin: 0;
   letter-spacing: 0.2px;
   text-align: center;
+  /* Crossfades with the large title: 0 while the large title is expanded, 1
+     once it is collapsed (mix is driven by useCollapsibleHeader). */
+  opacity: var(--header-title-mix, 1);
 }
 
 /* Actions float on the right so the title stays optically centered on every
@@ -284,6 +289,28 @@ textarea {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+/* Collapse viewport for the scroll-linked large title. Like .search-collapse it
+   has no padding, border or background, so `height: 0` truly removes the row. */
+.large-title-collapse {
+  overflow: hidden;
+}
+
+/* Left-aligned module title shown while the header is expanded. It is larger
+   than the centered .page-title, which fades in as this row collapses. */
+.large-title {
+  height: var(--large-title-height);
+  margin: 0;
+  padding: 0 2px 10px;
+  font-size: 28px;
+  line-height: 44px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Collapse viewport for the scroll-linked search bar. It has no padding,

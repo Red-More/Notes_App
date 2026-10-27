@@ -16,6 +16,8 @@ interface PageHeaderProps {
   titleRow?: ReactNode
   /** Ref to the collapse wrapper around the search bar, for scroll-collapsing headers. */
   searchWrapRef?: Ref<HTMLDivElement>
+  /** Ref to the collapse wrapper around the large left-aligned title. */
+  largeTitleRef?: Ref<HTMLDivElement>
   search?: {
     placeholder: string
     value: string
@@ -32,6 +34,7 @@ export default function PageHeader({
   actions,
   search,
   searchWrapRef,
+  largeTitleRef,
   titleRow,
 }: PageHeaderProps) {
   const headerActions = actions ?? (action ? [action] : [])
@@ -59,6 +62,14 @@ export default function PageHeader({
           </>
         )}
       </div>
+      {search && largeTitleRef && (
+        // Large title that collapses before the search bar; the centered title
+        // above fades in as this row disappears (see useCollapsibleHeader). It
+        // only renders when the collapse hook actually drives it.
+        <div className="large-title-collapse" ref={largeTitleRef}>
+          <h1 className="large-title">{title}</h1>
+        </div>
+      )}
       {search && (
         <div className="search-collapse" ref={searchWrapRef}>
           <div className="search-bar">
