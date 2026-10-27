@@ -24,7 +24,7 @@
      .scroll-shift below). */
   --search-bar-height: 46px;
   --large-title-height: 54px;
-  --search-collapse-travel: calc(2 * (var(--large-title-height) + var(--search-bar-height)));
+  --search-collapse-travel: calc(var(--large-title-height) + var(--search-bar-height));
   /* ===== Mobile safe-area adaptation spec =====
    * --safe-top / --safe-bottom : OS-reported insets (0 when the OS reports none).
    * --tabbar-offset            : fixed lift so bottom bars clear the gesture area
@@ -198,11 +198,10 @@ textarea {
   padding-bottom: calc(var(--large-title-height) + var(--search-bar-height));
 }
 
-/* A short list must still be able to scroll the header away. Collapsing the
-   header grows the scroll viewport, so reaching a fully collapsed header needs
-   twice its height (large title + search bar) of scroll range — one half to
-   collapse, one half that the growing viewport would otherwise swallow;
-   without this the browser clamps scrollTop and the header snaps back open. */
+/* A short list must still be able to scroll the header away. The extra range
+   equals the header's collapsed height, so the scroll range ends exactly when
+   the header is fully hidden: short/empty lists never scroll their content
+   under the header (which used to clip the empty-state icon after the collapse). */
 .page-scroll > .scroll-shift {
   min-height: calc(100% + var(--search-collapse-travel));
 }
