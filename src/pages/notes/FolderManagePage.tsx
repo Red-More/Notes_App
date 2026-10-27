@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { save } from '@tauri-apps/plugin-dialog'
 import { api } from '../../api'
-import { useLongPress } from '../../hooks'
+import { useElasticOverscroll, useLongPress, useScrollContainer } from '../../hooks'
 import { exportTs, safeFileName, friendlyError } from '../../utils'
 import type { Folder, FolderStats } from '../../types'
 import { ConfirmDialog, Modal } from '../../components/ui'
@@ -36,6 +36,10 @@ export default function FolderManagePage({ onBack }: Props) {
   const [renameName, setRenameName] = useState('')
   const [deleteConfirm, setDeleteConfirm] = useState(false)
   const [trashOpen, setTrashOpen] = useState(false)
+
+  // Same elastic overscroll as the tab lists.
+  const { scrollRef, scrollEl } = useScrollContainer()
+  const { pullDist, springing } = useElasticOverscroll(scrollEl)
 
   const load = useCallback(async () => {
     try {
@@ -253,84 +257,87 @@ export default function FolderManagePage({ onBack }: Props) {
         </div>
       )}
 
-      <div className="page-scroll" style={{ paddingTop: 16 }}>
-        {/* Virtual rows */}
-        <div className="folder-row virtual">
-          <div className="folder-icon">
-            <IconFolder size={19} />
-          </div>
-          <div className="folder-main">
-            <div className="folder-name">全部</div>
-            <div className="folder-count">{stats?.total ?? 0} 篇笔记</div>
-          </div>
-        </div>
+      <div className="page-scroll" style={{ paddingTop: 16 }} ref={scrollRef}>
         <div
-          className={`folder-row virtual${selectMode && includesDefault ? ' selected' : ''}`}
-          onClick={() => {
-            if (didLongPress()) return
-            if (selectMode) toggleSelected(DEFAULT_FOLDER_ID)
-          }}
-          {...bind()}
+          className={`scroll-content ${springing ? 'springing' : ''}`}
+          style={pullDist ? { transform: `translateY(${pullDist}px)` } : undefined}
         >
-          {selectMode && (
-            <span className="check-dot">{includesDefault && <IconCheck size={14} />}</span>
-          )}
-          <div className="folder-icon">
-            <IconFolder size={19} />
+          {/* Virtual rows */}
+          <div className="folder-row virtual">
+            <div className="folder-icon">
+              <IconFolder size={19} />
+            </div>
+            <div className="folder-main">
+              <div className="folder-name">全部</div>
+              <div className="folder-count">{stats?.total ?? 0} 篇笔记</div>
+            </div>
           </div>
-          <div className="folder-main">
-            <div className="folder-name">{defaultName}</div>
-            <div className="folder-count">{stats?.unclassified ?? 0} 篇笔记</div>
-          </div>
-        </div>
-
-        {folders.map((f) => (
           <div
-            key={f.id}
-            className={`folder-row ${selectMode && selected.has(f.id) ? 'selected' : ''}`}
+            className={`folder-row virtual${selectMode && includesDefault ? ' selected' : ''}`}
             onClick={() => {
               if (didLongPress()) return
-              if (selectMode) toggleSelected(f.id)
+              if (selectMode) toggleSelected(DEFAULT_FOLDER_ID)
             }}
             {...bind()}
           >
             {selectMode && (
-              <span className="check-dot">
-                {selected.has(f.id) && <IconCheck size={14} />}
-              </span>
+              <span className="check-dot">{includesDefault && <IconCheck size={14} />}</span>
             )}
             <div className="folder-icon">
               <IconFolder size={19} />
             </div>
             <div className="folder-main">
-              <div className="folder-name">
-                {f.isPinned === 1 && <span className="pin-badge">📌</span>}
-                {f.name}
-              </div>
-              <div className="folder-count">{f.noteCount} 篇笔记</div>
+              <div className="folder-name">{defaultName}</div>
+              <div className="folder-count">{stats?.unclassified ?? 0} 篇笔记</div>
             </div>
-            {!selectMode && (
-              <button
-                type="button"
-                className="icon-btn"
-                aria-label="打包导出"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  void handleExport(f)
-                }}
-              >
-                <IconExport size={19} />
-              </button>
-            )}
           </div>
-        ))}
 
-        {folders.length === 0 && (
-          <div className="empty-state">
-            <IconFolder size={44} />
-            <div>还没有文件夹，点击下方按钮创建</div>
-          </div>
-        )}
+          {folders.map((f) => (
+            <div
+              key={f.id}
+              className={`folder-row ${selectMode && selected.has(f.id) ? 'selected' : ''}`}
+              onClick={() => {
+                if (didLongPress()) return
+                if (selectMode) toggleSelected(f.id)
+              }}
+              {...bind()}
+            >
+              {selectMode && (
+                <span className="check-dot">{selected.has(f.id) && <IconCheck size={14} />}</span>
+              )}
+              <div className="folder-icon">
+                <IconFolder size={19} />
+              </div>
+              <div className="folder-main">
+                <div className="folder-name">
+                  {f.isPinned === 1 && <span className="pin-badge">📌</span>}
+                  {f.name}
+                </div>
+                <div className="folder-count">{f.noteCount} 篇笔记</div>
+              </div>
+              {!selectMode && (
+                <button
+                  type="button"
+                  className="icon-btn"
+                  aria-label="打包导出"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    void handleExport(f)
+                  }}
+                >
+                  <IconExport size={19} />
+                </button>
+              )}
+            </div>
+          ))}
+
+          {folders.length === 0 && (
+            <div className="empty-state">
+              <IconFolder size={44} />
+              <div>还没有文件夹，点击下方按钮创建</div>
+            </div>
+          )}
+        </div>
       </div>
 
       {!selectMode ? (

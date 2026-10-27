@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../../api'
-import { useCollapsibleSearch, useDebouncedSearch } from '../../hooks'
+import { useCollapsibleSearch, useDebouncedSearch, useElasticOverscroll } from '../../hooks'
 import { friendlyError } from '../../utils'
 import type { Contact } from '../../types'
 import { ConfirmDialog, Modal } from '../../components/ui'
@@ -42,7 +42,9 @@ export default function ContactPage({ isActive }: { isActive: boolean }) {
   const [loading, setLoading] = useState(true)
 
   // Scroll-linked collapsing search bar (same behavior as the notes page).
-  const { searchWrapRef, scrollRef } = useCollapsibleSearch()
+  const { searchWrapRef, scrollRef, contentShiftRef, scrollEl } = useCollapsibleSearch()
+  // Same elastic overscroll as the notes page (no pull-to-refresh here).
+  const { pullDist, springing } = useElasticOverscroll(scrollEl)
 
   const load = useCallback(async () => {
     try {
@@ -174,30 +176,35 @@ export default function ContactPage({ isActive }: { isActive: boolean }) {
       <ChipRow items={tags.map((t) => ({ key: t, label: t }))} value={tag} onChange={setTag} />
 
       <div className="page-scroll" ref={scrollRef}>
-        <div className="scroll-content">
-          {loading && contacts.length === 0 ? (
-            <div className="list-loading">加载中…</div>
-          ) : contacts.length === 0 ? (
-            <EmptyState
-              icon={<IconUsers size={44} />}
-              text={query || tag !== '全部' ? '没有匹配的联系人' : '还没有联系人，点击 + 添加'}
-            />
-          ) : (
-            contacts.map((c) => (
-              <div key={c.id} className="contact-row" onClick={() => openEdit(c)}>
-                <div className="avatar">{c.name.charAt(0)}</div>
-                <div className="contact-main">
-                  <div className="contact-name">
-                    {c.name}
-                    <span className="chip mini">{c.tag}</span>
-                  </div>
-                  <div className="contact-sub">
-                    {[c.company, c.phone].filter(Boolean).join(' · ') || '暂无信息'}
+        <div className="scroll-shift" ref={contentShiftRef}>
+          <div
+            className={`scroll-content ${springing ? 'springing' : ''}`}
+            style={pullDist ? { transform: `translateY(${pullDist}px)` } : undefined}
+          >
+            {loading && contacts.length === 0 ? (
+              <div className="list-loading">加载中…</div>
+            ) : contacts.length === 0 ? (
+              <EmptyState
+                icon={<IconUsers size={44} />}
+                text={query || tag !== '全部' ? '没有匹配的联系人' : '还没有联系人，点击 + 添加'}
+              />
+            ) : (
+              contacts.map((c) => (
+                <div key={c.id} className="contact-row" onClick={() => openEdit(c)}>
+                  <div className="avatar">{c.name.charAt(0)}</div>
+                  <div className="contact-main">
+                    <div className="contact-name">
+                      {c.name}
+                      <span className="chip mini">{c.tag}</span>
+                    </div>
+                    <div className="contact-sub">
+                      {[c.company, c.phone].filter(Boolean).join(' · ') || '暂无信息'}
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))
-          )}
+              ))
+            )}
+          </div>
         </div>
       </div>
 

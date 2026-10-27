@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../../api'
+import { useElasticOverscroll, useScrollContainer } from '../../hooks'
 import { formatRelative, friendlyError } from '../../utils'
 import type { Note } from '../../types'
 import { ConfirmDialog } from '../../components/ui'
@@ -18,6 +19,10 @@ export default function RecycleBinPage({ onBack, defaultFolderName }: Props) {
   const [emptyConfirm, setEmptyConfirm] = useState(false)
   const [purgeTarget, setPurgeTarget] = useState<Note | null>(null)
   const [loading, setLoading] = useState(true)
+
+  // Same elastic overscroll as the tab lists.
+  const { scrollRef, scrollEl } = useScrollContainer()
+  const { pullDist, springing } = useElasticOverscroll(scrollEl)
 
   const load = useCallback(async () => {
     try {
@@ -100,39 +105,44 @@ export default function RecycleBinPage({ onBack, defaultFolderName }: Props) {
         </button>
       </div>
 
-      <div className="page-scroll" style={{ paddingTop: 16 }}>
-        {loading && notes.length === 0 ? (
-          <div className="list-loading">加载中…</div>
-        ) : notes.length === 0 ? (
-          <EmptyState icon={<IconTrash size={44} />} text="回收站是空的" />
-        ) : (
-          notes.map((n) => (
-            <div key={n.id} className="folder-row">
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div className="folder-name">{n.title || '无标题'}</div>
-                <div className="folder-count">
-                  {n.folderName ?? defaultFolderName} · {formatRelative(n.updatedAt)}
+      <div className="page-scroll" style={{ paddingTop: 16 }} ref={scrollRef}>
+        <div
+          className={`scroll-content ${springing ? 'springing' : ''}`}
+          style={pullDist ? { transform: `translateY(${pullDist}px)` } : undefined}
+        >
+          {loading && notes.length === 0 ? (
+            <div className="list-loading">加载中…</div>
+          ) : notes.length === 0 ? (
+            <EmptyState icon={<IconTrash size={44} />} text="回收站是空的" />
+          ) : (
+            notes.map((n) => (
+              <div key={n.id} className="folder-row">
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div className="folder-name">{n.title || '无标题'}</div>
+                  <div className="folder-count">
+                    {n.folderName ?? defaultFolderName} · {formatRelative(n.updatedAt)}
+                  </div>
                 </div>
+                <button
+                  type="button"
+                  className="icon-btn"
+                  aria-label="恢复"
+                  onClick={() => void handleRestore(n)}
+                >
+                  <IconRestore size={19} />
+                </button>
+                <button
+                  type="button"
+                  className="icon-btn"
+                  aria-label="永久删除"
+                  onClick={() => setPurgeTarget(n)}
+                >
+                  <IconTrash size={19} />
+                </button>
               </div>
-              <button
-                type="button"
-                className="icon-btn"
-                aria-label="恢复"
-                onClick={() => void handleRestore(n)}
-              >
-                <IconRestore size={19} />
-              </button>
-              <button
-                type="button"
-                className="icon-btn"
-                aria-label="永久删除"
-                onClick={() => setPurgeTarget(n)}
-              >
-                <IconTrash size={19} />
-              </button>
-            </div>
-          ))
-        )}
+            ))
+          )}
+        </div>
       </div>
 
       {purgeTarget && (

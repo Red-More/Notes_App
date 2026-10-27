@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../../api'
-import { useCollapsibleSearch, useDebouncedSearch } from '../../hooks'
+import { useCollapsibleSearch, useDebouncedSearch, useElasticOverscroll } from '../../hooks'
 import { parseDbTime, friendlyError } from '../../utils'
 import type { Todo } from '../../types'
 import { ConfirmDialog, Modal } from '../../components/ui'
@@ -53,7 +53,9 @@ export default function TodoPage({ isActive }: Props) {
 
   const sentinelRef = useRef<HTMLDivElement>(null)
   // Scroll-linked collapsing search bar (same behavior as the notes page).
-  const { searchWrapRef, scrollRef } = useCollapsibleSearch()
+  const { searchWrapRef, scrollRef, contentShiftRef, scrollEl } = useCollapsibleSearch()
+  // Same elastic overscroll as the notes page (no pull-to-refresh here).
+  const { pullDist, springing } = useElasticOverscroll(scrollEl)
 
   const load = useCallback(async () => {
     try {
@@ -204,90 +206,95 @@ export default function TodoPage({ isActive }: Props) {
       />
 
       <div className="page-scroll" ref={scrollRef}>
-        <div className="scroll-content">
-          {loading && filtered.length === 0 ? (
-            <div className="list-loading">加载中…</div>
-          ) : (
-            filtered.length === 0 && (
-              <EmptyState
-                icon={<IconTodo size={44} />}
-                text={query || category !== '全部' ? '没有匹配的待办' : '还没有待办，点击 + 创建'}
-              />
-            )
-          )}
+        <div className="scroll-shift" ref={contentShiftRef}>
+          <div
+            className={`scroll-content ${springing ? 'springing' : ''}`}
+            style={pullDist ? { transform: `translateY(${pullDist}px)` } : undefined}
+          >
+            {loading && filtered.length === 0 ? (
+              <div className="list-loading">加载中…</div>
+            ) : (
+              filtered.length === 0 && (
+                <EmptyState
+                  icon={<IconTodo size={44} />}
+                  text={query || category !== '全部' ? '没有匹配的待办' : '还没有待办，点击 + 创建'}
+                />
+              )
+            )}
 
-          {active.length > 0 && <div className="section-title">进行中 · {active.length}</div>}
-          {active.slice(0, visible).map((t) => (
-            <div key={t.id} className="todo-row" onClick={() => openEdit(t)}>
-              <button
-                type="button"
-                className="todo-check"
-                aria-label="完成"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  void handleToggle(t)
-                }}
-              />
-              <div className="todo-main">
-                <div className="todo-title">{t.title}</div>
-                <div className="todo-meta">
-                  <span className="chip mini">{t.category}</span>
-                  {t.dueDate && <span>{formatDue(t.dueDate)}</span>}
-                  {t.reminder === 1 && (
-                    <span className="bell">
-                      <IconBell size={12} />
-                    </span>
-                  )}
+            {active.length > 0 && <div className="section-title">进行中 · {active.length}</div>}
+            {active.slice(0, visible).map((t) => (
+              <div key={t.id} className="todo-row" onClick={() => openEdit(t)}>
+                <button
+                  type="button"
+                  className="todo-check"
+                  aria-label="完成"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    void handleToggle(t)
+                  }}
+                />
+                <div className="todo-main">
+                  <div className="todo-title">{t.title}</div>
+                  <div className="todo-meta">
+                    <span className="chip mini">{t.category}</span>
+                    {t.dueDate && <span>{formatDue(t.dueDate)}</span>}
+                    {t.reminder === 1 && (
+                      <span className="bell">
+                        <IconBell size={12} />
+                      </span>
+                    )}
+                  </div>
                 </div>
+                <button
+                  type="button"
+                  className="icon-btn"
+                  aria-label="删除"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    setDeleteConfirm(t)
+                  }}
+                >
+                  <IconTrash size={17} />
+                </button>
               </div>
-              <button
-                type="button"
-                className="icon-btn"
-                aria-label="删除"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  setDeleteConfirm(t)
-                }}
-              >
-                <IconTrash size={17} />
-              </button>
-            </div>
-          ))}
+            ))}
 
-          {done.length > 0 && <div className="section-title">已完成 · {done.length}</div>}
-          {done.slice(0, visible).map((t) => (
-            <div key={t.id} className="todo-row done" onClick={() => openEdit(t)}>
-              <button
-                type="button"
-                className="todo-check"
-                aria-label="取消完成"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  void handleToggle(t)
-                }}
-              >
-                <IconCheck size={14} />
-              </button>
-              <div className="todo-main">
-                <div className="todo-title">{t.title}</div>
-                <div className="todo-meta">
-                  <span className="chip mini">{t.category}</span>
+            {done.length > 0 && <div className="section-title">已完成 · {done.length}</div>}
+            {done.slice(0, visible).map((t) => (
+              <div key={t.id} className="todo-row done" onClick={() => openEdit(t)}>
+                <button
+                  type="button"
+                  className="todo-check"
+                  aria-label="取消完成"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    void handleToggle(t)
+                  }}
+                >
+                  <IconCheck size={14} />
+                </button>
+                <div className="todo-main">
+                  <div className="todo-title">{t.title}</div>
+                  <div className="todo-meta">
+                    <span className="chip mini">{t.category}</span>
+                  </div>
                 </div>
+                <button
+                  type="button"
+                  className="icon-btn"
+                  aria-label="删除"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    setDeleteConfirm(t)
+                  }}
+                >
+                  <IconTrash size={17} />
+                </button>
               </div>
-              <button
-                type="button"
-                className="icon-btn"
-                aria-label="删除"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  setDeleteConfirm(t)
-                }}
-              >
-                <IconTrash size={17} />
-              </button>
-            </div>
-          ))}
-          {hasMore && <div ref={sentinelRef} className="list-sentinel" />}
+            ))}
+            {hasMore && <div ref={sentinelRef} className="list-sentinel" />}
+          </div>
         </div>
       </div>
 

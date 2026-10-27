@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../api'
-import { useCollapsibleSearch, useDebouncedSearch } from '../../hooks'
+import { useCollapsibleSearch, useDebouncedSearch, useElasticOverscroll } from '../../hooks'
 import { dateStr, monthStr, shortTime, friendlyError } from '../../utils'
 import type { Schedule } from '../../types'
 import { ConfirmDialog, Modal } from '../../components/ui'
@@ -33,7 +33,9 @@ export default function SchedulePage({ isActive }: { isActive: boolean }) {
   const [loading, setLoading] = useState(true)
 
   // Scroll-linked collapsing search bar (same behavior as the notes page).
-  const { searchWrapRef, scrollRef } = useCollapsibleSearch()
+  const { searchWrapRef, scrollRef, contentShiftRef, scrollEl } = useCollapsibleSearch()
+  // Same elastic overscroll as the notes page (no pull-to-refresh here).
+  const { pullDist, springing } = useElasticOverscroll(scrollEl)
 
   const load = useCallback(async () => {
     try {
@@ -243,39 +245,44 @@ export default function SchedulePage({ isActive }: { isActive: boolean }) {
       </div>
 
       <div className="page-scroll" ref={scrollRef} style={{ paddingTop: 18 }}>
-        <div className="scroll-content">
-          <div className="section-title">
-            {selectedDate === today ? '今天' : selectedDate.slice(5).replace('-', '月')} ·{' '}
-            {daySchedules.length} 个日程
-          </div>
-          {loading && daySchedules.length === 0 ? (
-            <div className="list-loading">加载中…</div>
-          ) : daySchedules.length === 0 ? (
-            <EmptyState
-              icon={<IconCalendar size={44} />}
-              text={query ? '没有匹配的日程' : '当日暂无日程，点击 + 添加'}
-            />
-          ) : (
-            daySchedules.map((s) => (
-              <div key={s.id} className="schedule-card" onClick={() => openEdit(s)}>
-                <div className="schedule-time">
-                  <span className="t">{shortTime(s.startTime) || '全天'}</span>
-                  {s.endTime && <span className="t2">至 {shortTime(s.endTime)}</span>}
-                </div>
-                <div className="schedule-main">
-                  <div className="schedule-title">
-                    {s.title}
-                    {s.reminder === 1 && (
-                      <span className="bell" style={{ color: 'var(--accent)', marginLeft: 6 }}>
-                        <IconBell size={13} />
-                      </span>
-                    )}
+        <div className="scroll-shift" ref={contentShiftRef}>
+          <div
+            className={`scroll-content ${springing ? 'springing' : ''}`}
+            style={pullDist ? { transform: `translateY(${pullDist}px)` } : undefined}
+          >
+            <div className="section-title">
+              {selectedDate === today ? '今天' : selectedDate.slice(5).replace('-', '月')} ·{' '}
+              {daySchedules.length} 个日程
+            </div>
+            {loading && daySchedules.length === 0 ? (
+              <div className="list-loading">加载中…</div>
+            ) : daySchedules.length === 0 ? (
+              <EmptyState
+                icon={<IconCalendar size={44} />}
+                text={query ? '没有匹配的日程' : '当日暂无日程，点击 + 添加'}
+              />
+            ) : (
+              daySchedules.map((s) => (
+                <div key={s.id} className="schedule-card" onClick={() => openEdit(s)}>
+                  <div className="schedule-time">
+                    <span className="t">{shortTime(s.startTime) || '全天'}</span>
+                    {s.endTime && <span className="t2">至 {shortTime(s.endTime)}</span>}
                   </div>
-                  {s.note && <div className="schedule-note">{s.note}</div>}
+                  <div className="schedule-main">
+                    <div className="schedule-title">
+                      {s.title}
+                      {s.reminder === 1 && (
+                        <span className="bell" style={{ color: 'var(--accent)', marginLeft: 6 }}>
+                          <IconBell size={13} />
+                        </span>
+                      )}
+                    </div>
+                    {s.note && <div className="schedule-note">{s.note}</div>}
+                  </div>
                 </div>
-              </div>
-            ))
-          )}
+              ))
+            )}
+          </div>
         </div>
       </div>
 

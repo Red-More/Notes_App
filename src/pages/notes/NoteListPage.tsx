@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { save } from '@tauri-apps/plugin-dialog'
 import { api } from '../../api'
-import { useDebouncedSearch, useLongPress, useCollapsibleSearch } from '../../hooks'
+import {
+  useCollapsibleSearch,
+  useDebouncedSearch,
+  useElasticOverscroll,
+  useLongPress,
+} from '../../hooks'
 import { exportTs, formatAmPmDateTime, friendlyError } from '../../utils'
 import type { FolderStats, Note } from '../../types'
 import { ConfirmDialog, Modal, OverlayPortal } from '../../components/ui'
@@ -69,27 +74,13 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [moveOpen, setMoveOpen] = useState(false)
   const [deleteConfirm, setDeleteConfirm] = useState(false)
-  const [refreshing, setRefreshing] = useState(false)
   const [loading, setLoading] = useState(true)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [visible, setVisible] = useState(PAGE)
 
-  const scrollRef = useRef<HTMLDivElement>(null)
   const sentinelRef = useRef<HTMLDivElement>(null)
   // Scroll-linked collapsing search bar (features spec: progressive shrink + fade).
-  const { searchWrapRef, scrollRef: setScrollEl } = useCollapsibleSearch()
-  // Keep the object ref (used by the elastic-overscroll effect) in sync with the
-  // hook's callback ref, which is what actually targets the live scroll element.
-  const attachScrollRef = useCallback(
-    (el: HTMLDivElement | null) => {
-      scrollRef.current = el
-      setScrollEl(el)
-    },
-    [setScrollEl],
-  )
-  // Elastic overscroll: current downward offset and whether it is springing back.
-  const [pullDist, setPullDist] = useState(0)
-  const [springing, setSpringing] = useState(false)
+  const { searchWrapRef, scrollRef, contentShiftRef, scrollEl } = useCollapsibleSearch()
 
   const load = useCallback(async () => {
     try {
@@ -107,6 +98,11 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
       setLoading(false)
     }
   }, [filter, query])
+
+  // Elastic overscroll shared by every list; the notes list also refreshes.
+  const { pullDist, springing, refreshing } = useElasticOverscroll(scrollEl, {
+    onRefresh: load,
+  })
 
   // Refresh when the page becomes active again (the pager keeps it mounted,
   // so re-entering must still fetch fresh data like a remount used to).
@@ -280,100 +276,6 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
     }
   }
 
-  // ---- Elastic overscroll (pull down past the top edge) ----
-  // Native listeners with a non-passive touchmove so the default scroll can be
-  // suppressed while the finger drags the content below scrollTop 0. On release
-  // the offset springs back to 0; beyond the threshold it also refreshes.
-  useEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-    let startX = 0
-    let startY = 0
-    let active = false
-    let dist = 0
-    let springTimer: ReturnType<typeof setTimeout> | undefined
-    // Suppresses the click synthesized after a pull so it cannot open a note.
-    let clickGuardUntil = 0
-
-    const springBack = () => {
-      setSpringing(true)
-      // Two frames later the transition class is committed; only then drop the offset.
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => setPullDist(0))
-      })
-      clearTimeout(springTimer)
-      springTimer = setTimeout(() => setSpringing(false), 450)
-    }
-
-    const onTouchStart = (e: TouchEvent) => {
-      if (el.scrollTop <= 0) {
-        startX = e.touches[0].clientX
-        startY = e.touches[0].clientY
-        active = true
-        // A new pull must not inherit the spring transition of a previous one.
-        setSpringing(false)
-      } else {
-        active = false
-      }
-    }
-    const onTouchMove = (e: TouchEvent) => {
-      if (!active) return
-      const dx = e.touches[0].clientX - startX
-      const dy = e.touches[0].clientY - startY
-      // A horizontal-dominant gesture belongs to the page pager; back off so
-      // pull-to-refresh never fights a horizontal page swipe (1.15 mirrors the
-      // pager's own angle threshold).
-      if (Math.abs(dx) > Math.abs(dy) * 1.15) {
-        active = false
-        return
-      }
-      if (dy > 0 && el.scrollTop <= 0) {
-        e.preventDefault()
-        dist = Math.min(dy * 0.45, 90)
-        setPullDist(dist)
-      } else if (dy < 0) {
-        active = false
-      }
-    }
-    const onTouchEnd = () => {
-      const shouldRefresh = active && dist > 45
-      const hadPull = dist > 0
-      active = false
-      dist = 0
-      if (hadPull) {
-        // A drag that released over a card is not a tap: block the click that
-        // the browser emits after touchend so the note does not pop open.
-        clickGuardUntil = performance.now() + 300
-        springBack()
-      }
-      if (shouldRefresh) {
-        setRefreshing(true)
-        void load().finally(() => setRefreshing(false))
-      }
-    }
-    const onClickCapture = (e: MouseEvent) => {
-      if (performance.now() < clickGuardUntil) {
-        e.preventDefault()
-        e.stopPropagation()
-      }
-    }
-
-    el.addEventListener('touchstart', onTouchStart, { passive: true })
-    el.addEventListener('touchmove', onTouchMove, { passive: false })
-    el.addEventListener('touchend', onTouchEnd)
-    el.addEventListener('touchcancel', onTouchEnd)
-    el.addEventListener('click', onClickCapture, true)
-    return () => {
-      clearTimeout(springTimer)
-      el.removeEventListener('touchstart', onTouchStart)
-      el.removeEventListener('touchmove', onTouchMove)
-      el.removeEventListener('touchend', onTouchEnd)
-      el.removeEventListener('touchcancel', onTouchEnd)
-      el.removeEventListener('click', onClickCapture, true)
-    }
-    // Re-bind after the settings page unmounts/remounts the scroll container.
-  }, [load, settingsOpen])
-
   // ---- Sort popover ----
   const selectSortKey = (key: SortKey) => {
     setSortKey(key)
@@ -495,51 +397,53 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
 
       <ChipRow items={tabs} value={filter} onChange={setFilter} />
 
-      <div className="page-scroll" ref={attachScrollRef}>
+      <div className="page-scroll" ref={scrollRef}>
         {(pullDist > 0 || refreshing) && (
           <div className="pull-indicator">
             {refreshing ? '正在刷新…' : pullDist > 45 ? '释放刷新' : '下拉刷新'}
           </div>
         )}
-        <div
-          className={`scroll-content ${springing ? 'springing' : ''}`}
-          style={{ transform: pullDist > 0 ? `translateY(${pullDist}px)` : undefined }}
-        >
-          {loading && notes.length === 0 ? (
-            <div className="list-loading">加载中…</div>
-          ) : notes.length === 0 ? (
-            <EmptyState
-              icon={<IconNote size={44} />}
-              text={query ? '没有匹配的笔记' : '还没有笔记，点击 + 创建'}
-            />
-          ) : (
-            <>
-              {sortedNotes.slice(0, visible).map((note) => (
-                <div
-                  key={note.id}
-                  className={`note-card ${selectMode && selected.has(note.id) ? 'selected' : ''}`}
-                  onClick={() => handleCardClick(note)}
-                  {...bind(note)}
-                >
-                  {selectMode && (
-                    <span className="check-dot">
-                      {selected.has(note.id) && <IconCheck size={14} />}
-                    </span>
-                  )}
-                  <div className="note-card-title">
-                    {note.isPinned === 1 && <span className="pin-badge">📌</span>}
-                    <span className="title-text">{note.title}</span>
+        <div className="scroll-shift" ref={contentShiftRef}>
+          <div
+            className={`scroll-content ${springing ? 'springing' : ''}`}
+            style={pullDist ? { transform: `translateY(${pullDist}px)` } : undefined}
+          >
+            {loading && notes.length === 0 ? (
+              <div className="list-loading">加载中…</div>
+            ) : notes.length === 0 ? (
+              <EmptyState
+                icon={<IconNote size={44} />}
+                text={query ? '没有匹配的笔记' : '还没有笔记，点击 + 创建'}
+              />
+            ) : (
+              <>
+                {sortedNotes.slice(0, visible).map((note) => (
+                  <div
+                    key={note.id}
+                    className={`note-card ${selectMode && selected.has(note.id) ? 'selected' : ''}`}
+                    onClick={() => handleCardClick(note)}
+                    {...bind(note)}
+                  >
+                    {selectMode && (
+                      <span className="check-dot">
+                        {selected.has(note.id) && <IconCheck size={14} />}
+                      </span>
+                    )}
+                    <div className="note-card-title">
+                      {note.isPinned === 1 && <span className="pin-badge">📌</span>}
+                      <span className="title-text">{note.title}</span>
+                    </div>
+                    <div className="note-card-content">{note.content}</div>
+                    <div className="note-card-meta">
+                      <span className="note-card-time">{formatAmPmDateTime(note.updatedAt)}</span>
+                      <span className="note-card-words">{note.content.length}字</span>
+                    </div>
                   </div>
-                  <div className="note-card-content">{note.content}</div>
-                  <div className="note-card-meta">
-                    <span className="note-card-time">{formatAmPmDateTime(note.updatedAt)}</span>
-                    <span className="note-card-words">{note.content.length}字</span>
-                  </div>
-                </div>
-              ))}
-              {hasMore && <div ref={sentinelRef} className="list-sentinel" />}
-            </>
-          )}
+                ))}
+                {hasMore && <div ref={sentinelRef} className="list-sentinel" />}
+              </>
+            )}
+          </div>
         </div>
       </div>
 

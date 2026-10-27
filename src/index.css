@@ -185,9 +185,15 @@ textarea {
   display: none;
 }
 
-/* Content wrapper translated by the elastic overscroll offset. */
-.scroll-content {
+/* Wrapper that cancels the scroll consumed by the collapsing search bar, so
+   the list only follows the bar's height change instead of scrolling twice
+   (see useCollapsibleSearch). */
+.scroll-shift {
   will-change: transform;
+  /* The wrapper is pushed down by the shift distance when the bar collapses;
+     reserving that distance at the bottom keeps the list's clearance above
+     the tabbar unchanged at the end of the scroll range. */
+  padding-bottom: var(--search-bar-height);
 }
 
 /* A short list must still be able to scroll the search bar away. Collapsing
@@ -195,8 +201,13 @@ textarea {
    needs twice the bar height of scroll range (46px to collapse + 46px that
    the growing viewport would otherwise swallow); without this the browser
    clamps scrollTop and the bar snaps back open. */
-.page-scroll > .scroll-content {
+.page-scroll > .scroll-shift {
   min-height: calc(100% + var(--search-collapse-travel));
+}
+
+/* Content wrapper translated by the elastic overscroll offset. */
+.scroll-content {
+  will-change: transform;
 }
 
 .scroll-content.springing {
