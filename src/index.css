@@ -725,6 +725,13 @@ textarea {
   flex-shrink: 0;
 }
 
+/* The note editor swaps between a normal bar (40px icons) and an edit bar
+   (44px actions); reserving the taller height (44 + 8 + 8 padding + 1 border)
+   keeps the content still. */
+.note-editor-page .editor-topbar {
+  min-height: calc(61px + var(--safe-top));
+}
+
 /* Selection topbar: cancel / live count / select-all. Fixed 40px side columns
    keep the count optically centered at any viewport width. */
 .editor-topbar.selection-topbar {
@@ -753,6 +760,44 @@ textarea {
 }
 
 .icon-btn.accent {
+  color: var(--accent);
+}
+
+/* Edit-mode bar: cancel on the left, undo / redo / confirm grouped right. */
+.editor-topbar.edit-topbar {
+  justify-content: space-between;
+  border-bottom-color: var(--accent-border);
+}
+
+.edit-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* Icon-only edit actions, uniform with the page's icon buttons, but with the
+   44px minimum touch target required on iOS and Android. */
+.edit-bar-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text);
+  touch-action: manipulation;
+}
+
+.edit-bar-btn:active {
+  background: var(--surface-2);
+}
+
+.edit-bar-btn:disabled {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.edit-bar-btn.accent {
   color: var(--accent);
 }
 

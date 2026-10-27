@@ -17,15 +17,19 @@ import { toast } from '../../toast'
 import { getSaveStrategy } from '../../saveStrategy'
 import {
   IconBack,
+  IconCheck,
   IconClock,
+  IconClose,
   IconCompare,
   IconExport,
   IconEye,
   IconFolder,
   IconPlus,
+  IconRedo,
   IconRestore,
   IconSave,
   IconTrash,
+  IconUndo,
 } from '../../components/Icons'
 
 interface Props {
@@ -35,6 +39,18 @@ interface Props {
 }
 
 type SaveState = 'clean' | 'dirty' | 'saving'
+
+interface EditorSnapshot {
+  title: string
+  content: string
+}
+
+/** Undo history limits: depth, and the typing-burst window merged into one step. */
+const UNDO_LIMIT = 100
+const UNDO_MERGE_MS = 700
+
+/** Prevent a bar action from stealing focus, so the IME and caret stay put. */
+const keepFieldFocus = (e: React.PointerEvent<HTMLButtonElement>) => e.preventDefault()
 
 function hhmm(ts: number): string {
   const d = new Date(ts)
@@ -67,6 +83,12 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   const [folderModalOpen, setFolderModalOpen] = useState(false)
   const [previewOpen, setPreviewOpen] = useState(false)
 
+  // Edit mode: the draft is always mounted in place; tapping the title or the
+  // body turns the bar on, dismissing the IME turns it off.
+  const [editing, setEditing] = useState(false)
+  const [canUndo, setCanUndo] = useState(false)
+  const [canRedo, setCanRedo] = useState(false)
+
   // Keyboard-aware viewport state. `visualKbInset` comes from the visual
   // viewport (adjustResize / overlay models); `nativeKbInset` is forwarded by
   // the Android shell because edge-to-edge WebViews don't resize on IME.
@@ -84,8 +106,26 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     content: '',
   })
   const bodyRef = useRef<HTMLDivElement>(null)
+  const titleRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const mirrorRef = useRef<HTMLDivElement>(null)
+
+  // Edit-session state kept in refs so handlers never depend on render timing.
+  const editingRef = useRef(false)
+  const undoStackRef = useRef<EditorSnapshot[]>([])
+  const redoStackRef = useRef<EditorSnapshot[]>([])
+  const lastEditAtRef = useRef(0)
+
+  // Ground-truth draft mirrored into a ref. Every write path updates it
+  // synchronously, so the undo/redo stacks never snapshot a render closure that
+  // may be behind the values currently on screen.
+  const draftRef = useRef<EditorSnapshot>({ title: '', content: '' })
+
+  const applyDraft = useCallback((next: EditorSnapshot) => {
+    draftRef.current = next
+    setTitle(next.title)
+    setContent(next.content)
+  }, [])
 
   // Load existing note and folder list on mount.
   useEffect(() => {
@@ -96,8 +136,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
         setDefaultFolderName(stats.defaultFolderName)
         if (noteIdRef.current != null) {
           const note = await api.getNote(noteIdRef.current)
-          setTitle(note.title)
-          setContent(note.content)
+          applyDraft({ title: note.title, content: note.content })
           setCurrentFolderId(note.folderId)
           setCreatedAt(note.createdAt)
           setUpdatedAt(note.updatedAt)
@@ -111,7 +150,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
         toast(friendlyError(e))
       }
     })()
-  }, [])
+  }, [applyDraft])
 
   // Skip saving a brand-new note that only contains whitespace.
   const isBlank = !title.trim() && !content.trim()
@@ -226,6 +265,83 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [doSave])
+
+  // ---- Edit mode: draft history + IME-driven enter / exit ----
+
+  const syncHistoryState = useCallback(() => {
+    setCanUndo(undoStackRef.current.length > 0)
+    setCanRedo(redoStackRef.current.length > 0)
+  }, [])
+
+  /** Enter edit mode; each session starts with an empty undo/redo stack. */
+  const enterEditing = useCallback(() => {
+    if (editingRef.current) return
+    editingRef.current = true
+    setEditing(true)
+    // Editing raw text requires leaving the rendered preview.
+    setPreviewOpen(false)
+    undoStackRef.current = []
+    redoStackRef.current = []
+    lastEditAtRef.current = 0
+    // A keyboard that is still closing belongs to the previous session, so its
+    // inset drop must not immediately end the session that just started.
+    prevKbInsetRef.current = 0
+    syncHistoryState()
+  }, [syncHistoryState])
+
+  /** Leave edit mode without discarding the draft; blurring hides the IME. */
+  const exitEditing = useCallback(() => {
+    if (!editingRef.current) return
+    editingRef.current = false
+    setEditing(false)
+    lastEditAtRef.current = 0
+    titleRef.current?.blur()
+    textareaRef.current?.blur()
+  }, [])
+
+  /** Record the pre-edit draft; keystrokes within the merge window share a step. */
+  const recordEdit = useCallback(
+    (before: EditorSnapshot) => {
+      const now = performance.now()
+      const startsStep = now - lastEditAtRef.current > UNDO_MERGE_MS
+      if (startsStep) {
+        undoStackRef.current.push(before)
+        if (undoStackRef.current.length > UNDO_LIMIT) undoStackRef.current.shift()
+      }
+      lastEditAtRef.current = now
+      // Typing after an undo discards the redo branch.
+      const hadRedo = redoStackRef.current.length > 0
+      redoStackRef.current = []
+      if (startsStep || hadRedo) syncHistoryState()
+    },
+    [syncHistoryState],
+  )
+
+  // Snapshots come from draftRef, not from the render closure: it always holds
+  // the exact draft on screen, even if a state update is still settling.
+  const undoEdit = useCallback(() => {
+    const previous = undoStackRef.current.pop()
+    if (!previous) return
+    redoStackRef.current.push(draftRef.current)
+    lastEditAtRef.current = 0
+    applyDraft(previous)
+    syncHistoryState()
+  }, [applyDraft, syncHistoryState])
+
+  const redoEdit = useCallback(() => {
+    const next = redoStackRef.current.pop()
+    if (!next) return
+    undoStackRef.current.push(draftRef.current)
+    if (undoStackRef.current.length > UNDO_LIMIT) undoStackRef.current.shift()
+    lastEditAtRef.current = 0
+    applyDraft(next)
+    syncHistoryState()
+  }, [applyDraft, syncHistoryState])
+
+  const confirmEditing = useCallback(async () => {
+    // A failed write keeps the user in edit mode so the draft is not lost.
+    if (await doSave()) exitEditing()
+  }, [doSave, exitEditing])
 
   // ---- Keyboard-aware editing viewport ----
   // Android edge-to-edge WebViews keep the layout/visual viewport unchanged
@@ -390,15 +506,19 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
 
   // Re-follow the caret only when the keyboard actually appears; candidate-bar
   // height tweaks while it is already open must not yank the viewport away from
-  // where the user is reading.
+  // where the user is reading. A fall back to zero means the user dismissed the
+  // IME, so edit mode ends together with the caret and the action bar.
   useEffect(() => {
-    const appeared = kbInset > 0 && prevKbInsetRef.current === 0
+    const wasOpen = prevKbInsetRef.current > 0
+    const appeared = kbInset > 0 && !wasOpen
     prevKbInsetRef.current = kbInset
     if (appeared) {
       userScrollRef.current = false
       scrollCaretIntoView(true)
+    } else if (wasOpen && kbInset === 0) {
+      exitEditing()
     }
-  }, [kbInset, scrollCaretIntoView])
+  }, [kbInset, scrollCaretIntoView, exitEditing])
 
   // Follow the caret on content edits and keyboard-geometry changes (candidate
   // bar). Only a content edit ends "reading mode"; an inset-only change must
@@ -463,8 +583,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     setRestoreConfirm(null)
     try {
       const note = await api.restoreVersion(v.id)
-      setTitle(note.title)
-      setContent(note.content)
+      applyDraft({ title: note.title, content: note.content })
       setCurrentFolderId(note.folderId)
       setCreatedAt(note.createdAt)
       setUpdatedAt(note.updatedAt)
@@ -553,6 +672,22 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     folders.find((f) => f.id === currentFolderId)?.name ??
     (currentFolderId == null ? defaultFolderName : '')
 
+  /** A tap on empty body space edits the body: focus and put the caret at the end. */
+  const focusContent = () => {
+    const ta = textareaRef.current
+    if (!ta) return
+    ta.focus()
+    const end = ta.value.length
+    ta.setSelectionRange(end, end)
+  }
+
+  const handleBodyClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (previewOpen) return
+    // Taps inside a field are native and place the caret at the tap point.
+    if ((e.target as HTMLElement).closest('input, textarea, button, a')) return
+    focusContent()
+  }
+
   const wordCount = content.length
   const createdAtLabel = createdAt ? formatAmPmDateTime(createdAt) : '—'
   const updatedAtLabel = updatedAt ? formatAmPmDateTime(updatedAt) : '—'
@@ -575,60 +710,112 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     saveState === 'saving' ? 'saving' : saveState === 'dirty' ? 'dirty' : ''
 
   return (
-    <div className="editor-page">
-      <div className="editor-topbar">
-        <button
-          type="button"
-          className="icon-btn"
-          onClick={() => void handleBack()}
-          aria-label="返回"
-        >
-          <IconBack size={22} />
-        </button>
-        <button type="button" className="editor-folder" onClick={() => setFolderModalOpen(true)}>
-          <IconFolder size={15} />
-          <span>{folderName || '选择文件夹'}</span>
-        </button>
-        <span className={`save-status ${statusClass}`}>
-          {saveState === 'dirty' && <span className="dirty-dot" />}
-          {statusText}
-        </span>
-        {strategy.key === 'manual' && (
+    <div className="editor-page note-editor-page">
+      {editing ? (
+        // Edit bar: cancel on the left; undo / redo / confirm grouped right.
+        // Pointer-down is default-prevented so taps never steal focus and the
+        // IME stays open while the draft is manipulated.
+        <div className="editor-topbar edit-topbar">
+          <button
+            type="button"
+            className="edit-bar-btn"
+            onClick={exitEditing}
+            onPointerDown={keepFieldFocus}
+            aria-label="取消编辑"
+          >
+            <IconClose size={22} />
+          </button>
+          <div className="edit-bar-actions">
+            <button
+              type="button"
+              className="edit-bar-btn"
+              onClick={undoEdit}
+              onPointerDown={keepFieldFocus}
+              aria-label="撤销"
+              disabled={!canUndo}
+            >
+              <IconUndo size={22} />
+            </button>
+            <button
+              type="button"
+              className="edit-bar-btn"
+              onClick={redoEdit}
+              onPointerDown={keepFieldFocus}
+              aria-label="恢复撤销"
+              disabled={!canRedo}
+            >
+              <IconRedo size={22} />
+            </button>
+            <button
+              type="button"
+              className="edit-bar-btn accent"
+              onClick={() => void confirmEditing()}
+              onPointerDown={keepFieldFocus}
+              aria-label="保存编辑"
+            >
+              <IconCheck size={22} />
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="editor-topbar">
           <button
             type="button"
             className="icon-btn"
-            onClick={() => void doSave()}
-            aria-label="保存"
-            disabled={!dirty}
+            onClick={() => void handleBack()}
+            aria-label="返回"
           >
-            <IconSave size={20} />
+            <IconBack size={22} />
           </button>
-        )}
-        <button
-          type="button"
-          className="icon-btn"
-          onClick={() => void openVersions()}
-          aria-label="历史版本"
-        >
-          <IconClock size={20} />
-        </button>
-        <button
-          type="button"
-          className="icon-btn"
-          onClick={() => void handleExport()}
-          aria-label="导出"
-        >
-          <IconExport size={20} />
-        </button>
-        <button
-          type="button"
-          className={`icon-btn ${previewOpen ? 'accent' : ''}`}
-          onClick={() => setPreviewOpen((v) => !v)}
-          aria-label="预览"
-        >
-          <IconEye size={20} />
-        </button>
-      </div>
+          <button
+            type="button"
+            className="editor-folder"
+            onClick={() => setFolderModalOpen(true)}
+          >
+            <IconFolder size={15} />
+            <span>{folderName || '选择文件夹'}</span>
+          </button>
+          <span className={`save-status ${statusClass}`}>
+            {saveState === 'dirty' && <span className="dirty-dot" />}
+            {statusText}
+          </span>
+          {strategy.key === 'manual' && (
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={() => void doSave()}
+              aria-label="保存"
+              disabled={!dirty}
+            >
+              <IconSave size={20} />
+            </button>
+          )}
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => void openVersions()}
+            aria-label="历史版本"
+          >
+            <IconClock size={20} />
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => void handleExport()}
+            aria-label="导出"
+          >
+            <IconExport size={20} />
+          </button>
+          <button
+            type="button"
+            className={`icon-btn ${previewOpen ? 'accent' : ''}`}
+            onClick={() => setPreviewOpen((v) => !v)}
+            aria-label="预览"
+          >
+            <IconEye size={20} />
+          </button>
+        </div>
+      )}
 
       {previewVersion ? (
         <>
@@ -657,6 +844,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
           <div
             className="editor-body"
             ref={bodyRef}
+            onClick={handleBodyClick}
             style={
               kbInset
                 ? { paddingBottom: `calc(${kbInset}px + var(--safe-bottom))` }
@@ -664,9 +852,14 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
             }
           >
             <input
+              ref={titleRef}
               className="editor-title-input"
               value={title}
-              onChange={(e) => setTitle(e.target.value)}
+              onChange={(e) => {
+                recordEdit(draftRef.current)
+                applyDraft({ ...draftRef.current, title: e.target.value })
+              }}
+              onFocus={enterEditing}
               placeholder="标题"
             />
             <div className="editor-meta">
@@ -696,7 +889,11 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
                 ref={textareaRef}
                 className="editor-content"
                 value={content}
-                onChange={(e) => setContent(e.target.value)}
+                onChange={(e) => {
+                  recordEdit(draftRef.current)
+                  applyDraft({ ...draftRef.current, content: e.target.value })
+                }}
+                onFocus={enterEditing}
                 onSelect={() => {
                   if (kbInset > 0) {
                     userScrollRef.current = false

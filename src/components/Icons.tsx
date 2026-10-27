@@ -141,6 +141,20 @@ export const IconRestore = (p: IconProps) => (
   </svg>
 )
 
+export const IconUndo = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M9 14 4 9l5-5" />
+    <path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" />
+  </svg>
+)
+
+export const IconRedo = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="m15 14 5-5-5-5" />
+    <path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13" />
+  </svg>
+)
+
 export const IconCompare = (p: IconProps) => (
   <svg {...base(p)}>
     <path d="M16 18l6-6-6-6" />
