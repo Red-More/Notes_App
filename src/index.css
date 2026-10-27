@@ -319,18 +319,15 @@ textarea {
   z-index: 45;
 }
 
-/* Entering selection mode hides the normal header instead of unmounting it:
-   the scroll-collapse ref must stay attached to the live search wrapper. */
-.note-header-wrap.is-hidden {
-  display: none;
-}
-
-/* Selection toolbar: cancel on the left, count centered, select-all on the
-   right. Equal side columns keep the count optically centered. */
+/* Selection toolbar fills the title row: cancel on the left, count centered,
+   select-all on the right. Equal side columns keep the count optically
+   centered while the search bar below stays untouched. */
 .selection-bar {
   display: grid;
   grid-template-columns: 40px minmax(0, 1fr) 40px;
   align-items: center;
+  flex: 1;
+  min-width: 0;
   min-height: 40px;
 }
 

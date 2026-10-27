@@ -12,6 +12,8 @@ interface PageHeaderProps {
   action?: PageHeaderAction
   /** Multiple right-side actions; when provided, `action` is ignored. */
   actions?: PageHeaderAction[]
+  /** Replaces the title row (title + actions) while keeping the search bar mounted. */
+  titleRow?: ReactNode
   /** Ref to the collapse wrapper around the search bar, for scroll-collapsing headers. */
   searchWrapRef?: Ref<HTMLDivElement>
   search?: {
@@ -24,26 +26,37 @@ interface PageHeaderProps {
 }
 
 /** Shared page header: title row + optional right actions + optional search bar. */
-export default function PageHeader({ title, action, actions, search, searchWrapRef }: PageHeaderProps) {
+export default function PageHeader({
+  title,
+  action,
+  actions,
+  search,
+  searchWrapRef,
+  titleRow,
+}: PageHeaderProps) {
   const headerActions = actions ?? (action ? [action] : [])
   return (
     <div className="page-header">
       <div className="page-title-row">
-        <h1 className="page-title">{title}</h1>
-        {headerActions.length > 0 && (
-          <div className="page-header-actions">
-            {headerActions.map((a) => (
-              <button
-                key={a.label}
-                type="button"
-                className="icon-btn"
-                onClick={a.onClick}
-                aria-label={a.label}
-              >
-                {a.icon}
-              </button>
-            ))}
-          </div>
+        {titleRow ?? (
+          <>
+            <h1 className="page-title">{title}</h1>
+            {headerActions.length > 0 && (
+              <div className="page-header-actions">
+                {headerActions.map((a) => (
+                  <button
+                    key={a.label}
+                    type="button"
+                    className="icon-btn"
+                    onClick={a.onClick}
+                    aria-label={a.label}
+                  >
+                    {a.icon}
+                  </button>
+                ))}
+              </div>
+            )}
+          </>
         )}
       </div>
       {search && (

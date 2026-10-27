@@ -222,8 +222,7 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
   const selectedIds = useMemo(() => [...selected], [selected])
   const allSelected = notes.length > 0 && selected.size === notes.length
   const pinnedTarget =
-    selected.size === 0 ||
-    !notes.filter((n) => selected.has(n.id)).every((n) => n.isPinned === 1)
+    selected.size === 0 || !notes.filter((n) => selected.has(n.id)).every((n) => n.isPinned === 1)
 
   const handlePin = async () => {
     if (!selected.size) return
@@ -397,16 +396,39 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
 
   const activeFolderId = typeof filter === 'number' ? filter : null
 
+  // Selection mode swaps only the title row: the search bar stays mounted so its
+  // input value, focus, and scroll-collapse state survive.
+  const selectionTitleRow = selectMode ? (
+    <div className="selection-bar">
+      <button type="button" className="icon-btn" onClick={exitSelect} aria-label="退出选择">
+        <IconClose size={22} />
+      </button>
+      <span className="selection-count" aria-live="polite">
+        已选择 {selected.size} 项
+      </span>
+      <button
+        type="button"
+        className={`icon-btn ${allSelected ? 'accent' : ''}`}
+        onClick={() => setSelected(allSelected ? new Set() : new Set(notes.map((n) => n.id)))}
+        aria-label={allSelected ? '取消全选' : '全选'}
+        aria-pressed={allSelected}
+      >
+        <IconSelectAll size={22} />
+      </button>
+    </div>
+  ) : undefined
+
   if (settingsOpen) {
     return <SettingsPage onBack={() => setSettingsOpen(false)} />
   }
 
   return (
     <div className="page">
-      <div className={`note-header-wrap${selectMode ? ' is-hidden' : ''}`}>
+      <div className="note-header-wrap">
         <PageHeader
           title="笔记"
           searchWrapRef={searchWrapRef}
+          titleRow={selectionTitleRow}
           actions={[
             {
               icon: <IconSettings size={22} />,
@@ -470,30 +492,6 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
           </>
         )}
       </div>
-
-      {selectMode && (
-        <div className="page-header">
-          <div className="selection-bar">
-            <button type="button" className="icon-btn" onClick={exitSelect} aria-label="退出选择">
-              <IconClose size={22} />
-            </button>
-            <span className="selection-count" aria-live="polite">
-              已选择 {selected.size} 项
-            </span>
-            <button
-              type="button"
-              className={`icon-btn ${allSelected ? 'accent' : ''}`}
-              onClick={() =>
-                setSelected(allSelected ? new Set() : new Set(notes.map((n) => n.id)))
-              }
-              aria-label={allSelected ? '取消全选' : '全选'}
-              aria-pressed={allSelected}
-            >
-              <IconSelectAll size={22} />
-            </button>
-          </div>
-        </div>
-      )}
 
       <ChipRow items={tabs} value={filter} onChange={setFilter} />
 
