@@ -16,6 +16,13 @@ import { toast } from '../../toast'
 import { getSaveStrategy } from '../../saveStrategy'
 import { getEditorPrefs } from '../../editor/prefs'
 import {
+  SPLIT_HANDLE_SIZE,
+  getLayoutPrefs,
+  setLayoutPrefs,
+  type LayoutPrefs,
+} from '../../editor/layout'
+import SplitHandle from '../../components/SplitHandle'
+import {
   MarkdownEditor,
   type MarkdownEditorHandle,
 } from '../../components/MarkdownEditor'
@@ -83,7 +90,11 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   const [deleteVersionConfirm, setDeleteVersionConfirm] = useState<NoteVersion | null>(null)
 
   const [folderModalOpen, setFolderModalOpen] = useState(false)
-  const [previewOpen, setPreviewOpen] = useState(false)
+  // Layout config is persisted, so the split mode / ratio survives reloads.
+  const [layout, setLayout] = useState<LayoutPrefs>(() => getLayoutPrefs())
+  const previewOpen = layout.previewOpen
+  const previewOnly = layout.previewOnly
+  const isSplit = previewOpen && !previewOnly
 
   // Edit mode: the draft is always mounted in place; tapping the title or the
   // body turns the bar on, dismissing the IME turns it off.
@@ -504,11 +515,31 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     editorRef.current?.focus()
   }
 
+  // ---- Layout: preview visibility, split mode and ratio ----
+
+  const togglePreview = () => {
+    const next = { ...layout, previewOpen: !layout.previewOpen }
+    setLayout(next)
+    setLayoutPrefs(next)
+  }
+
+  /** Live drag update: re-render the panes without touching localStorage. */
+  const handleRatioChange = (ratio: number) => {
+    setLayout((current) => (current.ratio === ratio ? current : { ...current, ratio }))
+  }
+
+  /** Drag / click finished: persist the final ratio. */
+  const handleRatioCommit = (ratio: number) => {
+    const next = { ...layout, ratio }
+    setLayout(next)
+    setLayoutPrefs(next)
+  }
+
   // ---- Two-way editor <-> preview scroll sync ----
   // Each direction ignores the scroll events emitted by the pane it just
   // drove, so the two surfaces cannot oscillate against each other.
   const handleEditorScroll = (line: number) => {
-    if (!previewOpen) return
+    if (!isSplit) return
     const now = performance.now()
     if (now < editorSyncIgnoreRef.current) return
     previewSyncIgnoreRef.current = now + SYNC_GUARD_MS
@@ -516,6 +547,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   }
 
   const handlePreviewScroll = (line: number) => {
+    if (!isSplit) return
     const now = performance.now()
     if (now < previewSyncIgnoreRef.current) return
     editorSyncIgnoreRef.current = now + SYNC_GUARD_MS
@@ -524,18 +556,19 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
 
   /** Tapping a preview block reveals its source line without opening the IME. */
   const handlePreviewSourceLine = (line: number) => {
+    if (!isSplit) return
     editorRef.current?.revealLine(line)
   }
 
-  // Align a newly opened preview with the editor's current top line.
+  // Align a newly opened split preview with the editor's current top line.
   useEffect(() => {
-    if (!previewOpen) return
+    if (!isSplit) return
     const frame = requestAnimationFrame(() => {
       previewSyncIgnoreRef.current = performance.now() + SYNC_GUARD_MS
       previewRef.current?.scrollToLine(editorRef.current?.getTopLine() ?? 1)
     })
     return () => cancelAnimationFrame(frame)
-  }, [previewOpen])
+  }, [isSplit])
 
   const wordCount = content.length
   const createdAtLabel = createdAt ? formatAmPmDateTime(createdAt) : '—'
@@ -658,8 +691,8 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
           <button
             type="button"
             className={`icon-btn ${previewOpen ? 'accent' : ''}`}
-            onClick={() => setPreviewOpen((v) => !v)}
-            aria-label="预览"
+            onClick={togglePreview}
+            aria-label={previewOpen ? '关闭预览' : '打开预览'}
           >
             <IconEye size={20} />
           </button>
@@ -699,55 +732,83 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
                 : undefined
             }
           >
-            <div
-              className={`editor-main ${previewOpen ? 'split' : ''}`}
-              onClick={handleEditorPaneClick}
-            >
-              <input
-                ref={titleRef}
-                className="editor-title-input"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                onFocus={enterEditing}
-                placeholder="标题"
-              />
-              <div className="editor-meta">
-                <span className="editor-meta-item" title="创建时间">
-                  {createdAtLabel}
-                </span>
-                <span className="editor-meta-sep" aria-hidden="true">
-                  |
-                </span>
-                <span className="editor-meta-item" title="上次更新时间">
-                  {updatedAtLabel}
-                </span>
-                <span className="editor-meta-sep" aria-hidden="true">
-                  |
-                </span>
-                <span className="editor-meta-count" title="正文字数">
-                  {wordCount}字
-                </span>
-              </div>
-              <div className="markdown-editor-host" onFocus={enterEditing}>
-                <MarkdownEditor
-                  ref={editorRef}
-                  value={content}
-                  prefs={editorPrefs}
-                  kbInset={kbInset}
-                  onChange={setContent}
-                  onHistoryChange={handleHistoryChange}
-                  onScrollLine={handleEditorScroll}
-                />
-              </div>
-            </div>
-            {previewOpen && (
-              <div className="editor-preview" aria-label="Markdown 预览">
+            {previewOpen && previewOnly ? (
+              <div className="editor-preview preview-only" aria-label="Markdown 预览">
+                <div className="preview-only-title">{title || '无标题'}</div>
                 <MarkdownPreview
                   ref={previewRef}
                   source={content}
                   onScrollLine={handlePreviewScroll}
                   onSourceLine={handlePreviewSourceLine}
                 />
+              </div>
+            ) : (
+              <div className="editor-split">
+                <div
+                  className="editor-main"
+                  style={
+                    previewOpen
+                      ? {
+                          flex: `0 0 calc((100% - ${SPLIT_HANDLE_SIZE}px) * ${layout.ratio / 100})`,
+                        }
+                      : undefined
+                  }
+                  onClick={handleEditorPaneClick}
+                >
+                  <input
+                    ref={titleRef}
+                    className="editor-title-input"
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                    onFocus={enterEditing}
+                    placeholder="标题"
+                  />
+                  <div className="editor-meta">
+                    <span className="editor-meta-item" title="创建时间">
+                      {createdAtLabel}
+                    </span>
+                    <span className="editor-meta-sep" aria-hidden="true">
+                      |
+                    </span>
+                    <span className="editor-meta-item" title="上次更新时间">
+                      {updatedAtLabel}
+                    </span>
+                    <span className="editor-meta-sep" aria-hidden="true">
+                      |
+                    </span>
+                    <span className="editor-meta-count" title="正文字数">
+                      {wordCount}字
+                    </span>
+                  </div>
+                  <div className="markdown-editor-host" onFocus={enterEditing}>
+                    <MarkdownEditor
+                      ref={editorRef}
+                      value={content}
+                      prefs={editorPrefs}
+                      kbInset={kbInset}
+                      onChange={setContent}
+                      onHistoryChange={handleHistoryChange}
+                      onScrollLine={handleEditorScroll}
+                    />
+                  </div>
+                </div>
+                {previewOpen && (
+                  <>
+                    <SplitHandle
+                      ratio={layout.ratio}
+                      onChange={handleRatioChange}
+                      onCommit={handleRatioCommit}
+                    />
+                    <div className="editor-preview" aria-label="Markdown 预览">
+                      <MarkdownPreview
+                        ref={previewRef}
+                        source={content}
+                        onScrollLine={handlePreviewScroll}
+                        onSourceLine={handlePreviewSourceLine}
+                      />
+                    </div>
+                  </>
+                )}
               </div>
             )}
           </div>

@@ -16,6 +16,19 @@ import {
   setEditorPrefs,
   type IndentStyle,
 } from '../../editor/prefs'
+import {
+  DEFAULT_LAYOUT_PREFS,
+  MAX_SPLIT_RATIO,
+  MIN_SPLIT_RATIO,
+  clearLayoutPrefs,
+  getLayoutPrefs,
+  layoutModeOf,
+  setLayoutPrefs,
+  withLayoutMode,
+  type LayoutMode,
+  type LayoutPrefs,
+} from '../../editor/layout'
+import { toast } from '../../toast'
 import { IconBack, IconInfo } from '../../components/Icons'
 import ChipRow from '../../components/ChipRow'
 import { useLongPress } from '../../hooks'
@@ -36,6 +49,12 @@ const INDENT_STYLE_OPTIONS: Array<{ key: IndentStyle; label: string }> = [
 ]
 
 const INDENT_WIDTH_OPTIONS = INDENT_SIZES.map((size) => ({ key: size, label: `${size}` }))
+
+const LAYOUT_MODE_OPTIONS: Array<{ key: LayoutMode; label: string }> = [
+  { key: 'closed', label: '仅编辑' },
+  { key: 'split', label: '分屏' },
+  { key: 'preview', label: '仅预览' },
+]
 
 interface RowProps {
   meta: SaveStrategyMeta
@@ -108,6 +127,7 @@ export default function SettingsPage({ onBack }: Props) {
   const [theme, setTheme] = useState<Theme>(() => getStoredTheme())
   const [strategy, setStrategy] = useState(() => getSaveStrategy())
   const [editorPrefs, setEditorPrefsState] = useState(() => getEditorPrefs())
+  const [layout, setLayout] = useState(() => getLayoutPrefs())
   const [hintFor, setHintFor] = useState<SaveStrategyKey | null>(null)
   const [tipFor, setTipFor] = useState<SaveStrategyKey | null>(null)
 
@@ -151,6 +171,27 @@ export default function SettingsPage({ onBack }: Props) {
       setEditorPrefs(next)
       return next
     })
+  }
+
+  const layoutMode = layoutModeOf(layout)
+
+  const updateLayout = (next: LayoutPrefs) => {
+    setLayout(next)
+    setLayoutPrefs(next)
+  }
+
+  const chooseLayoutMode = (mode: LayoutMode) => {
+    updateLayout(withLayoutMode(layout, mode))
+  }
+
+  const chooseRatio = (ratio: number) => {
+    updateLayout({ ...layout, ratio })
+  }
+
+  const resetLayout = () => {
+    clearLayoutPrefs()
+    setLayout(DEFAULT_LAYOUT_PREFS)
+    toast('已恢复默认布局设置')
   }
 
   const dismissHints = () => {
@@ -229,6 +270,62 @@ export default function SettingsPage({ onBack }: Props) {
           <p className="settings-note">
             作用于空格缩进与 Tab 的显示宽度；重新打开笔记编辑页后生效。
           </p>
+        </div>
+
+        <div className="settings-section-title">预览布局</div>
+        <div className="form-field">
+          <span className="form-label">布局模式</span>
+          <ChipRow
+            items={LAYOUT_MODE_OPTIONS}
+            value={layoutMode}
+            onChange={chooseLayoutMode}
+          />
+          <p className="settings-note">「仅预览」会隐藏编辑区，适合专注阅读。</p>
+        </div>
+        <div className="form-field">
+          <span className="form-label">编辑区 / 预览区比例</span>
+          <div className="layout-ratio-row">
+            <input
+              type="range"
+              className="layout-slider"
+              min={MIN_SPLIT_RATIO}
+              max={MAX_SPLIT_RATIO}
+              step={1}
+              value={layout.ratio}
+              onChange={(e) => chooseRatio(Number(e.target.value))}
+              aria-label="编辑区占比"
+              aria-valuetext={`编辑区 ${layout.ratio}%，预览区 ${100 - layout.ratio}%`}
+            />
+            <span className="layout-ratio-value">
+              {layout.ratio}% / {100 - layout.ratio}%
+            </span>
+          </div>
+          <div className={`layout-diagram mode-${layoutMode}`} aria-hidden="true">
+            {layoutMode !== 'preview' && (
+              <div
+                className="layout-diagram-pane editor"
+                style={
+                  layoutMode === 'split'
+                    ? { flex: `0 0 calc((100% - 6px) * ${layout.ratio / 100})` }
+                    : { flex: '1 1 auto' }
+                }
+              >
+                编辑区
+              </div>
+            )}
+            {layoutMode === 'split' && <div className="layout-diagram-handle" />}
+            {layoutMode !== 'closed' && (
+              <div className="layout-diagram-pane preview" style={{ flex: '1 1 0' }}>
+                预览区
+              </div>
+            )}
+          </div>
+          <p className="settings-note">
+            比例作用于分屏模式；在笔记页拖动分隔线也会同步保存这里显示的数值。
+          </p>
+          <button type="button" className="restore-default" onClick={resetLayout}>
+            恢复默认设置
+          </button>
         </div>
       </div>
 
