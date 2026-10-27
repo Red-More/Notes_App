@@ -2,7 +2,7 @@
 
 ## 1. 概述
 
-笔记编辑页已从 `textarea` 升级为 **CodeMirror 6** 编辑器，并把预览升级为 **markdown-it** 渲染器（VS Code 内置 Markdown 预览同款引擎）。预览以可调节高度的上下分屏呈现，支持内容实时同步、双向滚动同步、点击预览定位源码行，以及分隔线拖拽/点击调整区域比例。
+笔记编辑页已从 `textarea` 升级为 **CodeMirror 6** 编辑器，并把预览升级为 **markdown-it** 渲染器（VS Code 内置 Markdown 预览同款引擎）。预览以可调节高度的上下分屏呈现，支持内容实时同步、双向滚动同步、点击预览定位源码行、分隔线拖拽/点击调整区域比例，以及 Mermaid 图表与 KaTeX 数学公式渲染。
 
 核心目标：
 
@@ -19,6 +19,8 @@
 | 缩进参考线    | `@replit/codemirror-indentation-markers`                  | 成熟社区扩展                                       |
 | 预览渲染      | `markdown-it`                                             | CommonMark + GFM 表格/删除线/自动链接              |
 | 任务列表      | `markdown-it-task-lists`                                  | GFM 待办列表                                       |
+| Mermaid       | `mermaid`（懒加载）                                       | 流程图、时序图、类图、状态图、甘特图等全部图表类型 |
+| 数学公式      | `katex` + `@vscode/markdown-it-katex`                     | 行内 `$...$` 与块级 `$$...$$`，VS Code 同款方案    |
 | 代码高亮      | `highlight.js/lib/common`                                 | 预览内常见语言高亮                                 |
 | 高亮配色      | 自定义 CSS（基于应用设计变量）                            | 浅色/深色主题自动适配                              |
 
@@ -82,12 +84,12 @@
 - CommonMark：标题、段落、强调、列表、引用、代码、分隔线、链接、图片。
 - GFM 扩展：表格、删除线、自动链接、任务列表（只读复选框）。
 - 围栏代码块：按 info string 使用 highlight.js 常见语言高亮；未知语言按纯文本显示。
+- Mermaid：以 ` ```mermaid ` 围栏标记，支持 Mermaid 官方解析器覆盖的全部图表类型（流程图、时序图、类图、状态图、甘特图、ER 图、饼图等）。
+- LaTeX：行内 `$...$`、块级 `$$...$$`，由 KaTeX 渲染；也支持 `$$\begin{aligned}...\end{aligned}$$` 等复杂结构。
 - 软换行遵循 CommonMark：源码中的单个换行在预览中显示为空格，与 VS Code 默认行为一致。
 
 ### 4.2 明确不支持
 
-- Mermaid 图表：按普通代码块展示，不渲染图表。
-- LaTeX 公式：按原文展示，不解析公式。
 - 原生 HTML：`html: false`，HTML 标签会被转义为文本。
 
 ### 4.3 安全
@@ -95,6 +97,8 @@
 - Markdown 原始 HTML 关闭，避免脚本注入。
 - 链接协议由 markdown-it 校验，`javascript:` 等危险协议不会生成可点击链接。
 - 预览中的外链点击不会让 WebView 跳离应用，而是复制链接并提示在浏览器打开。
+- KaTeX 使用 `trust: false`，不执行 `\href`、`\htmlClass` 等可信命令。
+- Mermaid 使用 `securityLevel: 'strict'` 与 `suppressErrorRendering`，标签会被安全处理，错误不会注入页面。
 
 ### 4.4 源码行映射
 
@@ -106,13 +110,45 @@
 
 表格内部行/单元格不参与映射，避免 `offsetParent` 不同导致行号错乱。
 
+### 4.5 Mermaid 与 LaTeX 渲染
+
+**自动识别**
+
+- 围栏语言为 `mermaid`（大小写不敏感）时自动识别为图表，无需切换渲染模式；
+- `$...$` 自动作为行内公式，`$$...$$` 自动作为块级公式；
+- 代码围栏、行内代码中的 `$` 不会被误判；金额（如 `$20,000`）不会触发公式解析。
+
+**Mermaid 渲染流程**
+
+- markdown-it 先输出带 `data-line` 的 `.mermaid-block` 占位符与源码；
+- 预览挂载后由浏览器调用 Mermaid 渲染 SVG；引擎通过动态 `import('mermaid')` 懒加载，无图表笔记不下载；
+- 渲染结果按「主题 + 源码」缓存（最多 40 条），内容未变的图表在后续刷新中直接复用；
+- 同一时间只顺序渲染一个图表，避免 Mermaid 全局解析状态冲突；
+- 语法错误显示「图表渲染失败」、错误详情与原始源码，不抛出异常、不破坏页面；
+- 超宽图表在容器内自适应缩放，容器保留横向滚动兜底。
+
+**KaTeX 渲染流程**
+
+- `@vscode/markdown-it-katex` 负责解析 `$` / `$$`，KaTeX 负责排版；
+- 块级公式外层为 `.math-block` 并带 `data-line`，支持滚动同步与点击定位；
+- 行内公式在段落内正常换行；块级公式超宽时在容器内横向滚动；
+- 公式错误显示「公式语法错误」；块级错误额外展示源码与解析详情；
+- 引入 `katex/dist/katex.min.css` 与字体资源，字体按实际用到的字符懒加载。
+
+**主题与样式**
+
+- 浅色使用 Mermaid `default` 主题，深色使用 `dark` 主题；主题取自应用当前 `data-theme`；
+- KaTeX 颜色沿用 Markdown 前景色，错误使用应用的危险色；
+- 所有图表/公式样式限定在 `.md-preview` 内，不影响编辑器与其他页面。
+
 ## 5. 双向同步
 
 ### 5.1 内容同步
 
 - 编辑器每次文档变更立即更新 `content` 状态；
 - 预览通过 `useDeferredValue` 延迟渲染，避免连续输入阻塞输入法；
-- 预览 HTML 通过 `useMemo` 缓存，仅在内容变化时重新渲染。
+- 预览 HTML 通过 `useMemo` 缓存，仅在内容变化时重新渲染；
+- 预览模块（markdown-it / KaTeX / highlight.js）按需加载，仅在打开预览时下载；Mermaid 引擎进一步延迟到存在图表时才加载。
 
 ### 5.2 滚动同步
 
@@ -162,12 +198,15 @@
 
 ## 8. 性能与加载
 
-- 笔记编辑页改为按需加载：主界面不包含 CodeMirror / markdown-it / highlight.js；
-- 当前构建：主包约 308KB（gzip 93KB），编辑器分包约 395KB（gzip 140KB）；
+- 主界面不包含 CodeMirror / markdown-it / KaTeX / highlight.js / Mermaid；
+- 当前构建：主包约 307KB（gzip 93KB），编辑器分包约 136KB（gzip 44KB）；
+- 预览分包约 792KB（gzip 254KB），另含 KaTeX 分包约 259KB（gzip 78KB），仅在打开预览时加载；
+- Mermaid 引擎在存在图表时才下载，各图表类型独立分包（常规流程图/时序图分包远小于最大的复杂图表分包）；
 - 围栏代码语言的语法包按需动态加载，不进入首屏；
 - 预览渲染使用 React 延迟值，输入法输入不被渲染阻塞；
 - 滚动同步按“行变化”触发，不处理每个滚动像素；预览重测量仅在内容或尺寸变化时执行；
-- 分隔线拖拽使用 `requestAnimationFrame` 合并更新，避免高频布局计算导致卡顿。
+- 分隔线拖拽使用 `requestAnimationFrame` 合并更新，避免高频布局计算导致卡顿；
+- Mermaid 渲染结果按主题与源码缓存，重复刷新不重复渲染；KaTeX 字体按需加载。
 
 ## 9. 测试与验证
 
@@ -177,11 +216,12 @@
 pnpm test
 ```
 
-共 7 个测试文件、86 个用例：
+共 8 个测试文件、98 个用例：
 
-- `src/editor/markdown.test.ts`：CommonMark/GFM 渲染、表格包装、任务列表、代码高亮、HTML 转义、危险链接、源码行标注、Mermaid/LaTeX 不解析；
+- `src/editor/markdown.test.ts`：CommonMark/GFM 渲染、表格包装、任务列表、代码高亮、HTML 转义、危险链接、源码行标注；Mermaid 各图表占位与大小写识别、行内/块级公式、货币与代码围栏边界、非法公式与图表降级；
 - `src/editor/sync.test.ts`：滚动偏移与源码行的双向映射、重复行、边界与空数据；
 - `src/editor/layout.test.ts`：布局配置解析与钳制、三态模式切换、点击翻转比例、拖拽坐标换算与 10%/90% 边界；
+- `src/editor/mermaid.test.ts`：缓存键主题隔离、空图表降级、错误消息提取；
 - `src/editor/prefs.test.ts`：缩进配置解析、非法值回退、缩进单元生成；
 - `src/editor/commands.test.ts`：加粗/斜体/行内代码的包裹与取消包裹；
 - `src/editor/diagnostics.test.ts`：未闭合围栏诊断；
@@ -211,6 +251,15 @@ pnpm test
 - 520×699 与 320×420 两种尺寸下均无布局错乱。
 - 本次自动化实测环境为 Chromium；Safari/WebKit 与 Firefox 建议按同一交互清单回归。
 
+Mermaid / KaTeX 实测（Chromium，520×699 与 320×420）：
+
+- 流程图、时序图、类图、状态图、甘特图、超宽流程图均渲染为 SVG，节点文字完整；
+- 非法 Mermaid 显示“图表渲染失败”、错误详情与原始源码，页面不崩溃；
+- 行内与块级公式正常渲染，KaTeX 字体加载成功（`document.fonts.check` 为 true）；
+- 非法行内/块级公式显示“公式语法错误”，块级额外展示源码与解析详情；
+- 320×420 下 6 个 Mermaid SVG 均缩放至容器内（约 250px），文档无横向/纵向溢出；
+- 预览组件与 Mermaid 引擎按需加载，控制台无 Mermaid/KaTeX 运行时错误。
+
 ### 9.3 真机兼容性清单(已手动验证)
 
 以下项目需在 iOS / Android 真机回归（当前环境无法执行）：
@@ -229,10 +278,11 @@ pnpm test
 src/
   components/
     MarkdownEditor.tsx      CodeMirror 封装（主题、扩展、快捷键、补全、诊断）
-    MarkdownPreview.tsx     markdown-it 预览、行映射、滚动同步、点击定位
+    MarkdownPreview.tsx     markdown-it 预览、行映射、滚动同步、点击定位、Mermaid 挂载
     SplitHandle.tsx         分屏分隔线（拖拽、点击翻转、键盘微调）
   editor/
-    markdown.ts             渲染器、highlight.js、data-line 注入、表格包装
+    markdown.ts             渲染器、highlight.js、data-line 注入、KaTeX 公式、Mermaid 占位
+    mermaid.ts              Mermaid 懒加载、主题初始化、渲染缓存、错误降级
     sync.ts                 预览偏移 ↔ 源码行的纯函数映射
     layout.ts               布局模式/比例配置、持久化、坐标换算
     commands.ts             Markdown 包裹命令与链接插入
@@ -240,13 +290,15 @@ src/
     prefs.ts                缩进配置持久化
   pages/notes/NoteEditorPage.tsx   编辑态、分屏布局、双向同步、保存联动
   pages/settings/SettingsPage.tsx  Markdown 编辑器与预览布局设置
-  index.css                编辑器/预览/高亮配色与布局
+  index.css                编辑器/预览/图表/公式配色与布局
 ```
 
 ## 11. 已知限制
 
 - 单换行不渲染为 `<br>`，与 VS Code / CommonMark 默认一致；需要换行请使用空行。
-- 不支持 Mermaid、LaTeX、原生 HTML（按需求明确排除）。
+- 原生 HTML 仍不解析（按需求关闭）。
+- Mermaid / KaTeX 首次使用需要加载额外资源；Mermaid 首次渲染是异步的，复杂图表在窄屏按容器宽度缩放。
+- Mermaid 语法覆盖范围由 Mermaid 官方解析器决定；KaTeX 不支持的命令会显示降级提示。
 - 未启用脚注等非 GFM 扩展。
 - 外链通过剪贴板复制，不直接唤起系统浏览器（当前未引入 opener 插件）。
 - 缩进配置在重新打开笔记后生效。

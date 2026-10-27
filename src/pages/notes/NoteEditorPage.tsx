@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { save } from '@tauri-apps/plugin-dialog'
 import { api } from '../../api'
 import {
@@ -26,10 +26,7 @@ import {
   MarkdownEditor,
   type MarkdownEditorHandle,
 } from '../../components/MarkdownEditor'
-import {
-  MarkdownPreview,
-  type MarkdownPreviewHandle,
-} from '../../components/MarkdownPreview'
+import type { MarkdownPreviewHandle } from '../../components/MarkdownPreview'
 import {
   IconBack,
   IconCheck,
@@ -46,6 +43,14 @@ import {
   IconTrash,
   IconUndo,
 } from '../../components/Icons'
+
+// The preview carries markdown-it, KaTeX and highlight.js; load it only when
+// the preview pane is actually shown.
+const MarkdownPreview = lazy(() =>
+  import('../../components/MarkdownPreview').then((module) => ({
+    default: module.MarkdownPreview,
+  })),
+)
 
 interface Props {
   noteId: number | null
@@ -92,6 +97,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   const [folderModalOpen, setFolderModalOpen] = useState(false)
   // Layout config is persisted, so the split mode / ratio survives reloads.
   const [layout, setLayout] = useState<LayoutPrefs>(() => getLayoutPrefs())
+  const [previewReady, setPreviewReady] = useState(false)
   const previewOpen = layout.previewOpen
   const previewOnly = layout.previewOnly
   const isSplit = previewOpen && !previewOnly
@@ -120,6 +126,13 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   const titleRef = useRef<HTMLInputElement>(null)
   const editorRef = useRef<MarkdownEditorHandle>(null)
   const previewRef = useRef<MarkdownPreviewHandle>(null)
+
+  // The lazy preview reports readiness through this callback ref; the scroll
+  // alignment effect waits for it so the first split view starts in sync.
+  const attachPreview = useCallback((handle: MarkdownPreviewHandle | null) => {
+    previewRef.current = handle
+    setPreviewReady(handle != null)
+  }, [])
 
   const editingRef = useRef(false)
   // Scroll-sync guards: while one pane is driven programmatically, ignore the
@@ -562,13 +575,13 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
 
   // Align a newly opened split preview with the editor's current top line.
   useEffect(() => {
-    if (!isSplit) return
+    if (!isSplit || !previewReady) return
     const frame = requestAnimationFrame(() => {
       previewSyncIgnoreRef.current = performance.now() + SYNC_GUARD_MS
       previewRef.current?.scrollToLine(editorRef.current?.getTopLine() ?? 1)
     })
     return () => cancelAnimationFrame(frame)
-  }, [isSplit])
+  }, [isSplit, previewReady])
 
   const wordCount = content.length
   const createdAtLabel = createdAt ? formatAmPmDateTime(createdAt) : '—'
@@ -735,12 +748,14 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
             {previewOpen && previewOnly ? (
               <div className="editor-preview preview-only" aria-label="Markdown 预览">
                 <div className="preview-only-title">{title || '无标题'}</div>
-                <MarkdownPreview
-                  ref={previewRef}
-                  source={content}
-                  onScrollLine={handlePreviewScroll}
-                  onSourceLine={handlePreviewSourceLine}
-                />
+                <Suspense fallback={<div className="preview-loading">正在加载预览…</div>}>
+                  <MarkdownPreview
+                    ref={attachPreview}
+                    source={content}
+                    onScrollLine={handlePreviewScroll}
+                    onSourceLine={handlePreviewSourceLine}
+                  />
+                </Suspense>
               </div>
             ) : (
               <div className="editor-split">
@@ -800,12 +815,14 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
                       onCommit={handleRatioCommit}
                     />
                     <div className="editor-preview" aria-label="Markdown 预览">
-                      <MarkdownPreview
-                        ref={previewRef}
-                        source={content}
-                        onScrollLine={handlePreviewScroll}
-                        onSourceLine={handlePreviewSourceLine}
-                      />
+                      <Suspense fallback={<div className="preview-loading">正在加载预览…</div>}>
+                        <MarkdownPreview
+                          ref={attachPreview}
+                          source={content}
+                          onScrollLine={handlePreviewScroll}
+                          onSourceLine={handlePreviewSourceLine}
+                        />
+                      </Suspense>
                     </div>
                   </>
                 )}

@@ -1047,6 +1047,12 @@ body.split-resizing {
   font-size: 13px;
 }
 
+.preview-loading {
+  padding: 16px 2px;
+  color: var(--text-3);
+  font-size: 13px;
+}
+
 /* ============ Markdown preview ============ */
 .md-preview {
   padding: 8px 2px 12px;
@@ -1212,6 +1218,117 @@ body.split-resizing {
   margin: 0 6px 0 -1.2em;
   vertical-align: middle;
   accent-color: var(--accent);
+}
+
+/* ============ Mermaid diagrams ============ */
+.md-preview .mermaid-block {
+  margin: 0 0 0.9em;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+/* Mermaid writes inline width/max-width, hence the !important overrides. */
+.md-preview .mermaid-block svg {
+  display: block;
+  max-width: 100% !important;
+  height: auto !important;
+  margin: 0 auto;
+}
+
+/* The source stays visible while the lazy engine chunk is loading. */
+.md-preview .mermaid-block:not(.mermaid-failed) .mermaid-source {
+  padding: 2px 4px;
+  border-color: transparent;
+  background: transparent;
+}
+
+.md-preview .mermaid-block.mermaid-failed {
+  border-color: var(--danger);
+  background: var(--danger-weak);
+}
+
+.md-preview .mermaid-error-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--danger);
+}
+
+.md-preview .mermaid-error-detail {
+  margin: 4px 0 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.md-preview .mermaid-source {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+/* ============ KaTeX math ============ */
+.md-preview .math-block {
+  margin: 0 0 0.9em;
+  padding: 2px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.md-preview .math-block .katex-display {
+  margin: 0;
+}
+
+.md-preview .math-block.math-error {
+  padding: 8px 10px;
+  border: 1px solid var(--danger);
+  border-radius: 10px;
+  background: var(--danger-weak);
+}
+
+.md-preview .math-error-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--danger);
+}
+
+.md-preview .math-error-source {
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.md-preview .math-error-detail {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.md-preview .math-error-inline {
+  color: var(--danger);
+  border-bottom: 1px dashed var(--danger);
+  cursor: help;
 }
 
 /* ============ highlight.js token colors (shared by both themes) ============ */

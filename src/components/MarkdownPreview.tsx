@@ -7,6 +7,12 @@ import {
   useMemo,
   useRef,
 } from 'react'
+import 'katex/dist/katex.min.css'
+import {
+  applyCachedMermaid,
+  currentMermaidTheme,
+  renderMermaidBlock,
+} from '../editor/mermaid'
 import { renderMarkdownPreview } from '../editor/markdown'
 import { lineAtOffset, offsetForLine, type PreviewBlock } from '../editor/sync'
 import { toast } from '../toast'
@@ -69,6 +75,37 @@ export const MarkdownPreview = forwardRef<MarkdownPreviewHandle, MarkdownPreview
       blocks.sort((a, b) => a.top - b.top)
       blocksRef.current = blocks
     }
+
+    // Mermaid renders after the HTML is committed. Cached SVGs are applied
+    // synchronously so they are measured/painted immediately; uncached diagrams
+    // load the engine lazily and degrade to a readable error on failure.
+    useLayoutEffect(() => {
+      const content = contentRef.current
+      if (!content) return
+      const blocks = content.querySelectorAll<HTMLElement>('.mermaid-block')
+      if (blocks.length === 0) return
+
+      const theme = currentMermaidTheme()
+      const pending: Array<{ block: HTMLElement; source: string }> = []
+      blocks.forEach((block) => {
+        const source = block.querySelector('.mermaid-source')?.textContent ?? ''
+        if (!applyCachedMermaid(block, source, theme)) {
+          pending.push({ block, source })
+        }
+      })
+      if (pending.length === 0) return
+
+      let cancelled = false
+      void (async () => {
+        for (const item of pending) {
+          if (cancelled) return
+          await renderMermaidBlock(item.block, item.source, theme)
+        }
+      })()
+      return () => {
+        cancelled = true
+      }
+    }, [html])
 
     // Re-measure after every HTML change; block positions drive scroll sync.
     useLayoutEffect(() => {
