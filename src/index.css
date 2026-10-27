@@ -1220,6 +1220,71 @@ body.split-resizing {
   accent-color: var(--accent);
 }
 
+/* ============ Markdown Extra extensions ============ */
+.md-preview mark {
+  padding: 0 2px;
+  border-radius: 3px;
+  background: var(--accent-weak);
+  color: inherit;
+}
+
+.md-preview abbr[title] {
+  text-decoration: underline dotted var(--text-3);
+  text-underline-offset: 2px;
+  cursor: help;
+}
+
+.md-preview ins {
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+}
+
+.md-preview sup,
+.md-preview sub {
+  font-size: 0.75em;
+  line-height: 0;
+}
+
+.md-preview dl {
+  margin: 0 0 0.9em;
+}
+
+.md-preview dt {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.md-preview dd {
+  margin: 0.2em 0 0.6em 1.2em;
+  color: var(--text-2);
+}
+
+.md-preview .footnotes {
+  margin-top: 1.4em;
+  padding-top: 0.8em;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+.md-preview .footnotes-sep {
+  display: none;
+}
+
+.md-preview .footnotes-list {
+  margin: 0;
+  padding-left: 1.2em;
+}
+
+.md-preview .footnote-ref a {
+  text-decoration: none;
+}
+
+.md-preview .footnote-backref {
+  color: var(--accent);
+  text-decoration: none;
+}
+
 /* ============ Mermaid diagrams ============ */
 .md-preview .mermaid-block {
   margin: 0 0 0.9em;
@@ -1601,37 +1666,120 @@ body.split-resizing {
   flex-shrink: 0;
 }
 
+.dialog-overlay {
+  align-items: center;
+  background: rgba(15, 16, 20, 0.5);
+}
+
 .dialog {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
+  position: relative;
+  width: 340px;
+  max-width: calc(100% - 32px);
+  margin: 0 16px;
+  padding: 20px 20px 16px;
   background: var(--surface);
-  border-radius: 18px;
-  padding: 22px;
-  width: 300px;
-  max-width: 86%;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.2);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  box-shadow:
+    0 24px 64px rgba(15, 16, 20, 0.24),
+    0 2px 8px rgba(15, 16, 20, 0.08);
   z-index: 110;
+  animation: dialog-in 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.dialog:focus {
+  outline: none;
+}
+
+.dialog-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  margin-bottom: 8px;
+}
+
+.dialog-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--accent-border);
+  border-radius: 10px;
+  background: var(--accent-weak);
+  color: var(--accent-deep);
 }
 
 .dialog-title {
-  font-size: 17px;
+  min-width: 0;
+  font-size: 19px;
+  line-height: 1.35;
   font-weight: 700;
-  margin-bottom: 8px;
+  letter-spacing: 0.01em;
+  color: var(--text);
 }
 
 .dialog-message {
   font-size: 14px;
   color: var(--text-2);
   line-height: 1.6;
+  margin-bottom: 14px;
+  white-space: pre-line;
+  word-break: break-word;
+}
+
+.dialog-detail {
   margin-bottom: 18px;
-  word-break: break-all;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-2);
+  text-align: left;
+  overflow: hidden;
+}
+
+.dialog-detail-host {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.dialog-detail-url {
+  display: block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .dialog-actions {
   display: flex;
   gap: 10px;
+}
+
+.dialog-actions .btn {
+  min-height: 44px;
+  padding: 0 14px;
+  border-radius: 12px;
+  font-size: 14px;
+  transition:
+    transform 0.12s ease,
+    background-color 0.15s ease,
+    filter 0.15s ease;
+}
+
+.dialog-actions .btn:active {
+  transform: scale(0.98);
+}
+
+.dialog-actions .btn:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
 }
 
 .action-sheet {
@@ -1733,6 +1881,18 @@ body.split-resizing {
 .btn-danger {
   background: var(--danger);
   color: #fff;
+}
+
+.btn-plain {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-2);
+}
+
+@media (hover: hover) {
+  .btn-plain:hover {
+    background: var(--surface-2);
+  }
 }
 
 .option-row {
@@ -2333,6 +2493,17 @@ body.split-resizing {
   }
 }
 
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
 @keyframes page-in {
   from {
     opacity: 0;
@@ -2346,6 +2517,10 @@ body.split-resizing {
 
 @media (prefers-reduced-motion: reduce) {
   .page {
+    animation: none;
+  }
+
+  .dialog {
     animation: none;
   }
 

@@ -3,6 +3,14 @@ import katex from 'katex'
 import katexPluginImport from '@vscode/markdown-it-katex'
 import hljs from 'highlight.js/lib/common'
 import taskLists from 'markdown-it-task-lists'
+import footnote from 'markdown-it-footnote'
+import deflist from 'markdown-it-deflist'
+import abbr from 'markdown-it-abbr'
+import mark from 'markdown-it-mark'
+import sub from 'markdown-it-sub'
+import sup from 'markdown-it-sup'
+import ins from 'markdown-it-ins'
+import { full as emoji } from 'markdown-it-emoji'
 
 // The plugin ships as CJS; dev/prod interop may expose the whole exports object
 // as the default import, so unwrap its `.default` when necessary.
@@ -10,6 +18,18 @@ const katexPlugin =
   typeof katexPluginImport === 'function'
     ? katexPluginImport
     : (katexPluginImport as unknown as { default: typeof katexPluginImport }).default
+
+/** Apply a markdown-it plugin, unwrapping CJS default-export interop if needed. */
+function applyPlugin(plugin: unknown, md: MarkdownItInstance): void {
+  const candidate =
+    typeof plugin === 'function'
+      ? plugin
+      : (plugin as { default?: unknown } | null)?.default
+  if (typeof candidate !== 'function') {
+    throw new Error('Markdown extension failed to load')
+  }
+  ;(candidate as (target: MarkdownItInstance) => void)(md)
+}
 
 /** Highlight fenced code with highlight.js; unknown languages stay plain. */
 function highlightCode(code: string, language: string): string {
@@ -129,7 +149,11 @@ function annotateSourceLines(md: MarkdownItInstance): void {
 
     if (language === 'mermaid') {
       const attr = line == null ? '' : ` data-line="${line + 1}"`
-      return `<div class="mermaid-block"${attr}><pre class="mermaid-source">${escapeHtml(
+      // Keep the source on the stable wrapper attribute as well: the inner
+      // placeholder is replaced by the rendered SVG, and React may reuse the
+      // wrapper when the preview re-renders.
+      const encoded = encodeURIComponent(token.content)
+      return `<div class="mermaid-block"${attr} data-mermaid-source="${encoded}"><pre class="mermaid-source">${escapeHtml(
         token.content,
       )}</pre></div>\n`
     }
@@ -149,8 +173,8 @@ function annotateSourceLines(md: MarkdownItInstance): void {
 
 /**
  * Preview renderer aligned with VS Code's built-in Markdown preview: CommonMark
- * plus GFM tables, strikethrough, autolinks, task lists, KaTeX math and Mermaid
- * placeholders (diagrams are rendered in the browser). Raw HTML stays disabled.
+ * plus GFM tables, strikethrough, autolinks, task lists, KaTeX math, Mermaid
+ * placeholders and common Markdown Extra extensions. Raw HTML stays disabled.
  */
 function createMarkdownRenderer(): MarkdownItInstance {
   const md = new MarkdownIt({
@@ -160,6 +184,16 @@ function createMarkdownRenderer(): MarkdownItInstance {
     highlight: highlightCode,
   })
   md.use(taskLists, { enabled: false, label: true, labelAfter: true })
+  // Non-GFM extensions: footnotes, definition lists, abbreviations, highlight,
+  // sub/superscript, inserted text and emoji shortcodes.
+  applyPlugin(footnote, md)
+  applyPlugin(deflist, md)
+  applyPlugin(abbr, md)
+  applyPlugin(mark, md)
+  applyPlugin(sub, md)
+  applyPlugin(sup, md)
+  applyPlugin(ins, md)
+  applyPlugin(emoji, md)
   configureMath(md)
   annotateSourceLines(md)
   return md

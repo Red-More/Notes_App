@@ -2,7 +2,7 @@
 
 ## 1. 概述
 
-笔记编辑页已从 `textarea` 升级为 **CodeMirror 6** 编辑器，并把预览升级为 **markdown-it** 渲染器（VS Code 内置 Markdown 预览同款引擎）。预览以可调节高度的上下分屏呈现，支持内容实时同步、双向滚动同步、点击预览定位源码行、分隔线拖拽/点击调整区域比例，以及 Mermaid 图表与 KaTeX 数学公式渲染。
+笔记编辑页已从 `textarea` 升级为 **CodeMirror 6** 编辑器，并把预览升级为 **markdown-it** 渲染器（VS Code 内置 Markdown 预览同款引擎）。预览以可调节高度的上下分屏呈现，支持内容实时同步、双向滚动同步、点击预览定位源码行、分隔线拖拽/点击调整区域比例，以及 Mermaid 图表、KaTeX 数学公式、常用非 GFM 扩展语法与链接点击确认/复制。
 
 核心目标：
 
@@ -12,17 +12,19 @@
 
 ## 2. 技术选型
 
-| 层            | 方案                                                      | 说明                                               |
-| ------------- | --------------------------------------------------------- | -------------------------------------------------- |
-| 编辑器        | CodeMirror 6                                              | 行号、折行、选区、撤销栈、语法树、移动端输入均内置 |
-| Markdown 语言 | `@codemirror/lang-markdown` + `@codemirror/language-data` | Markdown 高亮；围栏代码按需加载语言高亮            |
-| 缩进参考线    | `@replit/codemirror-indentation-markers`                  | 成熟社区扩展                                       |
-| 预览渲染      | `markdown-it`                                             | CommonMark + GFM 表格/删除线/自动链接              |
-| 任务列表      | `markdown-it-task-lists`                                  | GFM 待办列表                                       |
-| Mermaid       | `mermaid`（懒加载）                                       | 流程图、时序图、类图、状态图、甘特图等全部图表类型 |
-| 数学公式      | `katex` + `@vscode/markdown-it-katex`                     | 行内 `$...$` 与块级 `$$...$$`，VS Code 同款方案    |
-| 代码高亮      | `highlight.js/lib/common`                                 | 预览内常见语言高亮                                 |
-| 高亮配色      | 自定义 CSS（基于应用设计变量）                            | 浅色/深色主题自动适配                              |
+| 层            | 方案                                                                   | 说明                                               |
+| ------------- | ---------------------------------------------------------------------- | -------------------------------------------------- |
+| 编辑器        | CodeMirror 6                                                           | 行号、折行、选区、撤销栈、语法树、移动端输入均内置 |
+| Markdown 语言 | `@codemirror/lang-markdown` + `@codemirror/language-data`              | Markdown 高亮；围栏代码按需加载语言高亮            |
+| 缩进参考线    | `@replit/codemirror-indentation-markers`                               | 成熟社区扩展                                       |
+| 预览渲染      | `markdown-it`                                                          | CommonMark + GFM 表格/删除线/自动链接              |
+| 任务列表      | `markdown-it-task-lists`                                               | GFM 待办列表                                       |
+| Mermaid       | `mermaid`（懒加载）                                                    | 流程图、时序图、类图、状态图、甘特图等全部图表类型 |
+| 数学公式      | `katex` + `@vscode/markdown-it-katex`                                  | 行内 `$...$` 与块级 `$$...$$`，VS Code 同款方案    |
+| 非 GFM 扩展   | markdown-it-footnote / deflist / abbr / mark / sub / sup / ins / emoji | 脚注、定义列表、缩写、高亮、上下标、插入、Emoji    |
+| 外部打开      | `@tauri-apps/plugin-opener`                                            | 点击链接确认后在系统浏览器打开                     |
+| 代码高亮      | `highlight.js/lib/common`                                              | 预览内常见语言高亮                                 |
+| 高亮配色      | 自定义 CSS（基于应用设计变量）                                         | 浅色/深色主题自动适配                              |
 
 ## 3. 编辑器能力
 
@@ -86,6 +88,7 @@
 - 围栏代码块：按 info string 使用 highlight.js 常见语言高亮；未知语言按纯文本显示。
 - Mermaid：以 ` ```mermaid ` 围栏标记，支持 Mermaid 官方解析器覆盖的全部图表类型（流程图、时序图、类图、状态图、甘特图、ER 图、饼图等）。
 - LaTeX：行内 `$...$`、块级 `$$...$$`，由 KaTeX 渲染；也支持 `$$\begin{aligned}...\end{aligned}$$` 等复杂结构。
+- 非 GFM 扩展：脚注 `[^1]`、定义列表、缩写定义、`==高亮==`、`H~2~O`、`x^2^`、`++插入++`、Emoji 短代码。
 - 软换行遵循 CommonMark：源码中的单个换行在预览中显示为空格，与 VS Code 默认行为一致。
 
 ### 4.2 明确不支持
@@ -96,7 +99,7 @@
 
 - Markdown 原始 HTML 关闭，避免脚本注入。
 - 链接协议由 markdown-it 校验，`javascript:` 等危险协议不会生成可点击链接。
-- 预览中的外链点击不会让 WebView 跳离应用，而是复制链接并提示在浏览器打开。
+- 预览中的外链点击不会让 WebView 跳离应用，而是先弹出确认对话框；确认后通过系统浏览器打开，拒绝后复制链接。仅允许 `http/https/mailto/tel`，Tauri opener 使用 `opener:default` 权限。
 - KaTeX 使用 `trust: false`，不执行 `\href`、`\htmlClass` 等可信命令。
 - Mermaid 使用 `securityLevel: 'strict'` 与 `suppressErrorRendering`，标签会被安全处理，错误不会注入页面。
 
@@ -121,6 +124,7 @@
 **Mermaid 渲染流程**
 
 - markdown-it 先输出带 `data-line` 的 `.mermaid-block` 占位符与源码；
+- 图表源码同时保存在占位符内文与稳定的 `data-mermaid-source` 属性中，主题切换或重新挂载时可重新读取并复用缓存；
 - 预览挂载后由浏览器调用 Mermaid 渲染 SVG；引擎通过动态 `import('mermaid')` 懒加载，无图表笔记不下载；
 - 渲染结果按「主题 + 源码」缓存（最多 40 条），内容未变的图表在后续刷新中直接复用；
 - 同一时间只顺序渲染一个图表，避免 Mermaid 全局解析状态冲突；
@@ -137,9 +141,24 @@
 
 **主题与样式**
 
-- 浅色使用 Mermaid `default` 主题，深色使用 `dark` 主题；主题取自应用当前 `data-theme`；
+- 使用 Mermaid `base` 主题，把节点、连线、文本、聚类、注释、时序角色、甘特任务等颜色映射到应用设计变量；
+- 浅色/深色使用同一套变量体系，主题取自应用当前 `data-theme`；节点填充使用 `--surface-2`，文字使用 `--text`；
+- 流程图使用 `basis` 曲线并加大节点/层级间距；时序图自动折行；甘特图增加内边距；图表卡片与代码块保持一致的边框、圆角与内边距；
 - KaTeX 颜色沿用 Markdown 前景色，错误使用应用的危险色；
 - 所有图表/公式样式限定在 `.md-preview` 内，不影响编辑器与其他页面。
+
+> 更完整的 Mermaid 视觉优化调研、可复用配置与不同场景选型见 [mermaid-visual-optimization.md](./mermaid-visual-optimization.md)。
+
+### 4.6 链接交互
+
+- 已移除长按词条，仅保留点击触发；
+- 单击可打开的外部链接（`http/https/mailto/tel`）：不直接跳转，弹出二次确认对话框；
+- 对话框采用「图标与标题同行 + 说明 + 地址卡片 + 双按钮」的紧凑结构：30×30 圆角图标徽章、19px 粗体标题、域名加粗、完整地址等宽字体单行省略，主按钮「打开」、次按钮「复制链接」，按钮高度不小于 44px；
+- 确认「打开」：Tauri 下调用 `@tauri-apps/plugin-opener`（`opener:default` 权限），Web 预览降级为 `window.open`；打开失败时提示并自动复制链接；
+- 选择「复制链接」、按 `Esc` 或点击遮罩取消：对话框立即关闭，链接地址自动写入系统剪贴板并提示；
+- 对话框支持进出场动画与键盘焦点管理，并通过 `prefers-reduced-motion` 关闭动画；
+- 相对路径/自定义协议链接无法由系统浏览器打开，单击直接复制；
+- 脚注等页内锚点（`#fn1`）保留默认页内跳转，不弹确认、不复制。
 
 ## 5. 双向同步
 
@@ -200,7 +219,8 @@
 
 - 主界面不包含 CodeMirror / markdown-it / KaTeX / highlight.js / Mermaid；
 - 当前构建：主包约 307KB（gzip 93KB），编辑器分包约 136KB（gzip 44KB）；
-- 预览分包约 792KB（gzip 254KB），另含 KaTeX 分包约 259KB（gzip 78KB），仅在打开预览时加载；
+- 预览分包约 852KB（gzip 277KB），另含 KaTeX 分包约 259KB（gzip 78KB），仅在打开预览时加载；
+- 非 GFM 扩展插件随预览分包加载（约增加 60KB 原始体积），不进入主界面或编辑器分包；
 - Mermaid 引擎在存在图表时才下载，各图表类型独立分包（常规流程图/时序图分包远小于最大的复杂图表分包）；
 - 围栏代码语言的语法包按需动态加载，不进入首屏；
 - 预览渲染使用 React 延迟值，输入法输入不被渲染阻塞；
@@ -216,9 +236,10 @@
 pnpm test
 ```
 
-共 8 个测试文件、98 个用例：
+共 9 个测试文件、110 个用例：
 
-- `src/editor/markdown.test.ts`：CommonMark/GFM 渲染、表格包装、任务列表、代码高亮、HTML 转义、危险链接、源码行标注；Mermaid 各图表占位与大小写识别、行内/块级公式、货币与代码围栏边界、非法公式与图表降级；
+- `src/editor/markdown.test.ts`：CommonMark/GFM 渲染、表格包装、任务列表、代码高亮、HTML 转义、危险链接、源码行标注；Mermaid 各图表占位与大小写识别、行内/块级公式、货币与代码围栏边界、非法公式与图表降级；脚注、定义列表、缩写、高亮、上下标、插入、Emoji 等非 GFM 扩展；
+- `src/editor/links.test.ts`：链接分类（绝对/协议相对/相对/页内锚点/mailto/tel/危险协议）；
 - `src/editor/sync.test.ts`：滚动偏移与源码行的双向映射、重复行、边界与空数据；
 - `src/editor/layout.test.ts`：布局配置解析与钳制、三态模式切换、点击翻转比例、拖拽坐标换算与 10%/90% 边界；
 - `src/editor/mermaid.test.ts`：缓存键主题隔离、空图表降级、错误消息提取；
@@ -260,6 +281,24 @@ Mermaid / KaTeX 实测（Chromium，520×699 与 320×420）：
 - 320×420 下 6 个 Mermaid SVG 均缩放至容器内（约 250px），文档无横向/纵向溢出；
 - 预览组件与 Mermaid 引擎按需加载，控制台无 Mermaid/KaTeX 运行时错误。
 
+链接与扩展实测（Chromium）：
+
+- 单击外部链接：弹出确认对话框，展示图标、域名、完整地址与「复制链接」「打开」；页面不跳转；
+- 选择「复制链接」：对话框关闭、显示“链接已复制”、无新标签页；
+- 选择「打开」：Web 环境打开新标签页；失败时自动复制链接；
+- 按 `Esc` 或点击遮罩同样关闭并复制链接；
+- 浅色/深色下卡片、边框、30×30 图标徽章与 19px 标题同行居中对齐、双按钮对比清晰，按钮高度 44px，控制台无错误；
+- 相对链接单击直接复制，不弹对话框；
+- 脚注跳转 `#fn1`，无对话框、无复制；
+- 320px 宽下对话框宽 288px、390px 宽下为 340px，说明文字正常换行、地址单行省略，无页面溢出；
+- 长按链接 800ms 不再出现词条或对话框（长按逻辑已移除）。
+
+Mermaid 主题与构建验证：
+
+- 深色/浅色各切换一次（每次都重挂载预览），5 个 Mermaid 图均正常渲染（0 失败）；节点填充分别为 `#f2f2f5` / `#282b33`；
+- 320px 宽下 5 个 SVG 宽约 251px，容器无横向/纵向溢出；
+- `cargo check` 通过，`tauri-plugin-opener` 完成注册，`opener:default` 权限可用。
+
 ### 9.3 真机兼容性清单(已手动验证)
 
 以下项目需在 iOS / Android 真机回归（当前环境无法执行）：
@@ -270,7 +309,9 @@ Mermaid / KaTeX 实测（Chromium，520×699 与 320×420）：
 4. 撤销/恢复点击时输入法不收起；
 5. 长笔记滚动流畅，预览同步无明显延迟；
 6. 深色主题下编辑器与预览配色正确；
-7. 中英文输入法组合输入（候选词）不丢字。
+7. 中英文输入法组合输入（候选词）不丢字；
+8. 点击链接弹出确认对话框；「复制链接」能写入系统剪贴板；
+9. 「打开」能唤起系统浏览器，取消后不会残留对话框。
 
 ## 10. 文件结构
 
@@ -278,19 +319,24 @@ Mermaid / KaTeX 实测（Chromium，520×699 与 320×420）：
 src/
   components/
     MarkdownEditor.tsx      CodeMirror 封装（主题、扩展、快捷键、补全、诊断）
-    MarkdownPreview.tsx     markdown-it 预览、行映射、滚动同步、点击定位、Mermaid 挂载
+    MarkdownPreview.tsx     markdown-it 预览、行映射、滚动同步、链接确认、Mermaid 挂载
     SplitHandle.tsx         分屏分隔线（拖拽、点击翻转、键盘微调）
   editor/
-    markdown.ts             渲染器、highlight.js、data-line 注入、KaTeX 公式、Mermaid 占位
-    mermaid.ts              Mermaid 懒加载、主题初始化、渲染缓存、错误降级
+    markdown.ts             渲染器、highlight.js、非 GFM 扩展、data-line、KaTeX、Mermaid 占位
+    mermaid.ts              Mermaid 懒加载、应用主题映射、渲染缓存、错误降级
+    links.ts                链接分类（复制地址 / 页内锚点 / 可系统打开）
     sync.ts                 预览偏移 ↔ 源码行的纯函数映射
     layout.ts               布局模式/比例配置、持久化、坐标换算
     commands.ts             Markdown 包裹命令与链接插入
     diagnostics.ts          未闭合代码块诊断
     prefs.ts                缩进配置持久化
+  system/
+    clipboard.ts            剪贴板写入与降级实现
+    openExternal.ts         Tauri opener / window.open 外部打开
+  markdown-it-extensions.d.ts  非 GFM 插件类型声明
   pages/notes/NoteEditorPage.tsx   编辑态、分屏布局、双向同步、保存联动
   pages/settings/SettingsPage.tsx  Markdown 编辑器与预览布局设置
-  index.css                编辑器/预览/图表/公式配色与布局
+  index.css                编辑器/预览/图表/公式/对话框配色与布局
 ```
 
 ## 11. 已知限制
@@ -299,8 +345,9 @@ src/
 - 原生 HTML 仍不解析（按需求关闭）。
 - Mermaid / KaTeX 首次使用需要加载额外资源；Mermaid 首次渲染是异步的，复杂图表在窄屏按容器宽度缩放。
 - Mermaid 语法覆盖范围由 Mermaid 官方解析器决定；KaTeX 不支持的命令会显示降级提示。
-- 未启用脚注等非 GFM 扩展。
-- 外链通过剪贴板复制，不直接唤起系统浏览器（当前未引入 opener 插件）。
+- 已启用脚注、定义列表、缩写、高亮、上下标、插入、Emoji 等常用非 GFM 扩展；未启用任意自定义容器、属性语法等第三方扩展。
+- 相对链接只复制地址；系统浏览器打开仅支持 `http/https/mailto/tel`；Web 预览以 `window.open` 作为降级。
+- 链接确认对话框依赖剪贴板与 opener 权限；打开失败会自动复制链接。
 - 缩进配置在重新打开笔记后生效。
 - 布局比例限制在 10%-90%，仅预览模式通过设置页切换；配置保存在本机 `localStorage`，不跨设备同步。
 - 设置页的布局修改在下次打开笔记时生效（设置页与编辑页不同时显示），分隔线拖拽则在当前页面即时生效。

@@ -63,7 +63,10 @@ describe('renderMarkdownPreview', () => {
 
   it('turns Mermaid fences into annotated placeholders', () => {
     const html = renderMarkdownPreview('# 图\n\n```mermaid\ngraph TD;\nA-->B\n```')
-    expect(html).toContain('<div class="mermaid-block" data-line="3">')
+    expect(html).toContain('class="mermaid-block" data-line="3"')
+    expect(
+      html,
+    ).toContain('data-mermaid-source="graph%20TD%3B%0AA--%3EB')
     expect(html).toContain('<pre class="mermaid-source">')
     expect(html).toContain('graph TD;')
     expect(html).toContain('A--&gt;B')
@@ -134,6 +137,50 @@ describe('renderMarkdownPreview', () => {
     const html = renderMarkdownPreview('`$x^2$`')
     expect(html).not.toContain('class="katex"')
     expect(html).toContain('<code>$x^2$</code>')
+  })
+
+  it('renders footnotes with working anchors', () => {
+    const html = renderMarkdownPreview('正文[^1]\n\n[^1]: 脚注内容')
+    expect(html).toContain('class="footnote-ref"')
+    expect(html).toContain('href="#fn1"')
+    expect(html).toContain('id="fn1"')
+    expect(html).toContain('footnote-backref')
+    expect(html).toContain('脚注内容')
+  })
+
+  it('renders definition lists', () => {
+    const html = renderMarkdownPreview('术语\n: 定义')
+    expect(html).toContain('<dl data-line="1">')
+    expect(html).toContain('>术语</dt>')
+    expect(html).toContain('>定义</dd>')
+  })
+
+  it('renders abbreviations', () => {
+    const html = renderMarkdownPreview(
+      '*[HTML]: HyperText Markup Language\n\nHTML',
+    )
+    expect(html).toContain(
+      '<abbr title="HyperText Markup Language">HTML</abbr>',
+    )
+  })
+
+  it('renders highlight, subscript, superscript and insertion', () => {
+    const html = renderMarkdownPreview('==高亮== H~2~O x^2^ ++插入++')
+    expect(html).toContain('<mark>高亮</mark>')
+    expect(html).toContain('H<sub>2</sub>O')
+    expect(html).toContain('x<sup>2</sup>')
+    expect(html).toContain('<ins>插入</ins>')
+  })
+
+  it('renders emoji shortcodes', () => {
+    const html = renderMarkdownPreview('Hello :smile:')
+    expect(html).toContain('😄')
+  })
+
+  it('keeps extension syntax literal inside code spans', () => {
+    const html = renderMarkdownPreview('`==x==`')
+    expect(html).toContain('<code>==x==</code>')
+    expect(html).not.toContain('<mark>')
   })
 
   it('returns an empty string for blank input', () => {

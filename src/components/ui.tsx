@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { IconClose } from './Icons'
 
@@ -75,7 +75,12 @@ interface ConfirmProps {
   title: string
   message: string
   confirmText?: string
+  cancelText?: string
   danger?: boolean
+  /** Optional glyph rendered in a tinted badge above the title. */
+  icon?: ReactNode
+  /** Optional rich row below the message, e.g. a link address card. */
+  detail?: ReactNode
   onConfirm: () => void
   onCancel: () => void
 }
@@ -84,19 +89,60 @@ export function ConfirmDialog({
   title,
   message,
   confirmText = '确定',
+  cancelText = '取消',
   danger = false,
+  icon,
+  detail,
   onConfirm,
   onCancel,
 }: ConfirmProps) {
+  const titleId = useId()
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const cancelRef = useRef(onCancel)
+
+  useEffect(() => {
+    cancelRef.current = onCancel
+  }, [onCancel])
+
+  // Capture phase so Escape only dismisses the top-most dialog.
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null
+    dialogRef.current?.focus()
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.stopPropagation()
+      cancelRef.current()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => {
+      window.removeEventListener('keydown', onKey, true)
+      previous?.focus?.()
+    }
+  }, [])
+
   return (
     <OverlayPortal>
-      <div className="modal-overlay" onClick={onCancel}>
-        <div className="dialog" onClick={(e) => e.stopPropagation()}>
-          <div className="dialog-title">{title}</div>
+      <div className="modal-overlay dialog-overlay" onClick={onCancel}>
+        <div
+          ref={dialogRef}
+          className="dialog"
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby={titleId}
+          tabIndex={-1}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="dialog-header">
+            {icon ? <div className="dialog-icon">{icon}</div> : null}
+            <div className="dialog-title" id={titleId}>
+              {title}
+            </div>
+          </div>
           <div className="dialog-message">{message}</div>
+          {detail ? <div className="dialog-detail">{detail}</div> : null}
           <div className="dialog-actions">
-            <button type="button" className="btn" onClick={onCancel}>
-              取消
+            <button type="button" className="btn btn-plain" onClick={onCancel}>
+              {cancelText}
             </button>
             <button
               type="button"

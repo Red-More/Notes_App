@@ -6,6 +6,7 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
+  useState,
 } from 'react'
 import 'katex/dist/katex.min.css'
 import {
@@ -14,8 +15,13 @@ import {
   renderMermaidBlock,
 } from '../editor/mermaid'
 import { renderMarkdownPreview } from '../editor/markdown'
+import { classifyHref } from '../editor/links'
 import { lineAtOffset, offsetForLine, type PreviewBlock } from '../editor/sync'
+import { copyText } from '../system/clipboard'
+import { openExternal } from '../system/openExternal'
 import { toast } from '../toast'
+import { ConfirmDialog } from './ui'
+import { IconExternalLink } from './Icons'
 
 export interface MarkdownPreviewHandle {
   /** Scroll the preview to the block containing a source line. */
@@ -30,6 +36,18 @@ interface MarkdownPreviewProps {
   onSourceLine: (line: number) => void
 }
 
+/** Compact host label shown above the full address in the confirm card. */
+function hostLabel(address: string): string {
+  try {
+    const url = new URL(address)
+    if (url.protocol === 'mailto:') return '邮件链接'
+    if (url.protocol === 'tel:') return '电话链接'
+    return url.hostname || address
+  } catch {
+    return address
+  }
+}
+
 export const MarkdownPreview = forwardRef<MarkdownPreviewHandle, MarkdownPreviewProps>(
   function MarkdownPreview({ source, onScrollLine, onSourceLine }, ref) {
     const scrollRef = useRef<HTMLDivElement>(null)
@@ -38,6 +56,7 @@ export const MarkdownPreview = forwardRef<MarkdownPreviewHandle, MarkdownPreview
     const frameRef = useRef(0)
     const onScrollRef = useRef(onScrollLine)
     const onSourceRef = useRef(onSourceLine)
+    const [pendingLink, setPendingLink] = useState<string | null>(null)
 
     // Rendering is deferred so typing stays responsive on low-end phones.
     const deferredSource = useDeferredValue(source)
@@ -88,7 +107,20 @@ export const MarkdownPreview = forwardRef<MarkdownPreviewHandle, MarkdownPreview
       const theme = currentMermaidTheme()
       const pending: Array<{ block: HTMLElement; source: string }> = []
       blocks.forEach((block) => {
-        const source = block.querySelector('.mermaid-source')?.textContent ?? ''
+        // Prefer the wrapper attribute: the inner source placeholder is gone
+        // after the first render, and React can reuse this wrapper on re-render.
+        let source = ''
+        const encoded = block.dataset.mermaidSource
+        if (encoded) {
+          try {
+            source = decodeURIComponent(encoded)
+          } catch {
+            source = encoded
+          }
+        }
+        if (!source) {
+          source = block.querySelector('.mermaid-source')?.textContent ?? ''
+        }
         if (!applyCachedMermaid(block, source, theme)) {
           pending.push({ block, source })
         }
@@ -157,23 +189,32 @@ export const MarkdownPreview = forwardRef<MarkdownPreviewHandle, MarkdownPreview
 
     const handleClick = (event: React.MouseEvent<HTMLDivElement>) => {
       const target = event.target as HTMLElement
-
-      // Never let an external link navigate the app webview away; copy it
-      // instead so it can be opened in a real browser.
       const link = target.closest<HTMLAnchorElement>('a')
+
+      // Never let a link navigate the app webview away. In-page anchors
+      // (footnotes) keep their default navigation.
       if (link) {
-        event.preventDefault()
-        const href = link.href
-        if (!/^https?:/i.test(href)) return
-        const clipboard = navigator.clipboard
-        if (!clipboard) {
-          toast('当前环境无法复制链接')
+        const linkTarget = classifyHref(
+          link.getAttribute('href') ?? '',
+          link.href,
+        )
+        if (!linkTarget) {
+          event.preventDefault()
           return
         }
-        void clipboard
-          .writeText(href)
-          .then(() => toast('链接已复制，请在浏览器打开'))
-          .catch(() => toast('无法复制链接'))
+        if (linkTarget.internal) return
+        event.preventDefault()
+
+        // Openable links ask for confirmation; declining copies the address.
+        if (linkTarget.openable) {
+          setPendingLink(linkTarget.address)
+          return
+        }
+
+        // Relative/custom links cannot be opened by the system browser.
+        void copyText(linkTarget.address).then((ok) => {
+          toast(ok ? '链接已复制' : '无法复制链接')
+        })
         return
       }
 
@@ -183,6 +224,28 @@ export const MarkdownPreview = forwardRef<MarkdownPreviewHandle, MarkdownPreview
       if (!block) return
       const line = Number(block.dataset.line)
       if (Number.isFinite(line) && line > 0) onSourceRef.current(line)
+    }
+
+    const handleConfirmOpen = () => {
+      const address = pendingLink
+      setPendingLink(null)
+      if (!address) return
+      void openExternal(address).then((ok) => {
+        if (ok) return
+        // Opening failed (permissions, no handler): keep the link accessible.
+        void copyText(address).then((copied) => {
+          toast(copied ? '无法打开浏览器，链接已复制' : '无法打开浏览器')
+        })
+      })
+    }
+
+    const handleDeclineOpen = () => {
+      const address = pendingLink
+      setPendingLink(null)
+      if (!address) return
+      void copyText(address).then((ok) => {
+        toast(ok ? '链接已复制' : '无法复制链接')
+      })
     }
 
     return (
@@ -197,6 +260,23 @@ export const MarkdownPreview = forwardRef<MarkdownPreviewHandle, MarkdownPreview
         ) : (
           <div className="preview-empty">（无内容）</div>
         )}
+        {pendingLink ? (
+          <ConfirmDialog
+            title="打开链接"
+            message="将在系统应用中打开此链接"
+            icon={<IconExternalLink size={17} />}
+            detail={
+              <>
+                <span className="dialog-detail-host">{hostLabel(pendingLink)}</span>
+                <span className="dialog-detail-url">{pendingLink}</span>
+              </>
+            }
+            confirmText="打开"
+            cancelText="复制链接"
+            onConfirm={handleConfirmOpen}
+            onCancel={handleDeclineOpen}
+          />
+        ) : null}
       </div>
     )
   },
