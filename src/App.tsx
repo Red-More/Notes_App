@@ -1,14 +1,17 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { ToastHost } from './components/ui'
 import ReminderScheduler from './components/ReminderScheduler'
 import { IconCalendar, IconNote, IconTodo, IconUsers } from './components/Icons'
 import { applyTheme, getStoredTheme } from './theme'
 import NoteListPage from './pages/notes/NoteListPage'
-import NoteEditorPage from './pages/notes/NoteEditorPage'
 import FolderManagePage from './pages/notes/FolderManagePage'
 import TodoPage from './pages/todos/TodoPage'
 import SchedulePage from './pages/schedules/SchedulePage'
 import ContactPage from './pages/contacts/ContactPage'
+
+// The editor carries CodeMirror + the preview renderer; keep them out of the
+// initial list-page bundle and load them when a note is opened.
+const NoteEditorPage = lazy(() => import('./pages/notes/NoteEditorPage'))
 
 type Tab = 'notes' | 'todos' | 'schedules' | 'contacts'
 
@@ -283,12 +286,14 @@ function App() {
   if (overlay?.kind === 'editor') {
     return (
       <>
-        <NoteEditorPage
-          key={overlay.noteId ?? 'new'}
-          noteId={overlay.noteId}
-          folderId={overlay.folderId}
-          onBack={closeOverlay}
-        />
+        <Suspense fallback={<div className="editor-page note-editor-page" />}>
+          <NoteEditorPage
+            key={overlay.noteId ?? 'new'}
+            noteId={overlay.noteId}
+            folderId={overlay.folderId}
+            onBack={closeOverlay}
+          />
+        </Suspense>
         <ToastHost />
       </>
     )

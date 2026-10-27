@@ -8,13 +8,21 @@ import {
   formatDateTime,
   fmtVersion,
   friendlyError,
-  renderMarkdown,
   safeFileName,
 } from '../../utils'
 import type { Folder, NoteVersion } from '../../types'
 import { ConfirmDialog, Modal } from '../../components/ui'
 import { toast } from '../../toast'
 import { getSaveStrategy } from '../../saveStrategy'
+import { getEditorPrefs } from '../../editor/prefs'
+import {
+  MarkdownEditor,
+  type MarkdownEditorHandle,
+} from '../../components/MarkdownEditor'
+import {
+  MarkdownPreview,
+  type MarkdownPreviewHandle,
+} from '../../components/MarkdownPreview'
 import {
   IconBack,
   IconCheck,
@@ -40,17 +48,11 @@ interface Props {
 
 type SaveState = 'clean' | 'dirty' | 'saving'
 
-interface EditorSnapshot {
-  title: string
-  content: string
-}
-
-/** Undo history limits: depth, and the typing-burst window merged into one step. */
-const UNDO_LIMIT = 100
-const UNDO_MERGE_MS = 700
-
 /** Prevent a bar action from stealing focus, so the IME and caret stay put. */
 const keepFieldFocus = (e: React.PointerEvent<HTMLButtonElement>) => e.preventDefault()
+
+/** How long a programmatic scroll suppresses the other pane's scroll events. */
+const SYNC_GUARD_MS = 160
 
 function hhmm(ts: number): string {
   const d = new Date(ts)
@@ -88,6 +90,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   const [editing, setEditing] = useState(false)
   const [canUndo, setCanUndo] = useState(false)
   const [canRedo, setCanRedo] = useState(false)
+  const [editorPrefs] = useState(() => getEditorPrefs())
 
   // Keyboard-aware viewport state. `visualKbInset` comes from the visual
   // viewport (adjustResize / overlay models); `nativeKbInset` is forwarded by
@@ -95,10 +98,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   const [visualKbInset, setVisualKbInset] = useState(0)
   const [nativeKbInset, setNativeKbInset] = useState(0)
   const kbInset = Math.max(visualKbInset, nativeKbInset)
-  const userScrollRef = useRef(false)
-  const programmaticRef = useRef(false)
   const prevKbInsetRef = useRef(0)
-  const prevContentRef = useRef('')
 
   const noteIdRef = useRef<number | null>(noteId)
   const lastSavedRef = useRef<{ title: string; content: string }>({
@@ -107,25 +107,14 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   })
   const bodyRef = useRef<HTMLDivElement>(null)
   const titleRef = useRef<HTMLInputElement>(null)
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
-  const mirrorRef = useRef<HTMLDivElement>(null)
+  const editorRef = useRef<MarkdownEditorHandle>(null)
+  const previewRef = useRef<MarkdownPreviewHandle>(null)
 
-  // Edit-session state kept in refs so handlers never depend on render timing.
   const editingRef = useRef(false)
-  const undoStackRef = useRef<EditorSnapshot[]>([])
-  const redoStackRef = useRef<EditorSnapshot[]>([])
-  const lastEditAtRef = useRef(0)
-
-  // Ground-truth draft mirrored into a ref. Every write path updates it
-  // synchronously, so the undo/redo stacks never snapshot a render closure that
-  // may be behind the values currently on screen.
-  const draftRef = useRef<EditorSnapshot>({ title: '', content: '' })
-
-  const applyDraft = useCallback((next: EditorSnapshot) => {
-    draftRef.current = next
-    setTitle(next.title)
-    setContent(next.content)
-  }, [])
+  // Scroll-sync guards: while one pane is driven programmatically, ignore the
+  // scroll events it emits so the two panes never fight each other.
+  const previewSyncIgnoreRef = useRef(0)
+  const editorSyncIgnoreRef = useRef(0)
 
   // Load existing note and folder list on mount.
   useEffect(() => {
@@ -136,7 +125,8 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
         setDefaultFolderName(stats.defaultFolderName)
         if (noteIdRef.current != null) {
           const note = await api.getNote(noteIdRef.current)
-          applyDraft({ title: note.title, content: note.content })
+          setTitle(note.title)
+          setContent(note.content)
           setCurrentFolderId(note.folderId)
           setCreatedAt(note.createdAt)
           setUpdatedAt(note.updatedAt)
@@ -150,7 +140,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
         toast(friendlyError(e))
       }
     })()
-  }, [applyDraft])
+  }, [])
 
   // Skip saving a brand-new note that only contains whitespace.
   const isBlank = !title.trim() && !content.trim()
@@ -266,77 +256,31 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     return () => window.removeEventListener('keydown', onKey)
   }, [doSave])
 
-  // ---- Edit mode: draft history + IME-driven enter / exit ----
+  // ---- Edit mode: focus-driven enter, IME-driven exit ----
 
-  const syncHistoryState = useCallback(() => {
-    setCanUndo(undoStackRef.current.length > 0)
-    setCanRedo(redoStackRef.current.length > 0)
-  }, [])
-
-  /** Enter edit mode; each session starts with an empty undo/redo stack. */
+  /** Enter edit mode. Undo history lives in CodeMirror, so nothing is reset. */
   const enterEditing = useCallback(() => {
     if (editingRef.current) return
     editingRef.current = true
     setEditing(true)
-    // Editing raw text requires leaving the rendered preview.
-    setPreviewOpen(false)
-    undoStackRef.current = []
-    redoStackRef.current = []
-    lastEditAtRef.current = 0
     // A keyboard that is still closing belongs to the previous session, so its
     // inset drop must not immediately end the session that just started.
     prevKbInsetRef.current = 0
-    syncHistoryState()
-  }, [syncHistoryState])
+  }, [])
 
   /** Leave edit mode without discarding the draft; blurring hides the IME. */
   const exitEditing = useCallback(() => {
     if (!editingRef.current) return
     editingRef.current = false
     setEditing(false)
-    lastEditAtRef.current = 0
     titleRef.current?.blur()
-    textareaRef.current?.blur()
+    editorRef.current?.blur()
   }, [])
 
-  /** Record the pre-edit draft; keystrokes within the merge window share a step. */
-  const recordEdit = useCallback(
-    (before: EditorSnapshot) => {
-      const now = performance.now()
-      const startsStep = now - lastEditAtRef.current > UNDO_MERGE_MS
-      if (startsStep) {
-        undoStackRef.current.push(before)
-        if (undoStackRef.current.length > UNDO_LIMIT) undoStackRef.current.shift()
-      }
-      lastEditAtRef.current = now
-      // Typing after an undo discards the redo branch.
-      const hadRedo = redoStackRef.current.length > 0
-      redoStackRef.current = []
-      if (startsStep || hadRedo) syncHistoryState()
-    },
-    [syncHistoryState],
-  )
-
-  // Snapshots come from draftRef, not from the render closure: it always holds
-  // the exact draft on screen, even if a state update is still settling.
-  const undoEdit = useCallback(() => {
-    const previous = undoStackRef.current.pop()
-    if (!previous) return
-    redoStackRef.current.push(draftRef.current)
-    lastEditAtRef.current = 0
-    applyDraft(previous)
-    syncHistoryState()
-  }, [applyDraft, syncHistoryState])
-
-  const redoEdit = useCallback(() => {
-    const next = redoStackRef.current.pop()
-    if (!next) return
-    undoStackRef.current.push(draftRef.current)
-    if (undoStackRef.current.length > UNDO_LIMIT) undoStackRef.current.shift()
-    lastEditAtRef.current = 0
-    applyDraft(next)
-    syncHistoryState()
-  }, [applyDraft, syncHistoryState])
+  const handleHistoryChange = useCallback((undoAvailable: boolean, redoAvailable: boolean) => {
+    setCanUndo(undoAvailable)
+    setCanRedo(redoAvailable)
+  }, [])
 
   const confirmEditing = useCallback(async () => {
     // A failed write keeps the user in edit mode so the draft is not lost.
@@ -402,134 +346,14 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     }
   }, [])
 
-  // Track manual scrolling so caret auto-follow doesn't fight the user.
-  useEffect(() => {
-    const body = bodyRef.current
-    if (!body) return
-    const onScroll = () => {
-      if (programmaticRef.current) {
-        programmaticRef.current = false
-        return
-      }
-      userScrollRef.current = true
-    }
-    body.addEventListener('scroll', onScroll, { passive: true })
-    return () => body.removeEventListener('scroll', onScroll)
-  }, [])
-
-  // Measure the caret's vertical offset inside the textarea via a hidden
-  // mirror that clones the text up to the cursor.
-  const caretOffset = useCallback(() => {
-    const ta = textareaRef.current
-    const mirror = mirrorRef.current
-    if (!ta || !mirror) return 0
-    const cs = getComputedStyle(ta)
-    mirror.style.cssText = [
-      'position:fixed',
-      'top:0',
-      'left:0',
-      'visibility:hidden',
-      'pointer-events:none',
-      'white-space:pre-wrap',
-      'overflow-wrap:break-word',
-      'word-break:break-word',
-      `width:${ta.clientWidth}px`,
-      `font:${cs.font}`,
-      `line-height:${cs.lineHeight}`,
-      `letter-spacing:${cs.letterSpacing}`,
-      'border:0',
-      'margin:0',
-      'padding:0',
-    ].join(';')
-    mirror.innerHTML =
-      ta.value
-        .slice(0, ta.selectionStart)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/\n/g, '<br>') + '<span data-caret></span>'
-    const caret = mirror.querySelector<HTMLElement>('[data-caret]')
-    return caret ? caret.offsetTop : 0
-  }, [])
-
-  // Scroll the caret to a safe distance above the keyboard if it is hidden;
-  // `force` bypasses the "user is reading" suppression.
-  const scrollCaretIntoView = useCallback(
-    (force: boolean) => {
-      if (kbInset <= 0) return
-      if (userScrollRef.current && !force) return
-      const ta = textareaRef.current
-      const body = bodyRef.current
-      const vv = window.visualViewport
-      if (!ta || !body || !vv) return
-      const kbTop =
-        visualKbInset > 0
-          ? vv.offsetTop + vv.height
-          : window.innerHeight - nativeKbInset
-      const SAFE = 20
-      const bodyRect = body.getBoundingClientRect()
-      // The hidden mirror clones the textarea's content box (padding 0), so
-      // caretOffset() is relative to the content start; subtracting the
-      // textarea's own scrollTop yields the caret's offset inside its visible
-      // box. For long notes the textarea is the primary scroll surface, so the
-      // caret must first be brought into its viewport before the body can align
-      // it above the keyboard.
-      const cs = getComputedStyle(ta)
-      const taPadTop = parseFloat(cs.paddingTop) || 0
-      const contentVisible = ta.clientHeight - taPadTop
-      let caretInView = caretOffset() - ta.scrollTop
-      const clamped = Math.min(Math.max(caretInView, 0), contentVisible)
-      if (clamped !== caretInView) {
-        ta.scrollTop += clamped - caretInView
-        caretInView = clamped
-      }
-      // Anchor on the textarea's real viewport top (which already accounts for
-      // the title input above it and any body scroll) plus its padding.
-      const taRect = ta.getBoundingClientRect()
-      const caretScreenTop = taRect.top + taPadTop + caretInView
-      const scrollBody = (delta: number) => {
-        programmaticRef.current = true
-        body.scrollTop += delta
-        // If the assignment is clamped to the same value no scroll event fires,
-        // so clear the flag via a timer instead of waiting for it.
-        setTimeout(() => {
-          programmaticRef.current = false
-        }, 0)
-      }
-      if (caretScreenTop > kbTop - SAFE) {
-        scrollBody(caretScreenTop - (kbTop - SAFE))
-      } else if (caretScreenTop < bodyRect.top + 8) {
-        scrollBody(-(bodyRect.top + 8 - caretScreenTop))
-      }
-    },
-    [kbInset, caretOffset, visualKbInset, nativeKbInset],
-  )
-
-  // Re-follow the caret only when the keyboard actually appears; candidate-bar
-  // height tweaks while it is already open must not yank the viewport away from
-  // where the user is reading. A fall back to zero means the user dismissed the
-  // IME, so edit mode ends together with the caret and the action bar.
+  // A fall back to zero means the user dismissed the IME; edit mode ends with
+  // it, so the caret and the edit bar disappear together. CodeMirror handles
+  // caret scrolling when the keyboard appears (see MarkdownEditor's kbInset).
   useEffect(() => {
     const wasOpen = prevKbInsetRef.current > 0
-    const appeared = kbInset > 0 && !wasOpen
     prevKbInsetRef.current = kbInset
-    if (appeared) {
-      userScrollRef.current = false
-      scrollCaretIntoView(true)
-    } else if (wasOpen && kbInset === 0) {
-      exitEditing()
-    }
-  }, [kbInset, scrollCaretIntoView, exitEditing])
-
-  // Follow the caret on content edits and keyboard-geometry changes (candidate
-  // bar). Only a content edit ends "reading mode"; an inset-only change must
-  // not pull the viewport away from where the user is reading.
-  useEffect(() => {
-    const typed = content !== prevContentRef.current
-    prevContentRef.current = content
-    if (kbInset <= 0) return
-    if (typed) userScrollRef.current = false
-    scrollCaretIntoView(false)
-  }, [content, kbInset, scrollCaretIntoView])
+    if (wasOpen && kbInset === 0) exitEditing()
+  }, [kbInset, exitEditing])
 
   const handleBack = async () => {
     if (previewVersion) {
@@ -583,7 +407,8 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     setRestoreConfirm(null)
     try {
       const note = await api.restoreVersion(v.id)
-      applyDraft({ title: note.title, content: note.content })
+      setTitle(note.title)
+      setContent(note.content)
       setCurrentFolderId(note.folderId)
       setCreatedAt(note.createdAt)
       setUpdatedAt(note.updatedAt)
@@ -672,21 +497,45 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     folders.find((f) => f.id === currentFolderId)?.name ??
     (currentFolderId == null ? defaultFolderName : '')
 
-  /** A tap on empty body space edits the body: focus and put the caret at the end. */
-  const focusContent = () => {
-    const ta = textareaRef.current
-    if (!ta) return
-    ta.focus()
-    const end = ta.value.length
-    ta.setSelectionRange(end, end)
+  /** A tap on the editor pane outside the code surface focuses the body. */
+  const handleEditorPaneClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement
+    if (target.closest('input, textarea, button, a, .cm-editor')) return
+    editorRef.current?.focus()
   }
 
-  const handleBodyClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (previewOpen) return
-    // Taps inside a field are native and place the caret at the tap point.
-    if ((e.target as HTMLElement).closest('input, textarea, button, a')) return
-    focusContent()
+  // ---- Two-way editor <-> preview scroll sync ----
+  // Each direction ignores the scroll events emitted by the pane it just
+  // drove, so the two surfaces cannot oscillate against each other.
+  const handleEditorScroll = (line: number) => {
+    if (!previewOpen) return
+    const now = performance.now()
+    if (now < editorSyncIgnoreRef.current) return
+    previewSyncIgnoreRef.current = now + SYNC_GUARD_MS
+    previewRef.current?.scrollToLine(line)
   }
+
+  const handlePreviewScroll = (line: number) => {
+    const now = performance.now()
+    if (now < previewSyncIgnoreRef.current) return
+    editorSyncIgnoreRef.current = now + SYNC_GUARD_MS
+    editorRef.current?.scrollToLine(line)
+  }
+
+  /** Tapping a preview block reveals its source line without opening the IME. */
+  const handlePreviewSourceLine = (line: number) => {
+    editorRef.current?.revealLine(line)
+  }
+
+  // Align a newly opened preview with the editor's current top line.
+  useEffect(() => {
+    if (!previewOpen) return
+    const frame = requestAnimationFrame(() => {
+      previewSyncIgnoreRef.current = performance.now() + SYNC_GUARD_MS
+      previewRef.current?.scrollToLine(editorRef.current?.getTopLine() ?? 1)
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [previewOpen])
 
   const wordCount = content.length
   const createdAtLabel = createdAt ? formatAmPmDateTime(createdAt) : '—'
@@ -729,7 +578,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
             <button
               type="button"
               className="edit-bar-btn"
-              onClick={undoEdit}
+              onClick={() => editorRef.current?.undo()}
               onPointerDown={keepFieldFocus}
               aria-label="撤销"
               disabled={!canUndo}
@@ -739,7 +588,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
             <button
               type="button"
               className="edit-bar-btn"
-              onClick={redoEdit}
+              onClick={() => editorRef.current?.redo()}
               onPointerDown={keepFieldFocus}
               aria-label="恢复撤销"
               disabled={!canRedo}
@@ -844,67 +693,64 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
           <div
             className="editor-body"
             ref={bodyRef}
-            onClick={handleBodyClick}
             style={
               kbInset
                 ? { paddingBottom: `calc(${kbInset}px + var(--safe-bottom))` }
                 : undefined
             }
           >
-            <input
-              ref={titleRef}
-              className="editor-title-input"
-              value={title}
-              onChange={(e) => {
-                recordEdit(draftRef.current)
-                applyDraft({ ...draftRef.current, title: e.target.value })
-              }}
-              onFocus={enterEditing}
-              placeholder="标题"
-            />
-            <div className="editor-meta">
-              <span className="editor-meta-item" title="创建时间">
-                {createdAtLabel}
-              </span>
-              <span className="editor-meta-sep" aria-hidden="true">
-                |
-              </span>
-              <span className="editor-meta-item" title="上次更新时间">
-                {updatedAtLabel}
-              </span>
-              <span className="editor-meta-sep" aria-hidden="true">
-                |
-              </span>
-              <span className="editor-meta-count" title="正文字数">
-                {wordCount}字
-              </span>
-            </div>
-            {previewOpen ? (
-              <div
-                className="markdown-preview"
-                dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }}
-              />
-            ) : (
-              <textarea
-                ref={textareaRef}
-                className="editor-content"
-                value={content}
-                onChange={(e) => {
-                  recordEdit(draftRef.current)
-                  applyDraft({ ...draftRef.current, content: e.target.value })
-                }}
+            <div
+              className={`editor-main ${previewOpen ? 'split' : ''}`}
+              onClick={handleEditorPaneClick}
+            >
+              <input
+                ref={titleRef}
+                className="editor-title-input"
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
                 onFocus={enterEditing}
-                onSelect={() => {
-                  if (kbInset > 0) {
-                    userScrollRef.current = false
-                    scrollCaretIntoView(true)
-                  }
-                }}
-                placeholder="开始记录…"
+                placeholder="标题"
               />
+              <div className="editor-meta">
+                <span className="editor-meta-item" title="创建时间">
+                  {createdAtLabel}
+                </span>
+                <span className="editor-meta-sep" aria-hidden="true">
+                  |
+                </span>
+                <span className="editor-meta-item" title="上次更新时间">
+                  {updatedAtLabel}
+                </span>
+                <span className="editor-meta-sep" aria-hidden="true">
+                  |
+                </span>
+                <span className="editor-meta-count" title="正文字数">
+                  {wordCount}字
+                </span>
+              </div>
+              <div className="markdown-editor-host" onFocus={enterEditing}>
+                <MarkdownEditor
+                  ref={editorRef}
+                  value={content}
+                  prefs={editorPrefs}
+                  kbInset={kbInset}
+                  onChange={setContent}
+                  onHistoryChange={handleHistoryChange}
+                  onScrollLine={handleEditorScroll}
+                />
+              </div>
+            </div>
+            {previewOpen && (
+              <div className="editor-preview" aria-label="Markdown 预览">
+                <MarkdownPreview
+                  ref={previewRef}
+                  source={content}
+                  onScrollLine={handlePreviewScroll}
+                  onSourceLine={handlePreviewSourceLine}
+                />
+              </div>
             )}
           </div>
-          <div ref={mirrorRef} className="caret-mirror" aria-hidden="true" />
         </>
       )}
 

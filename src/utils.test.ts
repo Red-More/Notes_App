@@ -12,7 +12,6 @@ import {
   friendlyError,
   monthStr,
   parseDbTime,
-  renderMarkdown,
   safeFileName,
   shortTime,
 } from './utils'
@@ -253,32 +252,5 @@ describe('friendlyError', () => {
     expect(friendlyError('未知错误')).toBe('操作失败，请稍后重试')
     expect(friendlyError(42)).toBe('操作失败，请稍后重试')
     expect(friendlyError(new Error('网络断开'))).toBe('操作失败，请稍后重试')
-  })
-})
-
-describe('renderMarkdown', () => {
-  it('渲染标题、粗体、斜体与列表', () => {
-    expect(renderMarkdown('# 标题\n\n**加粗** 和 *斜体*\n\n- 项目一\n- 项目二')).toBe(
-      '<h1>标题</h1><p><strong>加粗</strong> 和 <em>斜体</em></p><ul><li>项目一</li><li>项目二</li></ul>',
-    )
-  })
-
-  it('转义 HTML 防止注入', () => {
-    expect(renderMarkdown('<script>alert(1)</script>')).toBe(
-      '<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>',
-    )
-  })
-
-  it('空输入返回空串', () => {
-    expect(renderMarkdown('')).toBe('')
-    expect(renderMarkdown('   ')).toBe('')
-  })
-
-  it('段落内换行渲染为 br', () => {
-    expect(renderMarkdown('第一行\n第二行')).toBe('<p>第一行<br>第二行</p>')
-  })
-
-  it('行内代码中的标记不被二次处理', () => {
-    expect(renderMarkdown('`**x**`')).toBe('<p><code>**x**</code></p>')
   })
 })

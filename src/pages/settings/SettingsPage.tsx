@@ -10,6 +10,12 @@ import {
   type SaveStrategyKey,
   type SaveStrategyMeta,
 } from '../../saveStrategy'
+import {
+  INDENT_SIZES,
+  getEditorPrefs,
+  setEditorPrefs,
+  type IndentStyle,
+} from '../../editor/prefs'
 import { IconBack, IconInfo } from '../../components/Icons'
 import ChipRow from '../../components/ChipRow'
 import { useLongPress } from '../../hooks'
@@ -23,6 +29,13 @@ const THEME_OPTIONS: Array<{ key: Theme; label: string }> = [
   { key: 'dark', label: '深色' },
   { key: 'system', label: '跟随系统' },
 ]
+
+const INDENT_STYLE_OPTIONS: Array<{ key: IndentStyle; label: string }> = [
+  { key: 'spaces', label: '空格' },
+  { key: 'tabs', label: 'Tab' },
+]
+
+const INDENT_WIDTH_OPTIONS = INDENT_SIZES.map((size) => ({ key: size, label: `${size}` }))
 
 interface RowProps {
   meta: SaveStrategyMeta
@@ -94,6 +107,7 @@ function SaveOptionRow({
 export default function SettingsPage({ onBack }: Props) {
   const [theme, setTheme] = useState<Theme>(() => getStoredTheme())
   const [strategy, setStrategy] = useState(() => getSaveStrategy())
+  const [editorPrefs, setEditorPrefsState] = useState(() => getEditorPrefs())
   const [hintFor, setHintFor] = useState<SaveStrategyKey | null>(null)
   const [tipFor, setTipFor] = useState<SaveStrategyKey | null>(null)
 
@@ -121,6 +135,22 @@ export default function SettingsPage({ onBack }: Props) {
   const restoreDefault = () => {
     setStrategy({ key: DEFAULT_STRATEGY, intervalMin: DEFAULT_INTERVAL })
     setSaveStrategy(DEFAULT_STRATEGY, DEFAULT_INTERVAL)
+  }
+
+  const chooseIndentStyle = (indentStyle: IndentStyle) => {
+    setEditorPrefsState((current) => {
+      const next = { ...current, indentStyle }
+      setEditorPrefs(next)
+      return next
+    })
+  }
+
+  const chooseIndentSize = (indentSize: number) => {
+    setEditorPrefsState((current) => {
+      const next = { ...current, indentSize }
+      setEditorPrefs(next)
+      return next
+    })
   }
 
   const dismissHints = () => {
@@ -178,6 +208,27 @@ export default function SettingsPage({ onBack }: Props) {
           <button type="button" className="restore-default" onClick={restoreDefault}>
             恢复默认
           </button>
+        </div>
+
+        <div className="settings-section-title">Markdown 编辑器</div>
+        <div className="form-field">
+          <span className="form-label">缩进方式</span>
+          <ChipRow
+            items={INDENT_STYLE_OPTIONS}
+            value={editorPrefs.indentStyle}
+            onChange={chooseIndentStyle}
+          />
+        </div>
+        <div className="form-field">
+          <span className="form-label">缩进宽度</span>
+          <ChipRow
+            items={INDENT_WIDTH_OPTIONS}
+            value={editorPrefs.indentSize}
+            onChange={chooseIndentSize}
+          />
+          <p className="settings-note">
+            作用于空格缩进与 Tab 的显示宽度；重新打开笔记编辑页后生效。
+          </p>
         </div>
       </div>
 
