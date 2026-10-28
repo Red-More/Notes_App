@@ -4,7 +4,7 @@
 > 目标版本：Mermaid 12.x（当前项目 `mermaid@^12.2.0`）  
 > 结合当前实现：`theme: 'base'` + 应用设计变量、浅/深色适配、分屏预览、懒加载与渲染缓存。
 >
-> **范围说明**：本文为调研归档，供后续参考；Mermaid 专项视觉优化不属于当前阶段开发任务，当前阶段聚焦整体 UI 视觉品质提升。
+> **范围说明**：本文为调研归档。强化视觉方案已通过设置页「图表预览 → Mermaid 图表 → 视觉强化」开关落地（默认开启），基础模式保留原渲染配置；设置、缓存与验证记录见 [markdown-editor.md](./markdown-editor.md#45-mermaid-与-latex-渲染)。
 
 ## 1. 结论摘要
 
@@ -16,19 +16,20 @@ Mermaid 的视觉优化可以归纳为五个层次，收益与成本从低到高
 4. **响应式与容器**：`useMaxWidth: true` + SVG `max-width: 100%` + 容器横向滚动兜底；必要时移除 Mermaid 写入的内联 `max-width`。
 5. **交互增强**：大图提供全屏查看、平移缩放、导出 SVG/PNG；小图不引入额外交互，避免与预览滚动冲突。
 
-当前项目已落地 1、3、4 以及懒加载/缓存/错误降级；**尚未显式固定 `look` 与 `layout`**，这是最值得补齐的 P0 项。
+当前项目已落地 1、3、4 以及懒加载/缓存/错误降级；强化模式已显式固定 `look: 'classic'` 与 `layout: 'elk'`，基础模式逐项保留旧配置，由设置页开关切换。
 
 ## 2. 当前实现基线
 
 | 项目 | 当前实现 | 评价 |
 | --- | --- | --- |
-| 主题 | `theme: 'base'` + `themeVariables` 读取 CSS 变量 | 符合官方推荐，浅/深色统一 |
+| 主题 | `theme: 'base'` + 双模式 `themeVariables` | 符合官方推荐，浅/深色统一 |
 | 派生色 | 显式设置主色、文字、边框、连线、聚类、注释、时序、甘特变量 | 覆盖主要图种 |
-| 外观 | 未设置 `look`，使用 Mermaid 12 的图种默认值 | 不同图种可能混合 `neo` / `classic` |
-| 布局 | 未设置 `layout`，使用 Mermaid 12 默认 `elk` | 布局质量好，但包体与耗时高于 `dagre` |
-| 图种排版 | 流程图 `basis` 曲线、节点/层级间距；时序折行；甘特内边距 | 已覆盖主要可读性参数 |
+| 外观 | 强化模式 `look: 'classic'`；基础模式不设置 | 强化模式风格固定，基础模式保留旧默认 |
+| 布局 | 强化模式 `layout: 'elk'`；基础模式沿用 Mermaid 默认 | 两种模式可切换、可对比 |
+| 模式开关 | `notes:mermaid-enhance`，默认开启，持久化 + 订阅通知 | 无需重启，缓存按模式隔离 |
+| 图种排版 | 强化：流程图 `step`、40/52、字体 14px；基础：`basis`、40/48 | 已覆盖主要可读性参数 |
 | 响应式 | CSS `max-width: 100% !important`、容器横向滚动 | 320px 实测无溢出 |
-| 性能 | 动态加载 Mermaid、按「主题 + 源码」缓存、顺序渲染 | 无图表笔记不加载引擎 |
+| 性能 | 动态加载 Mermaid、按「主题 + 模式 + 源码」缓存、顺序渲染 | 无图表笔记不加载引擎；两套模式各自缓存 |
 | 错误 | 解析失败显示友好面板与源码 | 不崩溃 |
 | 可访问性 | 支持作者书写 `accTitle` / `accDescr`，但无自动生成 | 可加强 |
 | 大图交互 | 仅自适应缩放 | 未提供全屏/平移缩放/导出 |
@@ -209,7 +210,7 @@ const instance = svgPanZoom(svgElement, {
 
 ## 5. 可直接复用的配置
 
-### 5.1 当前笔记应用（推荐基线）
+### 5.1 当前笔记应用（强化模式，默认开启）
 
 ```ts
 mermaid.initialize({
@@ -219,37 +220,42 @@ mermaid.initialize({
   logLevel: 'fatal',
   theme: 'base',
   darkMode: isDark,
-  // P0 建议显式固定，避免 Mermaid 12 的图种默认值漂移
-  look: 'neo',
+  // 强化模式显式固定；基础模式不设置这两项并保留旧间距
+  look: 'classic',
   layout: 'elk',
+  fontSize: 14,
   fontFamily:
     "system-ui, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', Roboto, sans-serif",
   themeVariables: {
     background: token('--surface'),
-    primaryColor: token('--surface-2'),
+    primaryColor: token('--surface'),
     primaryTextColor: token('--text'),
-    primaryBorderColor: token('--text-3'),
+    primaryBorderColor: token('--text-2'),
     lineColor: token('--text-2'),
     textColor: token('--text'),
     clusterBkg: token('--surface-2'),
-    clusterBorder: token('--border'),
+    clusterBorder: token('--text-3'),
     noteBkgColor: token('--surface-2'),
-    noteBorderColor: token('--text-3'),
+    noteBorderColor: token('--text-2'),
     todayLineColor: token('--accent'),
   },
   flowchart: {
-    curve: 'basis',
+    curve: 'step',
     useMaxWidth: true,
     nodeSpacing: 40,
-    rankSpacing: 48,
+    rankSpacing: 52,
     padding: 12,
+    diagramPadding: 12,
   },
   sequence: {
     useMaxWidth: true,
     wrap: true,
-    actorMargin: 36,
-    diagramMarginX: 12,
-    diagramMarginY: 12,
+    actorMargin: 40,
+    messageMargin: 30,
+    boxMargin: 8,
+    noteMargin: 8,
+    diagramMarginX: 16,
+    diagramMarginY: 16,
   },
   gantt: {
     useMaxWidth: true,
@@ -360,14 +366,13 @@ const instance = svgPanZoom(svg, {
 
 ## 7. 本项目落地路线
 
-**P0（低成本、收益明确）**
+**P0（已落地）**
 
-1. 显式固定 `look`（建议 `neo`）与 `layout`（建议 `elk`，低端设备可评估 `dagre`），消除图种默认值漂移。
-2. 在主题变量中加入对比度回归用例（浅/深色、节点文字、连线标签）。
-3. 为复杂图提供 `accTitle` / `accDescr` 编写规范（Mermaid 已支持，无需改渲染器）。
-4. 明确 `maxTextSize` / `maxEdges` 的产品提示（空图/超大图降级）。
+1. 强化模式显式固定 `look: 'classic'` 与 `layout: 'elk'`；基础模式逐项保留旧配置，通过设置页开关切换。
+2. 双模式缓存键与初始化状态隔离；开关默认开启、持久化，并通过订阅即时通知已挂载预览。
+3. 保持 `securityLevel: 'strict'` 与错误降级；恶意图表脚本不执行，标签事件处理器被净化。
 
-**P1（中等成本）**
+**P1（中等成本，当前未实现）**
 
 1. 图表点击全屏查看（复用现有 OverlayPortal），大图在弹层内加载 `svg-pan-zoom`；关闭时销毁。
 2. 全屏内提供 SVG/PNG 导出（保留 viewBox、移除内联 max-width）。

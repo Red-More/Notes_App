@@ -126,7 +126,7 @@
 - markdown-it 先输出带 `data-line` 的 `.mermaid-block` 占位符与源码；
 - 图表源码同时保存在占位符内文与稳定的 `data-mermaid-source` 属性中，主题切换或重新挂载时可重新读取并复用缓存；
 - 预览挂载后由浏览器调用 Mermaid 渲染 SVG；引擎通过动态 `import('mermaid')` 懒加载，无图表笔记不下载；
-- 渲染结果按「主题 + 源码」缓存（最多 40 条），内容未变的图表在后续刷新中直接复用；
+- 渲染结果按「主题 + 视觉模式 + 源码」缓存（最多 40 条），内容未变的图表在后续刷新中直接复用；
 - 同一时间只顺序渲染一个图表，避免 Mermaid 全局解析状态冲突；
 - 语法错误显示「图表渲染失败」、错误详情与原始源码，不抛出异常、不破坏页面；
 - 超宽图表在容器内自适应缩放，容器保留横向滚动兜底。
@@ -141,9 +141,12 @@
 
 **主题与样式**
 
-- 使用 Mermaid `base` 主题，把节点、连线、文本、聚类、注释、时序角色、甘特任务等颜色映射到应用设计变量；
-- 浅色/深色使用同一套变量体系，主题取自应用当前 `data-theme`；节点填充使用 `--surface-2`，文字使用 `--text`；
-- 流程图使用 `basis` 曲线并加大节点/层级间距；时序图自动折行；甘特图增加内边距；图表卡片与代码块保持一致的边框、圆角与内边距；
+- Mermaid 提供两套渲染模式，由设置页「图表预览 → Mermaid 图表 → 视觉强化」开关控制，默认开启；
+- 强化模式：`base` 主题 + 显式 `look: 'classic'`、`layout: 'elk'`；节点填充 `--surface`、节点边框与连线 `--text-2`；流程图 `step` 曲线、节点/层级间距 40/52、字体 14px；
+- 基础模式：逐项保留旧配置（`basis` 曲线、层级间距 48、节点填充 `--surface-2`、节点边框 `--text-3`），关闭开关即可回退；
+- 浅色/深色使用同一套变量体系，主题取自应用当前 `data-theme`；缓存键包含视觉模式，避免两套 SVG 串用；
+- 预览通过 `MutationObserver` 监听 `data-theme`：即使编辑页保持挂载，切换主题也会重新初始化 Mermaid 并按新主题重渲染图表；
+- 时序图自动折行；甘特图增加内边距；图表卡片与代码块保持一致的边框、圆角与内边距；
 - KaTeX 颜色沿用 Markdown 前景色，错误使用应用的危险色；
 - 所有图表/公式样式限定在 `.md-preview` 内，不影响编辑器与其他页面。
 
@@ -197,13 +200,19 @@
 
 ## 7. 设置
 
-设置页新增「Markdown 编辑器」与「预览布局」两个区域：
+设置页新增「Markdown 编辑器」、「图表预览」与「预览布局」三个区域：
 
 **Markdown 编辑器**
 
 - 缩进方式：空格 / Tab
 - 缩进宽度：2 / 4 / 8
 - 配置持久化到 `notes:editor-prefs`，重新打开笔记编辑页后生效。
+
+**图表预览**
+
+- Mermaid 视觉强化开关：默认开启，关闭后使用基础渲染风格
+- 配置持久化到 `notes:mermaid-enhance`；点击后立即写入并通知已挂载的预览，无需重启应用
+- 开关只切换 Mermaid 渲染配置，不加载引擎、不影响 Markdown 其他预览内容
 
 **预览布局**
 
@@ -218,8 +227,9 @@
 ## 8. 性能与加载
 
 - 主界面不包含 CodeMirror / markdown-it / KaTeX / highlight.js / Mermaid；
-- 当前构建：主包约 307KB（gzip 93KB），编辑器分包约 136KB（gzip 44KB）；
-- 预览分包约 852KB（gzip 277KB），另含 KaTeX 分包约 259KB（gzip 78KB），仅在打开预览时加载；
+- 当前构建：主包约 310KB（gzip 94KB），编辑器分包约 136KB（gzip 44KB）；
+- 预览分包约 851KB（gzip 277KB），另含 KaTeX 分包约 259KB（gzip 78KB），仅在打开预览时加载；
+- 视觉强化开关、双套配置与开关样式的 gzip 增量约 1.2KB，未新增任何运行时依赖；
 - 非 GFM 扩展插件随预览分包加载（约增加 60KB 原始体积），不进入主界面或编辑器分包；
 - Mermaid 引擎在存在图表时才下载，各图表类型独立分包（常规流程图/时序图分包远小于最大的复杂图表分包）；
 - 围栏代码语言的语法包按需动态加载，不进入首屏；
@@ -236,13 +246,14 @@
 pnpm test
 ```
 
-共 9 个测试文件、110 个用例：
+共 10 个测试文件、117 个用例：
 
 - `src/editor/markdown.test.ts`：CommonMark/GFM 渲染、表格包装、任务列表、代码高亮、HTML 转义、危险链接、源码行标注；Mermaid 各图表占位与大小写识别、行内/块级公式、货币与代码围栏边界、非法公式与图表降级；脚注、定义列表、缩写、高亮、上下标、插入、Emoji 等非 GFM 扩展；
 - `src/editor/links.test.ts`：链接分类（绝对/协议相对/相对/页内锚点/mailto/tel/危险协议）；
 - `src/editor/sync.test.ts`：滚动偏移与源码行的双向映射、重复行、边界与空数据；
 - `src/editor/layout.test.ts`：布局配置解析与钳制、三态模式切换、点击翻转比例、拖拽坐标换算与 10%/90% 边界；
-- `src/editor/mermaid.test.ts`：缓存键主题隔离、空图表降级、错误消息提取；
+- `src/editor/mermaid.test.ts`：缓存键主题+模式隔离、强化/基础配置、严格安全配置、空图表降级、错误消息提取；
+- `src/editor/mermaidPrefs.test.ts`：视觉强化默认值、非法/篡改值回退、持久化写入、订阅通知与退订；
 - `src/editor/prefs.test.ts`：缩进配置解析、非法值回退、缩进单元生成；
 - `src/editor/commands.test.ts`：加粗/斜体/行内代码的包裹与取消包裹；
 - `src/editor/diagnostics.test.ts`：未闭合围栏诊断；
@@ -295,9 +306,18 @@ Mermaid / KaTeX 实测（Chromium，520×699 与 320×420）：
 
 Mermaid 主题与构建验证：
 
-- 深色/浅色各切换一次（每次都重挂载预览），5 个 Mermaid 图均正常渲染（0 失败）；节点填充分别为 `#f2f2f5` / `#282b33`；
+- 深色/浅色各切换一次（每次都重挂载预览），5 个 Mermaid 图均正常渲染（0 失败）；强化模式节点填充分别为 `#ffffff` / `#1f2127`，基础模式为 `#f2f2f5` / `#282b33`；
 - 320px 宽下 5 个 SVG 宽约 251px，容器无横向/纵向溢出；
 - `cargo check` 通过，`tauri-plugin-opener` 完成注册，`opener:default` 权限可用。
+
+Mermaid 视觉强化开关实测（Chromium）：
+
+- 清空 `notes:mermaid-enhance` 后开关默认开启；关闭后刷新保持关闭，再次开启后刷新保持开启；
+- 点击开关到下一帧绘制完成约 20.5–42.3ms（<100ms）；切换时已挂载预览即时重绘，首图填充在 `#ffffff`（强化）与 `#f2f2f5`（基础）之间切换；
+- 暗色下强化模式节点填充 `#1f2127`、连线 `#9a9da8`，开关与图表对比清晰；320px 下无横向溢出；
+- 预览保持挂载时仅切换 `data-theme`，节点填充会在 `#ffffff` 与 `#1f2127` 之间即时切换，无需重新打开笔记或刷新页面；
+- 20 次开关压测堆内存变化 +0.22MB，SVG 保持 5/5、节点 21 个，DOM 无增长；
+- 安全：两套配置均为 `securityLevel: 'strict'`；恶意图表未产生 `script`，`window.__xss` 未定义；残留 `img` 已被净化（无 `onerror` / `onload`），错误面板仍使用 `textContent`。
 
 ### 9.3 真机兼容性清单(已手动验证)
 
@@ -323,7 +343,8 @@ src/
     SplitHandle.tsx         分屏分隔线（拖拽、点击翻转、键盘微调）
   editor/
     markdown.ts             渲染器、highlight.js、非 GFM 扩展、data-line、KaTeX、Mermaid 占位
-    mermaid.ts              Mermaid 懒加载、应用主题映射、渲染缓存、错误降级
+    mermaid.ts              Mermaid 懒加载、双模式主题映射、渲染缓存、错误降级
+    mermaidPrefs.ts         Mermaid 视觉强化开关的持久化与订阅
     links.ts                链接分类（复制地址 / 页内锚点 / 可系统打开）
     sync.ts                 预览偏移 ↔ 源码行的纯函数映射
     layout.ts               布局模式/比例配置、持久化、坐标换算
@@ -335,7 +356,7 @@ src/
     openExternal.ts         Tauri opener / window.open 外部打开
   markdown-it-extensions.d.ts  非 GFM 插件类型声明
   pages/notes/NoteEditorPage.tsx   编辑态、分屏布局、双向同步、保存联动
-  pages/settings/SettingsPage.tsx  Markdown 编辑器与预览布局设置
+  pages/settings/SettingsPage.tsx  Markdown 编辑器、图表与预览布局设置
   index.css                编辑器/预览/图表/公式/对话框配色与布局
 ```
 
@@ -349,5 +370,6 @@ src/
 - 相对链接只复制地址；系统浏览器打开仅支持 `http/https/mailto/tel`；Web 预览以 `window.open` 作为降级。
 - 链接确认对话框依赖剪贴板与 opener 权限；打开失败会自动复制链接。
 - 缩进配置在重新打开笔记后生效。
+- 视觉强化开关保存在本机 `localStorage`（`notes:mermaid-enhance`），切换时已挂载的预览会即时更新；正常操作路径下设置页与编辑页不同时显示，返回并打开笔记即可看到新效果。
 - 布局比例限制在 10%-90%，仅预览模式通过设置页切换；配置保存在本机 `localStorage`，不跨设备同步。
 - 设置页的布局修改在下次打开笔记时生效（设置页与编辑页不同时显示），分隔线拖拽则在当前页面即时生效。

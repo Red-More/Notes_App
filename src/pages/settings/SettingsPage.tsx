@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useSyncExternalStore, useState } from 'react'
 import { getStoredTheme, setStoredTheme, type Theme } from '../../theme'
 import {
   DEFAULT_INTERVAL,
@@ -29,6 +29,11 @@ import {
   type LayoutPrefs,
 } from '../../editor/layout'
 import { toast } from '../../toast'
+import {
+  getMermaidEnhance,
+  setMermaidEnhance,
+  subscribeMermaidEnhance,
+} from '../../editor/mermaidPrefs'
 import { IconBack, IconInfo } from '../../components/Icons'
 import ChipRow from '../../components/ChipRow'
 import { useLongPress } from '../../hooks'
@@ -130,6 +135,11 @@ export default function SettingsPage({ onBack }: Props) {
   const [layout, setLayout] = useState(() => getLayoutPrefs())
   const [hintFor, setHintFor] = useState<SaveStrategyKey | null>(null)
   const [tipFor, setTipFor] = useState<SaveStrategyKey | null>(null)
+  const mermaidEnhance = useSyncExternalStore(
+    subscribeMermaidEnhance,
+    getMermaidEnhance,
+    getMermaidEnhance,
+  )
 
   const handleTheme = (t: Theme) => {
     setTheme(t)
@@ -269,6 +279,30 @@ export default function SettingsPage({ onBack }: Props) {
           />
           <p className="settings-note">
             作用于空格缩进与 Tab 的显示宽度；重新打开笔记编辑页后生效。
+          </p>
+        </div>
+
+        <div className="settings-section-title">图表预览</div>
+        <div className="form-field">
+          <span className="form-label">Mermaid 图表</span>
+          <div className="settings-switch-row">
+            <div className="settings-switch-text">
+              <span className="settings-switch-title">视觉强化</span>
+              <span className="settings-switch-desc">专业配色、间距与连线样式</span>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={mermaidEnhance}
+              aria-label="Mermaid 视觉强化"
+              className={`settings-switch ${mermaidEnhance ? 'on' : ''}`}
+              onClick={() => setMermaidEnhance(!mermaidEnhance)}
+            >
+              <span className="settings-switch-thumb" />
+            </button>
+          </div>
+          <p className="settings-note">
+            关闭后使用基础渲染风格；设置立即保存，无需重启应用。
           </p>
         </div>
 

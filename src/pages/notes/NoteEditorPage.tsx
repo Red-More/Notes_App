@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { save } from '@tauri-apps/plugin-dialog'
 import { api } from '../../api'
 import {
@@ -15,6 +15,10 @@ import { ConfirmDialog, Modal } from '../../components/ui'
 import { toast } from '../../toast'
 import { getSaveStrategy } from '../../saveStrategy'
 import { getEditorPrefs } from '../../editor/prefs'
+import {
+  getMermaidEnhance,
+  subscribeMermaidEnhance,
+} from '../../editor/mermaidPrefs'
 import {
   SPLIT_HANDLE_SIZE,
   getLayoutPrefs,
@@ -108,6 +112,11 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   const [canUndo, setCanUndo] = useState(false)
   const [canRedo, setCanRedo] = useState(false)
   const [editorPrefs] = useState(() => getEditorPrefs())
+  const mermaidEnhance = useSyncExternalStore(
+    subscribeMermaidEnhance,
+    getMermaidEnhance,
+    getMermaidEnhance,
+  )
 
   // Keyboard-aware viewport state. `visualKbInset` comes from the visual
   // viewport (adjustResize / overlay models); `nativeKbInset` is forwarded by
@@ -752,6 +761,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
                   <MarkdownPreview
                     ref={attachPreview}
                     source={content}
+                    enhance={mermaidEnhance}
                     onScrollLine={handlePreviewScroll}
                     onSourceLine={handlePreviewSourceLine}
                   />
@@ -819,6 +829,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
                         <MarkdownPreview
                           ref={attachPreview}
                           source={content}
+                          enhance={mermaidEnhance}
                           onScrollLine={handlePreviewScroll}
                           onSourceLine={handlePreviewSourceLine}
                         />

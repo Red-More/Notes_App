@@ -13,6 +13,7 @@ import {
   applyCachedMermaid,
   currentMermaidTheme,
   renderMermaidBlock,
+  type MermaidTheme,
 } from '../editor/mermaid'
 import { renderMarkdownPreview } from '../editor/markdown'
 import { classifyHref } from '../editor/links'
@@ -32,6 +33,8 @@ export interface MarkdownPreviewHandle {
 
 interface MarkdownPreviewProps {
   source: string
+  /** Whether to render diagrams with the enhanced visual preset. */
+  enhance: boolean
   onScrollLine: (line: number) => void
   onSourceLine: (line: number) => void
 }
@@ -49,7 +52,7 @@ function hostLabel(address: string): string {
 }
 
 export const MarkdownPreview = forwardRef<MarkdownPreviewHandle, MarkdownPreviewProps>(
-  function MarkdownPreview({ source, onScrollLine, onSourceLine }, ref) {
+  function MarkdownPreview({ source, enhance, onScrollLine, onSourceLine }, ref) {
     const scrollRef = useRef<HTMLDivElement>(null)
     const contentRef = useRef<HTMLDivElement>(null)
     const blocksRef = useRef<PreviewBlock[]>([])
@@ -61,6 +64,22 @@ export const MarkdownPreview = forwardRef<MarkdownPreviewHandle, MarkdownPreview
     // Rendering is deferred so typing stays responsive on low-end phones.
     const deferredSource = useDeferredValue(source)
     const html = useMemo(() => renderMarkdownPreview(deferredSource), [deferredSource])
+    // The app theme lives on <html data-theme>, outside React. Observe it so
+    // diagrams re-render with the matching Mermaid theme while the pane stays
+    // mounted (e.g. OS light/dark changes in "system" mode).
+    const [theme, setTheme] = useState<MermaidTheme>(() => currentMermaidTheme())
+
+    useEffect(() => {
+      const observer = new MutationObserver(() => {
+        const next = currentMermaidTheme()
+        setTheme((previous) => (previous === next ? previous : next))
+      })
+      observer.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ['data-theme'],
+      })
+      return () => observer.disconnect()
+    }, [])
 
     useEffect(() => {
       onScrollRef.current = onScrollLine
@@ -104,7 +123,6 @@ export const MarkdownPreview = forwardRef<MarkdownPreviewHandle, MarkdownPreview
       const blocks = content.querySelectorAll<HTMLElement>('.mermaid-block')
       if (blocks.length === 0) return
 
-      const theme = currentMermaidTheme()
       const pending: Array<{ block: HTMLElement; source: string }> = []
       blocks.forEach((block) => {
         // Prefer the wrapper attribute: the inner source placeholder is gone
@@ -121,7 +139,7 @@ export const MarkdownPreview = forwardRef<MarkdownPreviewHandle, MarkdownPreview
         if (!source) {
           source = block.querySelector('.mermaid-source')?.textContent ?? ''
         }
-        if (!applyCachedMermaid(block, source, theme)) {
+        if (!applyCachedMermaid(block, source, theme, enhance)) {
           pending.push({ block, source })
         }
       })
@@ -131,13 +149,13 @@ export const MarkdownPreview = forwardRef<MarkdownPreviewHandle, MarkdownPreview
       void (async () => {
         for (const item of pending) {
           if (cancelled) return
-          await renderMermaidBlock(item.block, item.source, theme)
+          await renderMermaidBlock(item.block, item.source, theme, enhance)
         }
       })()
       return () => {
         cancelled = true
       }
-    }, [html])
+    }, [html, enhance, theme])
 
     // Re-measure after every HTML change; block positions drive scroll sync.
     useLayoutEffect(() => {
