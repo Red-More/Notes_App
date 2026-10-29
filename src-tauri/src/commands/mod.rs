@@ -1,13 +1,6 @@
-pub mod contacts;
-pub mod export;
-pub mod folders;
-pub mod notes;
-pub mod schedules;
-pub mod todos;
+//! Tauri command 模块汇总。
+//!
+//! 重构后只保留 VirtualFs 的 5 个工具命令；旧的笔记/待办/联系人等
+//! 关系型命令已随 notes.db 一并移除。
 
-/// Map a rusqlite error to a user-facing message and log the underlying error.
-/// Shared by all command modules so the "数据库错误: ..." wording stays uniform.
-pub fn db_err(e: rusqlite::Error) -> String {
-    log::warn!("db error: {e}");
-    format!("数据库错误: {e}")
-}
+pub mod fs;
