@@ -1,92 +1,375 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { Contact, Folder, FolderStats, Note, NoteVersion, Schedule, Todo } from './types'
+import type {
+  Contact,
+  Doc,
+  DocFields,
+  DocRef,
+  DocVersion,
+  Folder,
+  FolderStats,
+  Note,
+  NoteVersion,
+  Schedule,
+  Todo,
+  VfsEditReceipt,
+  VfsGlobEntry,
+  VfsGrepResponse,
+  VfsReadResult,
+  VfsWriteReceipt,
+} from './types'
 
-/** Note list ordering supported by the backend list_notes command. */
+/** Legacy note list ordering, now implemented by the generic doc layer. */
 export type NoteSort = 'updated' | 'created' | 'title'
+
+export type DocListParams = {
+  kind?: string
+  folderId?: number
+  unclassified?: boolean
+  search?: string
+  sort?: string
+  deleted?: boolean
+  tag?: string
+  month?: string
+  limit?: number
+}
+
+export type DocCreateParams = {
+  kind: string
+  title: string
+  content: string
+  folderId?: number | null
+  fields?: DocFields
+}
+
+export type DocSaveParams = {
+  id: number
+  title?: string
+  content?: string
+  fields?: DocFields
+  folderId?: number | null
+  expectRev?: number
+}
+
+/**
+ * 通用文档 API：整个应用唯一的内容入口。
+ * 领域适配（Note/Todo/Schedule/Contact）全部在下方 `api` 中完成。
+ */
+export const docApi = {
+  list: (params: DocListParams) => invoke<Doc[]>('doc_list', params),
+  get: (id: number, includeDeleted = false) => invoke<Doc>('doc_get', { id, includeDeleted }),
+  create: (params: DocCreateParams) => invoke<Doc>('doc_create', params),
+  save: (params: DocSaveParams) => invoke<Doc>('doc_save', params),
+  delete: (ids: number[]) => invoke<void>('doc_delete', { ids }),
+  restore: (ids: number[]) => invoke<void>('doc_restore', { ids }),
+  purge: (ids: number[]) => invoke<void>('doc_purge', { ids }),
+  emptyTrash: () => invoke<void>('doc_empty_trash'),
+  setPinned: (params: { ids: number[]; pinned: boolean }) => invoke<void>('doc_set_pinned', params),
+  move: (params: { ids: number[]; folderId: number | null }) => invoke<void>('doc_move', params),
+
+  listVersions: (docId: number, includeAuto = false) =>
+    invoke<DocVersion[]>('version_list', { docId, includeAuto }),
+  createVersion: (docId: number) => invoke<DocVersion>('version_create', { docId }),
+  restoreVersion: (versionId: number) => invoke<Doc>('version_restore', { versionId }),
+  deleteVersion: (versionId: number) => invoke<void>('version_delete', { versionId }),
+
+  listFolders: () => invoke<FolderStats>('folder_list'),
+  createFolder: (name: string) => invoke<Folder>('folder_create', { name }),
+  renameFolder: (params: { id: number; name: string }) => invoke<void>('folder_rename', params),
+  renameDefaultFolder: (name: string) => invoke<void>('folder_rename_default', { name }),
+  deleteFolder: (id: number) => invoke<void>('folder_delete', { id }),
+  setFolderPinned: (params: { id: number; pinned: boolean }) =>
+    invoke<void>('folder_set_pinned', params),
+
+  exportDoc: (params: { docId: number; destPath: string }) => invoke<void>('export_doc', params),
+  exportDocs: (params: { ids: number[]; destPath: string }) => invoke<void>('export_docs', params),
+  exportFolder: (params: { folderId: number; destPath: string }) =>
+    invoke<void>('export_folder', params),
+
+  /** 交叉索引：person / date / time / location / tag / type / due。 */
+  indexQuery: (params: { dimension: string; value: string; kind?: string; limit?: number }) =>
+    invoke<DocRef[]>('index_query', params),
+}
+
+function str(value: unknown, fallback = ''): string {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  return fallback
+}
+
+function nullableStr(value: unknown): string | null {
+  const text = str(value, '')
+  return text === '' ? null : text
+}
+
+function bool(value: unknown, fallback = false): boolean {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return value !== 0
+  if (typeof value === 'string') return value === 'true' || value === '1'
+  return fallback
+}
+
+function docToNote(doc: Doc): Note {
+  return {
+    id: doc.id,
+    title: doc.title,
+    content: doc.content,
+    folderId: doc.folderId,
+    folderName: doc.folderName,
+    isPinned: doc.pinned,
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
+    deletedAt: doc.deletedAt,
+  }
+}
+
+function docToTodo(doc: Doc): Todo {
+  return {
+    id: doc.id,
+    title: doc.title,
+    category: str(doc.fields.category) || '默认',
+    isCompleted: bool(doc.fields.completed) ? 1 : 0,
+    dueDate: nullableStr(doc.fields.dueDate),
+    reminder: bool(doc.fields.reminder) ? 1 : 0,
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
+  }
+}
+
+function docToSchedule(doc: Doc): Schedule {
+  return {
+    id: doc.id,
+    title: doc.title,
+    date: str(doc.fields.date) || doc.updatedAt.slice(0, 10),
+    startTime: nullableStr(doc.fields.startTime),
+    endTime: nullableStr(doc.fields.endTime),
+    note: nullableStr(doc.fields.note),
+    reminder: bool(doc.fields.reminder) ? 1 : 0,
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
+  }
+}
+
+function docToContact(doc: Doc): Contact {
+  return {
+    id: doc.id,
+    name: doc.title,
+    phone: nullableStr(doc.fields.phone),
+    email: nullableStr(doc.fields.email),
+    company: nullableStr(doc.fields.company),
+    notes: nullableStr(doc.fields.notes),
+    tag: str(doc.fields.tag) || '默认',
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
+  }
+}
+
+function docToNoteVersion(version: DocVersion): NoteVersion {
+  return {
+    id: version.id,
+    noteId: version.docId,
+    versionNumber: version.versionNumber,
+    title: version.title,
+    content: version.content,
+    label: version.label,
+    labelDescription: version.labelDescription,
+    isManual: version.isManual,
+    createdAt: version.createdAt,
+  }
+}
 
 // Typed wrappers around Tauri commands. Tauri converts camelCase
 // JS arguments to snake_case Rust parameters automatically.
 export const api = {
-  // ---- Notes ----
-  listNotes: (params: {
+  // ---- VirtualFs (fs_*) ----
+  // 通用文件工具；领域页面优先使用下方的文档/领域 API。
+  fsRead: (params: {
+    path: string
+    rev?: number
+    startLine?: number
+    endLine?: number
+    includeMeta?: boolean
+  }) => invoke<VfsReadResult>('fs_read', params),
+  fsWrite: (params: {
+    path: string
+    content: string
+    createParents?: boolean
+    autoFrontmatter?: boolean
+  }) => invoke<VfsWriteReceipt>('fs_write', params),
+  fsEdit: (params: {
+    path: string
+    oldString: string
+    newString: string
+    replaceAll?: boolean
+    expectRev?: number
+  }) => invoke<VfsEditReceipt>('fs_edit', params),
+  fsGlob: (params: { pattern: string; root?: string; caseSensitive?: boolean }) =>
+    invoke<VfsGlobEntry[]>('fs_glob', params),
+  fsGrep: (params: {
+    pattern: string
+    path?: string
+    maxResults?: number
+    contextLines?: number
+  }) => invoke<VfsGrepResponse>('fs_grep', params),
+
+  // ---- Notes (doc kind = note) ----
+  listNotes: async (params: {
     folderId?: number
     unclassified?: boolean
     search?: string
     sort?: NoteSort
-  }) => invoke<Note[]>('list_notes', params),
-  getNote: (id: number) => invoke<Note>('get_note', { id }),
-  createNote: (params: { title: string; content: string; folderId: number | null }) =>
-    invoke<Note>('create_note', params),
-  saveNote: (params: {
+  }) => {
+    const docs = await docApi.list({
+      kind: 'note',
+      folderId: params.folderId,
+      unclassified: params.unclassified,
+      search: params.search,
+      sort: params.sort,
+    })
+    return docs.map(docToNote)
+  },
+  getNote: async (id: number) => docToNote(await docApi.get(id)),
+  createNote: async (params: { title: string; content: string; folderId: number | null }) =>
+    docToNote(
+      await docApi.create({
+        kind: 'note',
+        title: params.title,
+        content: params.content,
+        folderId: params.folderId,
+      }),
+    ),
+  saveNote: async (params: {
     id: number
     title: string
     content: string
     folderId: number | null
-  }) => invoke<Note>('save_note', params),
-  deleteNotes: (ids: number[]) => invoke<void>('delete_notes', { ids }),
-  setNotesPinned: (params: { ids: number[]; pinned: boolean }) =>
-    invoke<void>('set_notes_pinned', params),
-  moveNotes: (params: { ids: number[]; folderId: number | null }) =>
-    invoke<void>('move_notes', params),
+  }) =>
+    docToNote(
+      await docApi.save({
+        id: params.id,
+        title: params.title,
+        content: params.content,
+        // 后端约定：-1 表示默认文件夹，undefined/null 表示不移动。
+        folderId: params.folderId ?? -1,
+      }),
+    ),
+  deleteNotes: (ids: number[]) => docApi.delete(ids),
+  setNotesPinned: (params: { ids: number[]; pinned: boolean }) => docApi.setPinned(params),
+  moveNotes: (params: { ids: number[]; folderId: number | null }) => docApi.move(params),
 
   // ---- Export ----
   exportNoteTo: (params: { noteId: number; destPath: string }) =>
-    invoke<void>('export_note_to', params),
+    docApi.exportDoc({ docId: params.noteId, destPath: params.destPath }),
   exportNotesTo: (params: { ids: number[]; destPath: string }) =>
-    invoke<void>('export_notes_to', params),
+    docApi.exportDocs({ ids: params.ids, destPath: params.destPath }),
   exportFolderTo: (params: { folderId: number; destPath: string }) =>
-    invoke<void>('export_folder_to', params),
+    docApi.exportFolder({ folderId: params.folderId, destPath: params.destPath }),
 
   // ---- Recycle bin ----
-  listDeletedNotes: () => invoke<Note[]>('list_deleted_notes'),
-  restoreNotes: (ids: number[]) => invoke<void>('restore_notes', { ids }),
-  purgeNotes: (ids: number[]) => invoke<void>('purge_notes', { ids }),
-  emptyTrash: () => invoke<void>('empty_trash'),
+  listDeletedNotes: async () => {
+    const docs = await docApi.list({ kind: 'note', deleted: true })
+    return docs.map(docToNote)
+  },
+  restoreNotes: (ids: number[]) => docApi.restore(ids),
+  purgeNotes: (ids: number[]) => docApi.purge(ids),
+  emptyTrash: () => docApi.emptyTrash(),
 
-  // ---- Versions & labels ----
-  listVersions: (noteId: number) => invoke<NoteVersion[]>('list_versions', { noteId }),
-  restoreVersion: (versionId: number) => invoke<Note>('restore_version', { versionId }),
-  createVersion: (noteId: number) => invoke<NoteVersion>('create_version', { noteId }),
-  deleteVersion: (versionId: number) => invoke<void>('delete_version', { versionId }),
+  // ---- Versions ----
+  listVersions: async (noteId: number) => {
+    const versions = await docApi.listVersions(noteId)
+    return versions.map(docToNoteVersion)
+  },
+  restoreVersion: async (versionId: number) => docToNote(await docApi.restoreVersion(versionId)),
+  createVersion: async (noteId: number) => docToNoteVersion(await docApi.createVersion(noteId)),
+  deleteVersion: (versionId: number) => docApi.deleteVersion(versionId),
 
   // ---- Folders ----
-  listFolders: () => invoke<FolderStats>('list_folders'),
-  createFolder: (name: string) => invoke<Folder>('create_folder', { name }),
-  renameFolder: (params: { id: number; name: string }) => invoke<void>('rename_folder', params),
-  renameDefaultFolder: (name: string) => invoke<void>('rename_default_folder', { name }),
-  deleteFolder: (id: number) => invoke<void>('delete_folder', { id }),
-  setFolderPinned: (params: { id: number; pinned: boolean }) =>
-    invoke<void>('set_folder_pinned', params),
+  listFolders: () => docApi.listFolders(),
+  createFolder: (name: string) => docApi.createFolder(name),
+  renameFolder: (params: { id: number; name: string }) => docApi.renameFolder(params),
+  renameDefaultFolder: (name: string) => docApi.renameDefaultFolder(name),
+  deleteFolder: (id: number) => docApi.deleteFolder(id),
+  setFolderPinned: (params: { id: number; pinned: boolean }) => docApi.setFolderPinned(params),
 
-  // ---- Todos ----
-  listTodos: (search?: string) => invoke<Todo[]>('list_todos', { search }),
-  createTodo: (params: {
+  // ---- Todos (doc kind = todo) ----
+  listTodos: async (search?: string) => {
+    const docs = await docApi.list({ kind: 'todo', search: search || undefined })
+    return docs.map(docToTodo)
+  },
+  createTodo: async (params: {
     title: string
     category?: string
     dueDate?: string | null
     reminder?: boolean
-  }) => invoke<Todo>('create_todo', params),
-  updateTodo: (params: {
+  }) =>
+    docToTodo(
+      await docApi.create({
+        kind: 'todo',
+        title: params.title,
+        content: '',
+        fields: {
+          category: params.category ?? '默认',
+          completed: false,
+          dueDate: params.dueDate ?? null,
+          reminder: params.reminder ?? false,
+        },
+      }),
+    ),
+  updateTodo: async (params: {
     id: number
     title: string
     category?: string
     dueDate?: string | null
     reminder?: boolean
-  }) => invoke<Todo>('update_todo', params),
-  toggleTodo: (id: number) => invoke<Todo>('toggle_todo', { id }),
-  deleteTodo: (id: number) => invoke<void>('delete_todo', { id }),
+  }) =>
+    docToTodo(
+      await docApi.save({
+        id: params.id,
+        title: params.title,
+        fields: {
+          category: params.category ?? '默认',
+          dueDate: params.dueDate ?? null,
+          reminder: params.reminder ?? false,
+        },
+      }),
+    ),
+  toggleTodo: async (id: number) => {
+    const doc = await docApi.get(id)
+    return docToTodo(await docApi.save({ id, fields: { completed: !bool(doc.fields.completed) } }))
+  },
+  deleteTodo: async (id: number) => {
+    // 待办没有回收站入口：先软删再物理删除，保持旧版“删除即消失”的语义。
+    await docApi.delete([id])
+    await docApi.purge([id])
+  },
 
-  // ---- Schedules ----
-  listSchedules: (month: string) => invoke<Schedule[]>('list_schedules', { month }),
-  createSchedule: (params: {
+  // ---- Schedules (doc kind = event) ----
+  listSchedules: async (month: string) => {
+    const docs = await docApi.list({ kind: 'event', month })
+    return docs.map(docToSchedule)
+  },
+  createSchedule: async (params: {
     title: string
     date: string
     startTime?: string | null
     endTime?: string | null
     note?: string | null
     reminder?: boolean
-  }) => invoke<Schedule>('create_schedule', params),
-  updateSchedule: (params: {
+  }) =>
+    docToSchedule(
+      await docApi.create({
+        kind: 'event',
+        title: params.title,
+        content: '',
+        fields: {
+          date: params.date,
+          startTime: params.startTime ?? null,
+          endTime: params.endTime ?? null,
+          note: params.note ?? null,
+          reminder: params.reminder ?? false,
+        },
+      }),
+    ),
+  updateSchedule: async (params: {
     id: number
     title: string
     date: string
@@ -94,21 +377,57 @@ export const api = {
     endTime?: string | null
     note?: string | null
     reminder?: boolean
-  }) => invoke<Schedule>('update_schedule', params),
-  deleteSchedule: (id: number) => invoke<void>('delete_schedule', { id }),
+  }) =>
+    docToSchedule(
+      await docApi.save({
+        id: params.id,
+        title: params.title,
+        fields: {
+          date: params.date,
+          startTime: params.startTime ?? null,
+          endTime: params.endTime ?? null,
+          note: params.note ?? null,
+          reminder: params.reminder ?? false,
+        },
+      }),
+    ),
+  deleteSchedule: async (id: number) => {
+    await docApi.delete([id])
+    await docApi.purge([id])
+  },
 
-  // ---- Contacts ----
-  listContacts: (params: { tag?: string; search?: string }) =>
-    invoke<Contact[]>('list_contacts', params),
-  createContact: (params: {
+  // ---- Contacts (doc kind = contact) ----
+  listContacts: async (params: { tag?: string; search?: string }) => {
+    const docs = await docApi.list({
+      kind: 'contact',
+      tag: params.tag,
+      search: params.search,
+    })
+    return docs.map(docToContact)
+  },
+  createContact: async (params: {
     name: string
     phone?: string | null
     email?: string | null
     company?: string | null
     notes?: string | null
     tag?: string
-  }) => invoke<Contact>('create_contact', params),
-  updateContact: (params: {
+  }) =>
+    docToContact(
+      await docApi.create({
+        kind: 'contact',
+        title: params.name,
+        content: '',
+        fields: {
+          phone: params.phone ?? null,
+          email: params.email ?? null,
+          company: params.company ?? null,
+          notes: params.notes ?? null,
+          tag: params.tag ?? '默认',
+        },
+      }),
+    ),
+  updateContact: async (params: {
     id: number
     name: string
     phone?: string | null
@@ -116,6 +435,22 @@ export const api = {
     company?: string | null
     notes?: string | null
     tag?: string
-  }) => invoke<Contact>('update_contact', params),
-  deleteContact: (id: number) => invoke<void>('delete_contact', { id }),
+  }) =>
+    docToContact(
+      await docApi.save({
+        id: params.id,
+        title: params.name,
+        fields: {
+          phone: params.phone ?? null,
+          email: params.email ?? null,
+          company: params.company ?? null,
+          notes: params.notes ?? null,
+          tag: params.tag ?? '默认',
+        },
+      }),
+    ),
+  deleteContact: async (id: number) => {
+    await docApi.delete([id])
+    await docApi.purge([id])
+  },
 }

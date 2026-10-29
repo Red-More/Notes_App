@@ -1,40 +1,76 @@
-//! frontmatter 解析与 meta 镜像维护。
+//! frontmatter 解析与组装。
 //!
-//! 文档模型规定每个 Markdown 文件头部可带 `--- ... ---`，VirtualFs 在每次
-//! write/edit 的同一事务里把 kind/title/status/due/tags 抄进 `meta` 表，
-//! 供后续结构化查询使用。这里只做够用的行解析，不引入 YAML 依赖。
+//! 文档模型规定每个 Markdown 文件头部可带 `--- ... ---`。本模块负责：
+//! - 把任意 frontmatter 解析成 `DocumentParts`（kind/title/时间戳 + 通用字段 + 正文）；
+//! - 把结构化字段重新组装成 Markdown；
+//! - 把 kind/title/status/due/tags 同步到 `meta` 表，其余字段进 `meta.extra` JSON。
+//!
+//! 不引入 YAML 依赖：只支持单行 `key: value`、引号字符串、布尔/数字与内联数组，
+//! 足以覆盖当前全部文档类型，同时保持 `extra` 可扩展。
+
+use std::collections::BTreeMap;
 
 use rusqlite::{params, Connection};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
-/// 解析后的 frontmatter 字段。
-#[derive(Debug, Default)]
-pub struct ParsedFrontmatter {
+/// 解析后的文档结构。
+#[derive(Debug, Default, Clone)]
+pub struct DocumentParts {
     pub kind: Option<String>,
     pub title: Option<String>,
-    pub status: Option<String>,
-    pub due: Option<String>,
-    /// 规范化后的逗号分隔标签，例如 `日语,学习,复盘`。
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    /// 规范化后的逗号分隔标签（合并 tags 数组与单值 tag 字段）。
     pub tags: Option<String>,
-    /// 未知字段原样收进 JSON，避免丢信息。
-    pub extra: String,
+    /// frontmatter 中除 kind/title/created_at/updated_at 外的全部字段。
+    pub fields: BTreeMap<String, Value>,
+    /// 正文（不含 frontmatter）。
+    pub body: String,
+    pub has_frontmatter: bool,
 }
 
-/// 解析文件头 frontmatter；没有完整 `--- ... ---` 块时返回 None。
-fn parse(content: &str) -> Option<ParsedFrontmatter> {
-    let mut lines = content.lines();
-    if lines.next()?.trim() != "---" {
-        return None;
+/// 解析 Markdown 文档。没有完整 `--- ... ---` 块时，正文即全文。
+pub fn parse_document(content: &str) -> DocumentParts {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+    let mut parts = DocumentParts {
+        body: content.to_string(),
+        ..Default::default()
+    };
+
+    let mut lines = content.split_inclusive('\n');
+    let Some(first) = lines.next() else {
+        return parts;
+    };
+    if first
+        .trim_end_matches(|c: char| c == '\r' || c == '\n')
+        .trim()
+        != "---"
+    {
+        return parts;
     }
 
-    let mut parsed = ParsedFrontmatter::default();
-    let mut extra: Map<String, Value> = Map::new();
+    let mut offset = first.len();
     let mut closed = false;
+    let mut raw: Vec<&str> = Vec::new();
     for line in lines {
-        if line.trim() == "---" {
+        let text = line.trim_end_matches(|c: char| c == '\r' || c == '\n');
+        offset += line.len();
+        if text.trim() == "---" {
             closed = true;
             break;
         }
+        raw.push(text);
+    }
+    if !closed {
+        return parts;
+    }
+
+    parts.has_frontmatter = true;
+    let rest = &content[offset..];
+    // frontmatter 与正文之间通常有一个空行；只吃掉一个换行，保留正文原貌。
+    parts.body = rest.strip_prefix('\n').unwrap_or(rest).to_string();
+
+    for line in raw {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -43,30 +79,72 @@ fn parse(content: &str) -> Option<ParsedFrontmatter> {
             continue;
         };
         let key = key.trim();
-        let value = unquote(value.trim());
+        let value = parse_value(value.trim());
         match key {
-            "kind" => set_if_not_empty(&mut parsed.kind, value),
-            "title" => set_if_not_empty(&mut parsed.title, value),
-            "status" => set_if_not_empty(&mut parsed.status, value),
-            "due" => set_if_not_empty(&mut parsed.due, value),
-            "tags" => parsed.tags = normalize_tags(&value),
-            _ if !key.is_empty() => {
-                extra.insert(key.to_string(), Value::String(value));
+            "kind" => parts.kind = non_empty_string(&value),
+            "title" => parts.title = string_value(&value),
+            "created_at" | "created" => {
+                parts.created_at = non_empty_string(&value);
+            }
+            "updated_at" | "updated" => {
+                parts.updated_at = non_empty_string(&value);
+            }
+            "" => {}
+            _ if is_safe_key(key) => {
+                parts.fields.insert(key.to_string(), value);
             }
             _ => {}
         }
     }
 
-    if !closed {
-        return None;
-    }
-    parsed.extra = Value::Object(extra).to_string();
-    Some(parsed)
+    parts.tags = tags_from_fields(&parts.fields);
+    parts
 }
 
 /// 文件是否已经带有可解析的 frontmatter。
 pub fn has_frontmatter(content: &str) -> bool {
-    parse(content).is_some()
+    parse_document(content).has_frontmatter
+}
+
+/// 把结构化字段组装成 Markdown。`body` 是纯正文。
+pub fn compose(
+    kind: &str,
+    title: &str,
+    created_at: &str,
+    updated_at: &str,
+    fields: &BTreeMap<String, Value>,
+    body: &str,
+) -> String {
+    let mut out = String::from("---\n");
+    out.push_str(&format!("kind: {}\n", yaml_scalar(kind)));
+    out.push_str(&format!("title: {}\n", yaml_scalar(title)));
+    out.push_str(&format!("created_at: {}\n", yaml_scalar(created_at)));
+    out.push_str(&format!("updated_at: {}\n", yaml_scalar(updated_at)));
+    for (key, value) in fields {
+        if value.is_null() || !is_safe_key(key) {
+            continue;
+        }
+        if matches!(
+            key.as_str(),
+            "kind" | "title" | "created_at" | "updated_at"
+        ) {
+            continue;
+        }
+        out.push_str(&format!("{key}: {}\n", yaml_value(value)));
+    }
+    out.push_str("---\n");
+    if !body.is_empty() {
+        out.push('\n');
+        out.push_str(body);
+    }
+    out
+}
+
+/// 自动补 frontmatter（仅给 `fs_write` 的通用路径使用）。
+pub fn prepend(path: &str, content: &str, now: &str) -> String {
+    let kind = infer_kind(path);
+    let title = infer_title(path, content);
+    compose(kind, &title, now, now, &BTreeMap::new(), content)
 }
 
 /// 基于路径与正文推断文档类型，作为 frontmatter 缺省值。
@@ -82,34 +160,22 @@ pub fn infer_kind(path: &str) -> &'static str {
     }
 }
 
-/// 自动补 frontmatter（仅 write 且文件原本没有头部时调用）。
-pub fn prepend(path: &str, content: &str, now: &str) -> String {
-    let kind = infer_kind(path);
-    let title = infer_title(path, content);
-    format!(
-        "---\nkind: {kind}\ntitle: {}\ncreated_at: {now}\nupdated_at: {now}\n---\n\n{content}",
-        yaml_scalar(&title)
-    )
-}
-
-/// 在同一事务里 upsert `meta` 镜像。解析失败时使用路径推断的缺省值。
+/// 在同一事务里 upsert `meta` 镜像。
 pub fn upsert(conn: &Connection, inode: i64, path: &str, content: &str) -> rusqlite::Result<()> {
-    let parsed = parse(content);
-    let kind = parsed
-        .as_ref()
-        .and_then(|p| p.kind.clone())
+    let parts = parse_document(content);
+    let kind = parts
+        .kind
+        .clone()
+        .filter(|s| !s.is_empty())
         .unwrap_or_else(|| infer_kind(path).to_string());
-    let title = parsed
-        .as_ref()
-        .and_then(|p| p.title.clone())
-        .unwrap_or_else(|| infer_title(path, content));
-    let status = parsed.as_ref().and_then(|p| p.status.clone());
-    let due = parsed.as_ref().and_then(|p| p.due.clone());
-    let tags = parsed.as_ref().and_then(|p| p.tags.clone());
-    let extra = parsed
-        .as_ref()
-        .map(|p| p.extra.clone())
-        .unwrap_or_else(|| "{}".to_string());
+    let title = parts
+        .title
+        .clone()
+        .unwrap_or_else(|| infer_title(path, &parts.body));
+    let status = status_from_fields(&parts.fields);
+    let due = field_string(&parts.fields, "dueDate")
+        .or_else(|| field_string(&parts.fields, "due"));
+    let extra = serde_json::to_string(&parts.fields).unwrap_or_else(|_| "{}".to_string());
 
     conn.execute(
         "INSERT INTO meta (inode, kind, title, status, due, tags, extra)
@@ -121,70 +187,78 @@ pub fn upsert(conn: &Connection, inode: i64, path: &str, content: &str) -> rusql
              due = excluded.due,
              tags = excluded.tags,
              extra = excluded.extra",
-        params![inode, kind, title, status, due, tags, extra],
+        params![inode, kind, title, status, due, parts.tags, extra],
     )?;
     Ok(())
 }
 
-fn set_if_not_empty(slot: &mut Option<String>, value: String) {
-    if !value.is_empty() {
-        *slot = Some(value);
-    }
-}
-
-/// 去掉 YAML 单/双引号，并对双引号内的转义做最小还原。
-fn unquote(value: &str) -> String {
-    if value.len() < 2 {
-        return value.to_string();
-    }
-    let first = value.as_bytes()[0];
-    let last = value.as_bytes()[value.len() - 1];
-    if first == b'"' && last == b'"' {
-        return unescape_double(&value[1..value.len() - 1]);
-    }
-    if first == b'\'' && last == b'\'' {
-        return value[1..value.len() - 1].to_string();
-    }
-    value.to_string()
-}
-
-fn unescape_double(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    let mut chars = value.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('"') => out.push('"'),
-            Some('\\') => out.push('\\'),
-            Some(other) => {
-                out.push('\\');
-                out.push(other);
+/// 从字段 map 里取字符串值（数字/布尔会转成字符串）。
+pub fn field_string(fields: &BTreeMap<String, Value>, key: &str) -> Option<String> {
+    match fields.get(key)? {
+        Value::String(s) if !s.is_empty() => Some(s.to_string()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        Value::Array(items) => {
+            let joined: Vec<String> = items.iter().filter_map(value_as_string).collect();
+            if joined.is_empty() {
+                None
+            } else {
+                Some(joined.join(","))
             }
-            None => out.push('\\'),
         }
+        _ => None,
     }
-    out
 }
 
-/// 把 `[a, b]` / `a, b` 统一成 `a,b`；空列表返回 None。
-fn normalize_tags(value: &str) -> Option<String> {
-    let inner = value
-        .trim()
-        .trim_start_matches('[')
-        .trim_end_matches(']');
-    let tags: Vec<String> = inner
-        .split(',')
-        .map(|tag| unquote(tag.trim()))
-        .filter(|tag| !tag.is_empty())
-        .collect();
+/// 把 tags 数组与单值 `tag` 合并成逗号分隔串。
+pub fn tags_from_fields(fields: &BTreeMap<String, Value>) -> Option<String> {
+    let mut tags: Vec<String> = Vec::new();
+    if let Some(value) = fields.get("tags") {
+        match value {
+            Value::Array(items) => {
+                tags.extend(items.iter().filter_map(value_as_string));
+            }
+            Value::String(s) => {
+                tags.extend(
+                    s.trim()
+                        .trim_start_matches('[')
+                        .trim_end_matches(']')
+                        .split(',')
+                        .map(|t| t.trim().to_string())
+                        .filter(|t| !t.is_empty()),
+                );
+            }
+            _ => {}
+        }
+    }
+    if let Some(tag) = field_string(fields, "tag") {
+        tags.extend(
+            tag.split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty()),
+        );
+    }
+    tags.sort();
+    tags.dedup();
     if tags.is_empty() {
         None
     } else {
         Some(tags.join(","))
+    }
+}
+
+fn status_from_fields(fields: &BTreeMap<String, Value>) -> Option<String> {
+    if let Some(status) = field_string(fields, "status") {
+        return Some(status);
+    }
+    match fields.get("completed").or_else(|| fields.get("isCompleted")) {
+        Some(Value::Bool(true)) => Some("done".to_string()),
+        Some(Value::Bool(false)) => Some("open".to_string()),
+        Some(Value::Number(n)) => {
+            let done = n.as_i64().map(|value| value != 0).unwrap_or(false);
+            Some(if done { "done" } else { "open" }.to_string())
+        }
+        _ => None,
     }
 }
 
@@ -207,11 +281,127 @@ fn infer_title(path: &str, content: &str) -> String {
         .to_string()
 }
 
-/// 生成 YAML 双引号标量，转义反斜杠、双引号与换行。
+fn non_empty_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) if !s.is_empty() => Some(s.to_string()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// 允许空字符串的取值，用于 title：空标题是合法状态，不能被路径推断覆盖。
+fn string_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => Some(s.to_string()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+fn value_as_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) if !s.is_empty() => Some(s.to_string()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+fn is_safe_key(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
+
+fn parse_value(raw: &str) -> Value {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Value::String(String::new());
+    }
+    if raw == "null" || raw == "~" {
+        return Value::Null;
+    }
+    if raw == "true" {
+        return Value::Bool(true);
+    }
+    if raw == "false" {
+        return Value::Bool(false);
+    }
+    if let Some(inner) = raw.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+        return Value::String(unescape_double(inner));
+    }
+    if let Some(inner) = raw.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
+        return Value::String(inner.to_string());
+    }
+    if raw.starts_with('[') && raw.ends_with(']') {
+        let inner = &raw[1..raw.len() - 1];
+        let items: Vec<Value> = inner
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(parse_value)
+            .collect();
+        return Value::Array(items);
+    }
+    if raw.starts_with('{') && raw.ends_with('}') {
+        if let Ok(value) = serde_json::from_str::<Value>(raw) {
+            return value;
+        }
+    }
+    if let Ok(n) = raw.parse::<i64>() {
+        return Value::Number(n.into());
+    }
+    if let Ok(n) = raw.parse::<f64>() {
+        if let Some(number) = serde_json::Number::from_f64(n) {
+            return Value::Number(number);
+        }
+    }
+    Value::String(raw.to_string())
+}
+
+fn yaml_value(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => yaml_scalar(s),
+        Value::Array(items) => {
+            let rendered: Vec<String> = items.iter().map(yaml_value).collect();
+            format!("[{}]", rendered.join(", "))
+        }
+        Value::Object(_) => yaml_scalar(&serde_json::to_string(value).unwrap_or_default()),
+    }
+}
+
 fn yaml_scalar(value: &str) -> String {
     let escaped = value
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n");
     format!("\"{escaped}\"")
+}
+
+fn unescape_double(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }

@@ -10,8 +10,10 @@
 //! 天然不会被并发插入；`edit` 仍保留 expect_rev 乐观锁，用于检测“读旧版本后
 //! 再提交”的冲突。
 
+pub mod acl;
 pub mod cap_gate;
 pub mod error;
+pub mod index;
 pub mod meta;
 pub mod types;
 
@@ -52,9 +54,19 @@ impl VirtualFs {
         Self { conn }
     }
 
+    /// 供 docs 层复用同一连接（只在 crate 内可见）。
+    pub(crate) fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
+    pub(crate) fn conn_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+
     /// 读文件或列目录。
     pub fn read(&self, req: ReadRequest) -> Result<ReadResult, ToolError> {
         let path = cap_gate::normalize_path(&req.path)?;
+        acl::ensure_allowed(&path, acl::AclPermission::Read)?;
         let row: Option<(i64, String, i64)> = self
             .conn
             .query_row(
@@ -115,6 +127,7 @@ impl VirtualFs {
         let path = cap_gate::normalize_path(&req.path)?;
         let path = with_md_extension(path);
         cap_gate::ensure_writable(&path)?;
+        acl::ensure_allowed(&path, acl::AclPermission::Write)?;
 
         let raw = req.content;
         if raw.len() > MAX_FILE_BYTES {
@@ -178,6 +191,8 @@ impl VirtualFs {
             params![inode, content, now_str],
         )?;
         meta::upsert(&tx, inode, &path, &content)?;
+        index::refresh(&tx, inode, &path, &content)?;
+        record_version(&tx, inode, 1, "user", &now_str)?;
         tx.commit()?;
 
         Ok(WriteReceipt {
@@ -191,6 +206,7 @@ impl VirtualFs {
     pub fn edit(&mut self, req: EditRequest) -> Result<EditReceipt, ToolError> {
         let path = cap_gate::normalize_path(&req.path)?;
         cap_gate::ensure_writable(&path)?;
+        acl::ensure_allowed(&path, acl::AclPermission::Write)?;
         if req.old_string.is_empty() {
             return Err(ToolError::invalid("old_string 不能为空"));
         }
@@ -262,6 +278,8 @@ impl VirtualFs {
             params![next, replaced.len() as i64, now_str, inode],
         )?;
         meta::upsert(&tx, inode, &path, &replaced)?;
+        index::refresh(&tx, inode, &path, &replaced)?;
+        record_version(&tx, inode, next, "agent", &now_str)?;
         tx.commit()?;
 
         Ok(EditReceipt {
@@ -436,6 +454,24 @@ impl VirtualFs {
             .optional()
             .map_err(ToolError::from)
     }
+}
+
+/// 记录版本台账，让 UI 能用全局 version_id 定位 (inode, rev)。
+fn record_version(
+    conn: &Connection,
+    inode: i64,
+    rev: i64,
+    source: &str,
+    created_at: &str,
+) -> rusqlite::Result<()> {
+    let manual = if source == "user" { 1 } else { 0 };
+    conn.execute(
+        "INSERT OR IGNORE INTO version_meta
+             (inode, rev, label, label_description, is_manual, created_at)
+         VALUES (?1, ?2, NULL, NULL, ?3, ?4)",
+        params![inode, rev, manual, created_at],
+    )?;
+    Ok(())
 }
 
 /// SQLite 本地时间（`YYYY-MM-DD HH:MM:SS`），与现有导出格式一致。

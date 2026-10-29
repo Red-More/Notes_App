@@ -91,11 +91,47 @@ export function safeFileName(name: string, fallback = '未命名'): string {
   return base.slice(0, 60)
 }
 
+/** Map a structured backend ToolError to a user-facing message. */
+function toolErrorHint(e: unknown): string | null {
+  if (typeof e !== 'object' || e === null) return null
+  const err = e as Record<string, unknown>
+  const code = typeof err.code === 'string' ? err.code : ''
+  if (!code) return null
+  const message = typeof err.message === 'string' ? err.message : ''
+  if (message) return message
+  switch (code) {
+    case 'conflict':
+      return '内容已变化，请刷新后重试'
+    case 'notFound':
+      return '内容不存在或已删除'
+    case 'alreadyExists':
+      return '同名内容已存在'
+    case 'noMatch':
+      return '未找到要替换的内容'
+    case 'readOnlyArea':
+      return '该路径为只读区，不能修改'
+    case 'pathEscape':
+      return '路径超出允许范围'
+    case 'invalidPath':
+      return '路径不合法'
+    case 'invalidArgument':
+      return '参数不合法'
+    case 'contentTooLarge':
+      return '内容过大，无法保存'
+    case 'storage':
+      return '存储失败，请稍后重试'
+    default:
+      return '操作失败，请稍后重试'
+  }
+}
+
 /**
  * Map a backend or unknown error to a friendly Chinese message.
  * Known friendly messages pass through unchanged.
  */
 export function friendlyError(e: unknown): string {
+  const toolMessage = toolErrorHint(e)
+  if (toolMessage) return toolMessage
   const msg = e instanceof Error ? e.message : String(e)
   if (msg.includes('数据库错误')) return '操作失败，请重试'
   if (msg.includes('笔记不存在')) return '笔记不存在或已删除'
