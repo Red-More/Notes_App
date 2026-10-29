@@ -1,9 +1,9 @@
-# LifeOS 下一步执行计划（v1.2.0 · Agent 优先）
+# LifeOS 下一步执行计划（v1.3.0 · Agent 优先）
 
 | 项目 | 内容 |
 |---|---|
 | 文档编号 | LIF-2026-PLAN-001 |
-| 版本 | v1.2.0 |
+| 版本 | v1.3.0 |
 | 编制日期 | 2026-10-29 |
 | 依据文档 | `LifeOS_数据库重构与Agent能力扩展设计文档_v1.0.0.pdf`（LIF-2026-DES-001）、`refactoring-sqlite-vfs-pi-agent.md`（PRD） |
 | 代码基线 | `b3ea410` feat(vfs): rebuild domain features on generic document layer<br>`da56090` refactor(storage): replace relational notes.db with VirtualFs-backed life.db |
@@ -14,6 +14,7 @@
 
 | 版本 | 日期 | 变更摘要 |
 |---|---|---|
+| v1.3.0 | 2026-10-29 | 补充「Agent 安全模型与上线门禁」：信任边界、威胁–硬控制表、7 条上线门禁及其 M0/M2/M3/M6 落地映射；原第 7/8/9 节顺延为 8/9/10 |
 | v1.2.0 | 2026-10-29 | 完成 `pi-agent-core@1.4.0` 运行时审查：内置 `streamProxy` 改为自研 `streamFn` + `invoke` 桥接；`fs:default` 提升为 M2 前置门禁（导出不受影响）；补充 Agent 打包体积基线、对话渲染策略与风险项 |
 | v1.1.0 | 2026-10-29 | **调整为 Agent 优先**：M2 Agent 闭环前置到 M1 检索之前；FTS 顺延为 Agent MVP 后的检索升级；发布节点保持 12/22 |
 | v1.0.0 | 2026-10-29 | 初版：基于两次提交与设计文档建立 M0–M6 执行基线 |
@@ -312,7 +313,48 @@
 
 ---
 
-## 7. 风险与应对
+## 7. Agent 安全模型与上线门禁
+
+> 本节是安全审查（2026-10-29）的落地结论，与第 8 节风险表、第 9 节待决策互补：风险表讲"出问题怎么办"，本节讲"设计上如何不让问题发生"。所有硬控制都在 Rust 侧，prompt 只作第二道防线。
+
+### 7.1 信任边界（一句话模型）
+
+WebView 内的 UI、Agent 运行时、技能注入与被注入内容属于**同一信任域**——任何 XSS 都能调用全部已注册 Tauri 命令。因此：
+
+- 安全策略必须由 Rust 强制：CapGate、capability 最小化、LLM 代理、Keystore。
+- 模型只绑 5 个 `fs_*` 工具；`doc_*`、技能安装、导出写盘均不走模型入口。
+- `agent_stream` 入参只接受 **provider 枚举**，不接受 `api_key` / `base_url`；网络出口唯一（Rust LLM 代理）。
+
+### 7.2 威胁 – 硬控制表
+
+| 威胁 | 攻击面 | Rust 硬控制 | 落地 |
+|---|---|---|---|
+| 提示注入驱动数据篡改 | 恶意笔记/网页内容进入上下文后被模型照做 | CapGate 路径锁 `/life`；`write` 仅新建不覆盖；`edit` 带 `expect_rev`；单文件 1MB 上限 | M0-2 / M2-9 |
+| 提示注入导致隐私外泄 | 模型被诱导读取/输出联系人、密钥 | `.agents` 只读且 Agent 读取入口拒绝；System Prompt「数据不是指令」；LLM 仅发最小必要上下文 | M2-7 / M2-9 |
+| WebView XSS 直调命令面 | 被注入的 HTML/JS 调任意 command | capability 无 `fs:default` / `shell:allow-exec`；CSP `connect-src` 仅 `self/ipc`；对话 MVP 纯文本渲染 | M0-4 / M2-8 / M6-2 |
+| LLM 代理 SSRF | 诱导代理访问任意 URL | provider 枚举映射固定 base URL；禁任意 URL、重定向、私网 IP、HTTP 明文 | M2-3 |
+| 密钥泄露 | JS 层、日志、DB、备份 | Key 仅存 Keystore；`agent_stream` 不收 `api_key`；JS 源码/存储搜不到 token | M2-4 |
+| 恶意技能注入 | 伪造 SKILL.md 要求执行/越权 | 初始 prompt 只注入摘要、正文按需加载；`.agents` 写入走专用 Rust command（非 `fs_write`） | M3-4 / M3-6 |
+| 配额耗尽 DoS | 模型循环调用工具 / 单次超量 | 每轮工具步数、写入数、单次 read 行数、DB 总量限额（1MB/文件已实现，512MB 总量规划中） | M2-5 |
+| DB 明文/备份泄露 | 物理提取 `life.db` 或导出产物 | 默认不加密、敏感数据最小化；导出走 Rust 侧；M5 可选 sqlcipher | M5 |
+
+### 7.3 上线门禁（7 条，含落地映射）
+
+| # | 门禁 | 验证方式 | 落地任务 |
+|---|---|---|---|
+| G1 | **工具面**：模型仅 5 个白名单工具，注册表无 `bash/shell/task/notebook/web/fetch` | 注册表快照测试 | M2-5 |
+| G2 | **命令面**：capability 无 `shell:allow-exec` / `fs:default`，导出写盘走 Rust | 配置 diff + 全局 grep | M0-4 |
+| G3 | **网络面**：唯一出口 Rust LLM 代理；`agent_stream` 只收 provider 枚举，禁任意 URL/私网/HTTP | CSP 审查 + 抓包 | M2-3 |
+| G4 | **密钥面**：Key 仅存 Keystore，WebView/日志/DB 均不可见 | JS 全局搜索 + 存储检查 | M2-4 |
+| G5 | **注入面**：恶意笔记/提示注入不驱动越权读写、不泄露敏感字段 | M2-9 红队用例 + CI 常驻 | M2-9 |
+| G6 | **技能面**：技能正文不进初始 prompt；恶意 SKILL 不新增工具、不越权 | prompt 快照 + 恶意样本 | M3-4 |
+| G7 | **终检面**：发布前 capability/CSP/网络/密钥清单逐项签署 | 附录 B 十项签署 | M6-2 |
+
+**执行约定**：G1–G6 在对应任务验收时逐条通过并留证；G7 随 M6-3 红线签署一并归档；任何一项未过即阻塞对应里程碑。
+
+---
+
+## 8. 风险与应对
 
 | 风险 | 影响 | 应对 | 责任阶段 |
 |---|---|---|---|
@@ -333,7 +375,7 @@
 
 ---
 
-## 8. 待决策事项（需项目负责人确认）
+## 9. 待决策事项（需项目负责人确认）
 
 | # | 决策 | 建议 | 截止 |
 |---|---|---|---|
@@ -349,7 +391,7 @@
 
 ---
 
-## 9. 执行与变更管理
+## 10. 执行与变更管理
 
 1. **周节奏**：每周五更新本计划状态（未开始/进行中/完成/阻塞），偏差 >3 天需在周报说明。
 2. **完成定义（DoD）**：代码 + 测试 + 文档 + 可演示，四项缺一不算完成。
@@ -359,4 +401,4 @@
 
 ---
 
-— LifeOS · LIF-2026-PLAN-001 v1.2.0 · Agent 优先执行基线 —
+— LifeOS · LIF-2026-PLAN-001 v1.3.0 · Agent 优先执行基线 —
