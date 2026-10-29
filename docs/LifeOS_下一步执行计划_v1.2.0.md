@@ -1,9 +1,9 @@
-# LifeOS 下一步执行计划（v1.1.0 · Agent 优先）
+# LifeOS 下一步执行计划（v1.2.0 · Agent 优先）
 
 | 项目 | 内容 |
 |---|---|
 | 文档编号 | LIF-2026-PLAN-001 |
-| 版本 | v1.1.0 |
+| 版本 | v1.2.0 |
 | 编制日期 | 2026-10-29 |
 | 依据文档 | `LifeOS_数据库重构与Agent能力扩展设计文档_v1.0.0.pdf`（LIF-2026-DES-001）、`refactoring-sqlite-vfs-pi-agent.md`（PRD） |
 | 代码基线 | `b3ea410` feat(vfs): rebuild domain features on generic document layer<br>`da56090` refactor(storage): replace relational notes.db with VirtualFs-backed life.db |
@@ -14,6 +14,7 @@
 
 | 版本 | 日期 | 变更摘要 |
 |---|---|---|
+| v1.2.0 | 2026-10-29 | 完成 `pi-agent-core@1.4.0` 运行时审查：内置 `streamProxy` 改为自研 `streamFn` + `invoke` 桥接；`fs:default` 提升为 M2 前置门禁（导出不受影响）；补充 Agent 打包体积基线、对话渲染策略与风险项 |
 | v1.1.0 | 2026-10-29 | **调整为 Agent 优先**：M2 Agent 闭环前置到 M1 检索之前；FTS 顺延为 Agent MVP 后的检索升级；发布节点保持 12/22 |
 | v1.0.0 | 2026-10-29 | 初版：基于两次提交与设计文档建立 M0–M6 执行基线 |
 
@@ -27,9 +28,10 @@
 
 **Agent 优先的可行性结论**：
 
-- `@earendil-works/pi-agent-core` 已在 npm 发布 `1.4.0`（浏览器 ESM，依赖 `typebox + pi-ai`），包存在性风险已消除，仍需 M2-1 验证 `streamProxy` 与工具调用。
+- `pi-agent-core@1.4.0` 已通过运行时代码审查：dist 无 `node:` 内建导入、无 `eval/new Function`，`pi-telemetry` 无网络代码；`typebox + pi-ai` 依赖可在浏览器打包，根入口实测 52KB gzip。
+- 该版本内置的 `streamProxy` 是 **HTTP 代理客户端**（`fetch(proxyUrl/api/stream)` + Bearer token），不能直接使用；M2 改为自研 `streamFn` 经 `invoke('agent_stream')` 桥接，token 永不下发 WebView。
 - 5 个工具中的 `grep` 当前走 LIKE 回退，功能可用；Agent MVP 阶段接受 `<500ms`，M1 再提升到 `<200ms`。
-- 硬前置只有三项：M0 最小质量门、Android debug APK（真机验证）、LLM 代理 + 会话表。
+- 硬前置共四项：M0 最小质量门、Android debug APK（真机验证）、capability 移除 `fs:default`、LLM 代理 + 会话表。
 - **结论：Agent 可以先做，FTS 后置。**
 
 **下一步主线**：
@@ -42,13 +44,24 @@
 
 | 节点 | 日期 | 判定标准 |
 |---|---|---|
-| 基线校准完成 | 2026-11-05 | CI 双端全绿，Rust 核心回归测试可执行，Android debug APK 可启动 |
-| Agent MVP 完成 | 2026-11-17 | 真机一句话记录落盘，5 工具越狱清单全拦 |
+| 基线校准完成 | 2026-11-05 | CI 双端全绿，Rust 核心回归测试可执行，Android debug APK 可启动，capability 无 `fs:default` |
+| Agent MVP 完成 | 2026-11-17 | 真机一句话记录落盘，5 工具越狱清单全拦，Agent chunk 体积达标 |
 | 检索闭环完成 | 2026-11-24 | 千条笔记 grep 首屏 < 200ms，中文短词可用 |
 | 技能 v1 完成 | 2026-12-01 | “复盘今天”端到端产出复盘章节 |
 | 体验闭环完成 | 2026-12-08 | 对话内可回滚版本，离线/取消不丢草稿 |
 | 数据主权完成 | 2026-12-15 | 导出 → 清库 → 导入，数据/索引/版本一致 |
 | 发布候选 | 2026-12-22 | 红线检查表 10 项全部签署 |
+
+**pi-agent-core 运行时审查结论（2026-10-29）**：
+
+| 项 | 结论 |
+|---|---|
+| 包内实现 | `dist` 无 `node:` 内建导入、无 `eval/new Function`；`pi-telemetry` 仅内存/noop 实现，无 fetch/http |
+| 内置 `streamProxy` | HTTP 代理客户端（向 `<proxyUrl>/api/stream` 发起 fetch，并携带 Bearer token），与红线②冲突，改为 `invoke` 桥接 |
+| 打包体积 | 根入口（agent + pi-ai + typebox）193KB min / **52KB gzip**；`providers/all` 1.94MB min / 310KB gzip，禁止使用 |
+| 渲染职责 | pi-agent 无 UI、无 Markdown 渲染，只发 `AgentEvent`（`message_update/tool_execution_*`）；渲染策略由前端决定 |
+
+> `streamProxy` 的准确定义以本节及 v1.2.0 修订为准；设计文档 PDF（LIF-2026-DES-001）§3.2/术语表中“自定义传输适配器”的表述待下一版回写。
 
 ---
 
@@ -84,7 +97,7 @@
 | 导入/备份/加密未开始 | 仅能导出，不能恢复；无 sqlcipher | `docs/export.rs`、`Cargo.toml` |
 | 回收站无 30 天自动清理 | 数据只增不减 | `docs/mod.rs::delete_many` 仅软删 |
 | `source` 语义不一致 | `fs_write` 恒记 `user` 且 `is_manual=1`；`fs_edit` 恒记 `agent` | `vfs/mod.rs::write/edit` |
-| capability 含 `fs:default` | 与设计“不给 fs:default”红线冲突，需评估收口 | `src-tauri/capabilities/default.json` |
+| capability 含 `fs:default` | 与设计“不给 fs:default”红线冲突；该权限可让被注入的 WebView 递归读取应用私有目录（含 `life.db`），绕过 VirtualFs | `src-tauri/capabilities/default.json`；导出写盘在 Rust 侧完成，移除不影响导出 |
 | 旧 `notes.db` 不做迁移 | 有意为之，但需产品确认无存量用户数据诉求 | 提交 `d205ec6` BREAKING CHANGE |
 | Android 工程未初始化 | 无 `src-tauri/gen/android`，mobile-first 构建路径未验证 | `src-tauri` 目录无 `gen/android`；`tauri.conf.json` 仅配置桌面窗口 |
 
@@ -127,7 +140,7 @@
 | `folder/version/export/index_query` | UI 与数据主权 | 导出扩展为“整库目录树 ZIP”；导入复用 frontmatter 解析 | M5 |
 | `docApi` 前端映射 | 对话页“打开笔记” | 复用 DTO 映射，不重写领域层 | M4 |
 | CapGate `.agents` 只读 | 技能管理 | 模型不能写技能目录；技能安装/开关走**专用 Rust command**（非 `fs_write`） | M3 |
-| 导出命令（dialog + fs 插件） | capability 收口 | 评估移除 `fs:default`，仅保留 `dialog:default` 与 Rust 侧写入 | M0/M6 |
+| 导出命令（dialog + fs 插件） | capability 收口 | 移除 `fs:default`，保留 `dialog:default` 与 Rust 侧 `FsExt` 写入；已确认前端零 `plugin-fs` 调用，导出不依赖 WebView fs 权限 | M0/M2 |
 
 ---
 
@@ -137,8 +150,8 @@
 
 | 执行序 | 阶段 | 日期 | 目标 | 关键交付物 | 优先级 | 退出标准 |
 |---|---|---|---|---|---|---|
-| 1 | **M0 基线校准** | 10/30–11/05 | 建立可编译、可回归、可发版的质量门 | CI 强化、Rust 核心测试、source 语义、capability 预检、Android 工程、v0.1.0 基线 | P0 | CI 双端全绿；核心回归用例通过；Android debug APK 可启动 |
-| 2 | **M2 Agent 闭环** | 11/06–11/17 | 打通“说话 → 工具 → 落盘 → 回显” | LLM 代理、Keystore、会话表、pi-agent-core、5 工具绑定、对话 UI、system prompt | P0 | 真机一句话记录成功；越狱清单全拦；断网不崩；grep 可接受 LIKE 回退 |
+| 1 | **M0 基线校准** | 10/30–11/05 | 建立可编译、可回归、可发版的质量门 | CI 强化、Rust 核心测试、source 语义、capability 收口（移除 `fs:default`）、Android 工程、v0.1.0 基线 | P0 | CI 双端全绿；核心回归用例通过；Android debug APK 可启动；capability 无 `fs:default` |
+| 2 | **M2 Agent 闭环** | 11/06–11/17 | 打通“说话 → 工具 → 落盘 → 回显” | LLM 代理、Keystore、会话表、pi-agent-core、5 工具绑定、对话 UI、system prompt | P0 | 真机一句话记录成功；越狱清单全拦；断网不崩；grep 可接受 LIKE 回退；Agent chunk 达标 |
 | 3 | **M1 检索闭环** | 11/18–11/24 | 把 Agent 的检索质量与性能补齐 | FTS5 同事务维护、`grep` FTS + type 过滤、千条种子性能报告 | P0 | 千条笔记 grep < 200ms；索引与 blobs 一致 |
 | 4 | **M3 技能系统** | 11/25–12/01 | 用技能放大同一套工具 | SKILL.md 规范、扫描注入、6 个内置技能、技能管理 UI | P1 | “复盘今天”端到端；卸载后不再套用 |
 | 5 | **M4 体验闭环** | 12/02–12/08 | 达到可用级 App | 工具卡片、笔记跳转、版本回滚、待办联动、离线三态 | P1 | 15 秒完成一次记录；撤销不丢数据 |
@@ -161,11 +174,11 @@
 | M0-1 | CI 强化：增加 `cargo fmt --check`、`cargo clippy -- -D warnings`、`cargo check/test`，缓存 Rust 依赖 | P0 | PR 门禁可拦截编译/格式问题 | 故意引入编译错误时 CI 变红；正常 PR 全绿 | 10/31 |
 | M0-2 | 补 Rust 回归测试：CapGate 全变体（`..`、越界绝对路径、反斜杠、空/超长路径）、write→edit→read→grep 链路、并发 `expect_rev` Conflict、软删/恢复/物理删、版本恢复、交叉索引刷新 | P0 | `src-tauri` 内可执行的测试集 | `cargo test` 覆盖上述场景并全部通过；虚拟 FS 无符号链接解析入口 | 11/03 |
 | M0-3 | 统一写入 `source` 语义：`WriteRequest/EditRequest` 增加 `source`（user/agent）；`fs_*` 固定 agent，`doc_*` 固定 user；`version_meta.is_manual` 仅由显式版本快照置 1 | P0 | Agent 写入不再被误标为手工版本 | 单测断言：fs 写 → `source=agent, is_manual=0`；doc 自动保存 → `source=user, is_manual=0`；`version_create` → `is_manual=1` | 11/03 |
-| M0-4 | capability 预检：确认 WebView 未直接调用 `plugin-fs`，评估删除 `fs:default`；保留 `dialog:default`；记录网络白名单方案 | P1 | 权限最小化方案 + 导出回归 | 移除后导出仍可用；capability 中无 shell / 无 fs:default | 11/04 |
-| M0-5 | 基线固化：计划文档入库、README 补运行/验证说明、打 `v0.1.0` 标签 | P1 | 团队可复现的基线 | 新成员按 README 可跑前端测试；标签指向 `c3cef10` 后首个通过提交 | 11/05 |
+| M0-4 | capability 收口：从 `capabilities/default.json` 移除 `fs:default`，保留 `dialog:default`；确认 WebView 无 `plugin-fs` 调用；记录网络白名单方案 | P0 | 权限最小化 + 导出回归 | capability 无 shell / 无 `fs:default`；单文档 / 多文档 ZIP / 文件夹 ZIP 导出全部回归通过 | 11/04 |
+| M0-5 | 基线固化：计划文档入库、README 补运行/验证说明、打 `v0.1.0` 标签 | P1 | 团队可复现的基线 | 新成员按 README 可跑前端测试；标签指向 `b3ea410` 后首个通过提交 | 11/05 |
 | M0-6 | Android 工程预检：初始化 `tauri android` 工程，构建 ARM64 debug APK 并安装真机，验证 invoke/dialog/notification 基础链路 | P0 | 移动端构建路径打通 | 真机可启动 App 并完成一次 `doc_list` invoke | 11/05 |
 
-**退出标准**：CI 双端全绿；M0-2 测试在 CI 稳定通过；Android debug APK 可启动；能力收口方案确认。
+**退出标准**：CI 双端全绿；M0-2 测试在 CI 稳定通过；Android debug APK 可启动；`fs:default` 已移除且导出回归通过。
 
 ---
 
@@ -189,23 +202,23 @@
 
 ### M2 Agent 闭环（11/06–11/17）
 
-前置：M0-6 Android debug APK 可安装。FTS 不阻塞 Agent：`grep` 暂走 LIKE 回退（`fallback=true`），M1 再升级。
+前置：M0-6 Android debug APK 可安装；M0-4 已移除 `fs:default`。FTS 不阻塞 Agent：`grep` 暂走 LIKE 回退（`fallback=true`），M1 再升级。
 目标：用户说一句话，Agent 通过 5 个工具完成落盘并流式回显；密钥不出 Rust。
 
 | ID | 任务 | 优先级 | 预期成果 | 验收标准 | 目标日 |
 |---|---|---|---|---|---|
-| M2-1 | 可行性 spike：验证 `@earendil-works/pi-agent-core@1.4.0` 浏览器打包、`streamProxy` API、TypeBox schema；验证 Android Keystore 插件候选 | P0 | Go/No-Go 结论 + 适配层接口草案 | 能在 WebView 内创建 Agent 实例并发出一次工具调用 | 11/07 |
+| M2-1 | 可行性 spike：验证 `pi-agent-core@1.4.0` 浏览器打包与 TypeBox schema；**不使用内置 `streamProxy`**（其实现为 HTTP fetch + Bearer token），改为自研 `streamFn` 经 `invoke('agent_stream')` 桥接；验证 Android Keystore 插件候选；记录 Agent chunk 体积基线 | P0 | Go/No-Go 结论 + `streamFn` 适配层接口草案 + 体积基线 | WebView 内创建 Agent 并完成一次工具调用；经自定义 `streamFn` 完成一次流式对话；Agent chunk ≤ 60KB gzip；产物无 `aws-sdk/bedrock/openai` SDK 标记 | 11/07 |
 | M2-2 | Schema v3：新增 `conversations / messages / settings` 三表 + 会话命令（列表/新建/删除/消息追加/读取） | P0 | 会话重启不丢；模型配置可存（密钥不落库） | 杀进程重启后会话与消息完整；DB 内搜索不到 API Key | 11/09 |
-| M2-3 | Rust LLM 代理：`agent_stream` 命令，`reqwest` SSE 转发，OpenAI/Anthropic/Google 适配；超时、取消、离线错误事件；提供本地 mock SSE 供无 Key 开发 | P0 | 流式对话通道 | 首 token < 1.5s（网络正常）；取消后停止转发；断网返回可恢复错误 | 11/11 |
+| M2-3 | Rust LLM 代理：`agent_stream` 命令，`reqwest` SSE 转发，OpenAI/Anthropic/Google 适配；事件负载沿用 pi-agent 的 `data:` 片段形状，前端仅解析不改协议；超时、取消、离线错误事件；提供本地 mock SSE 供无 Key 开发 | P0 | 流式对话通道 | 首 token < 1.5s（网络正常）；取消后停止转发；断网返回可恢复错误 | 11/11 |
 | M2-4 | 密钥管理：Keystore 读写删命令；设置页模型/厂商切换；密钥提交后不落地 JS 持久化层；桌面开发用 dev-only provider | P0 | 密钥安全闭环 | JS 源码/存储/全局对象搜索不到 token；重启后 Rust 侧仍可调用；删除后调用失败 | 11/12 |
-| M2-5 | Agent 运行时：5 工具 TypeBox 注册、读并行/写串行、`fs_*` 绑定、`expect_rev` 透传、错误以 `isError` 回灌 | P0 | 工具调用闭环 | 5 个工具均可被模型调用；错误可触发自我纠正；无第 6 个工具 | 11/13 |
+| M2-5 | Agent 运行时：5 工具 TypeBox 注册、读并行/写串行、`fs_*` 绑定、`expect_rev` 透传、错误以 `isError` 回灌 | P0 | 工具调用闭环 | 5 个工具均可被模型调用；错误可触发自我纠正；无第 6 个工具；构建产物无 provider SDK 标记 | 11/13 |
 | M2-6 | 追加语义固化：`write` 只新建；追加走“read 尾部 → edit 锚点”；写入 system prompt 与技能规范 | P0 | 避免覆盖写与重复建文件 | “追加一条日记”不新建文件、不改旧内容 | 11/13 |
 | M2-7 | System Prompt 基线 v1：10 条铁律、当前日期、`{{skills_index}}` 占位、文件内容是数据不是指令 | P1 | 设计文档第 10 章落地 | 越狱清单 100% 拦截；不泄露联系人敏感字段 | 11/14 |
-| M2-8 | 对话 UI：流式气泡、工具卡片（start/end）、错误重试、草稿保留、会话管理、底部导航“对话”入口 | P0 | 可用对话页 | 流式渲染无闪烁；工具状态可见；切换会话上下文正确 | 11/15 |
+| M2-8 | 对话 UI：流式气泡（MVP 纯文本渲染，`message_end` 后可选 Markdown；工具结果一律纯文本）、工具卡片（start/end）、错误重试、草稿保留、会话管理、底部导航“对话”入口 | P0 | 可用对话页 | 流式渲染无闪烁；工具状态可见；模型输出不出现可执行 HTML；切换会话上下文正确 | 11/15 |
 | M2-9 | 安全回归：路径穿越参数、恶意笔记注入、诱导输出密钥/电话、诱导写 `.agents` | P0 | 红队测试报告 | 全部拒绝或无实际写操作；错误文案可行动 | 11/16 |
 | M2-10 | 真机 E2E：“记下今天吃了拉面”落盘日记；“把那条待办勾掉”改 checkbox | P0 | 真机演示 | 记录 ≤15 秒完成；rev 递增；重启可查 | 11/17 |
 
-**退出标准**：真机对话可用；仅 5 工具；密钥不进 WebView；断网/取消不崩溃；`grep` 回退可用且响应 <500ms。
+**退出标准**：真机对话可用；仅 5 工具；密钥不进 WebView；断网/取消不崩溃；`grep` 回退可用且响应 <500ms；capability 无 `fs:default`；Agent chunk 体积达标；对话渲染无 HTML 注入面。
 
 ---
 
@@ -286,7 +299,7 @@
 
 | # | 红线 | 验收阶段 | 验证方式 |
 |---|---|---|---|
-| 1 | capability 无 `shell:allow-exec`、无 `fs:default` | M0/M6 | 配置 diff + 全局 grep |
+| 1 | capability 无 `shell:allow-exec`、无 `fs:default` | M0/M2/M6 | 配置 diff + 全局 grep |
 | 2 | 网络白名单仅 LLM 域名，WebView 直连被拒 | M2/M6 | CSP 配置审查 + 抓包 |
 | 3 | 工具注册表无 `bash/task/notebook/web/fetch` 字样 | M2 | 注册表快照测试 |
 | 4 | CapGate 覆盖 `..`、越界绝对路径、反斜杠、空路径、超长路径（虚拟 FS 无符号链接入口） | M0 | 单元测试 |
@@ -305,11 +318,14 @@
 |---|---|---|---|
 | 本地无 Rust 工具链，编译反馈依赖 CI | 开发效率与合并阻塞 | M0-1 强化 CI；统一团队 rustup 版本；必要时提供 Docker 构建环境 | M0 |
 | Android 工程与工具链未验证 | 移动端 E2E 阻塞，M2/M6 无真机可测 | M0-6 提前初始化并跑通 debug APK；CI 增加 Android 构建任务 | M0 |
-| `pi-agent-core` 浏览器兼容/API 变动 | Agent 层返工 | npm `1.4.0` 已确认存在（浏览器 ESM）；M2-1 先验证 `streamProxy`/工具调用；Rust 侧保持 `agent_stream` 稳定契约 | M2 |
+| `pi-agent-core` 浏览器兼容/API 变动 | Agent 层返工 | 1.4.0 实测无 `node:` 内建导入、无 `eval`，浏览器打包通过；M2-1 先验证实例创建与工具调用；Rust 侧保持 `agent_stream` 稳定契约 | M2 |
+| 内置 `streamProxy` 是 HTTP 代理客户端 | 直接把 token 放进 WebView，违反红线②，并被 CSP 拦截 | 不使用内置 `streamProxy`；M2-1 自研 `streamFn` 经 `invoke` 桥接，只复用其事件解析 | M2 |
+| 误 import `providers/all` 导致包体膨胀 | APK 增大且引入 Node SDK 依赖 | Agent 仅 import 根入口；M2-1 记录体积基线，CI 检查产物无 SDK 标记；core 实测 52KB gzip | M2 |
 | Agent 先行期间 `grep` 仍为 LIKE 回退 | 千条以上检索可能超过 200ms | M2 接受 `<500ms`；响应标注 `fallback=true`；M1 在 7 天内切 FTS | M2/M1 |
 | Android Keystore 插件不成熟 | 密钥方案受阻 | spike 两个候选；失败则原生 JNI 封装，接口不变 | M2 |
 | FTS5 中文短词召回不足 | 搜索体验差 | 千条种子实测；先 LIKE 回退，确需再评估 jieba/ICU | M1 |
-| `fs:default` 移除影响导出 | 功能回归 | M0 先验证；必要时降级为最小写权限，而非全量放开 | M0/M6 |
+| `fs:default` 移除影响导出 | 功能回归 | 已确认导出写盘走 Rust `FsExt`、前端零 `plugin-fs` 调用，移除不影响；M0-4 做全量导出回归 | M0/M2 |
+| 对话渲染 XSS | 模型输出注入到 WebView | MVP 纯文本流式，`message_end` 后可选 Markdown 且 `html:false`；禁止用 `dangerouslySetInnerHTML` 接原始模型文本 | M2/M6 |
 | 新增 `conversations/messages/settings` 表偏离设计文档 | 基线不一致 | 按变更规则回写设计文档第 4 章并升版本（M1 不变 schema 时为 v3；若 M1 引入触发器则 M2 顺延 v4） | M2 |
 | 版本历史无限增长 | 存储膨胀 | M5-4 保留策略：head + 手工 + 最近 N 个自动版本 | M5 |
 | 单 `Mutex<VirtualFs>` 串行化 | 高并发工具调用排队 | 工具调用短事务；流式期间不持锁；M1/M4 性能实测 | M1/M4 |
@@ -328,6 +344,8 @@
 | D5 | sqlcipher 是否进 v1 | 建议先做 feature 开关，不阻塞首发 | M5-5 前 |
 | D6 | `path_acl` 是否 v1 强制 | 建议 v1 仅预留，技能/扩展需要时再启用 | M6 前 |
 | D7 | Agent MVP 的检索接受标准 | 接受 LIKE 回退 `<500ms`，M1 再提升到 `<200ms` | M2-3 前 |
+| D8 | Agent 流式传输实现 | 自研 `streamFn` + `invoke` 桥接，禁用内置 `streamProxy` | M2-1 前 |
+| D9 | 对话渲染策略 | MVP 纯文本流式，`message_end` 后可选 Markdown（`html:false`） | M2-8 前 |
 
 ---
 
@@ -341,4 +359,4 @@
 
 ---
 
-— LifeOS · LIF-2026-PLAN-001 v1.1.0 · Agent 优先执行基线 —
+— LifeOS · LIF-2026-PLAN-001 v1.2.0 · Agent 优先执行基线 —

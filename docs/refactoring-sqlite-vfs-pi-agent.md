@@ -60,6 +60,7 @@
 | 工具调用可视化 | 显示"正在写笔记…""正在搜索…"等状态 |
 | 会话管理 | 新建/切换/删除对话，每个会话独立上下文 |
 | 会话持久化 | 对话历史存本地 SQLite，重启不丢失 |
+| 渲染策略 | pi-agent 只发事件、不做渲染；前端流式纯文本渲染，结束后可选 Markdown；工具结果只按纯文本展示 |
 
 ### 3.2 工具集（5 个）
 
@@ -99,7 +100,7 @@
 | 密钥管理 | 存系统 Keystore，不进 WebView |
 | 模型切换 | 用户可在设置中切换模型 |
 | 离线检测 | 无网络时明确提示，不崩溃 |
-| 流式传输 | SSE 逐 chunk 转发，延迟 < 200ms |
+| 流式传输 | Rust 发起 SSE 逐 chunk 转发，延迟 < 200ms；WebView 不直连厂商 API |
 
 ### 3.6 数据管理
 
@@ -116,7 +117,7 @@
 
 | 类别 | 要求 |
 |---|---|
-| **安全** | ① 模型只能调 5 个工具，无 bash/无 shell/无网络访问 ② 路径白名单锁死在 `/life/` ③ LLM 密钥不进 JS 层 ④ CapGate 每个操作鉴权 |
+| **安全** | ① 模型只能调 5 个工具，无 bash/无 shell/无网络访问 ② 路径白名单锁死在 `/life/` ③ LLM 密钥不进 JS 层 ④ CapGate 每个操作鉴权 ⑤ capability 不授予 `fs:default`，导出写盘只走 Rust 命令 |
 | **性能** | ① App 启动 < 2s ② 工具调用返回 < 100ms（本地操作） ③ LLM 首 token < 1.5s（取决于网络） ④ 全文搜索 < 500ms（1000 文件内） |
 | **兼容性** | Android 10+，ARM64；后续可扩展 iOS |
 | **存储** | 初始安装 < 50MB，数据库按需增长 |
@@ -136,10 +137,10 @@
 │  ├─ SkillPanel (已加载技能列表)                                      │
 │  └─ SettingsView (模型选择/密钥配置/导出)                             │
 │                                                                     │
-│  Agent Layer (pi-agent-core, 浏览器打包)                             │
+│  Agent Layer (pi-agent-core, Vite 打包进 WebView)                   │
 │  ├─ Agent 实例 (system prompt + 5 tools + skills)                    │
-│  ├─ streamFn → streamProxy → invoke                                 │
-│  └─ 事件订阅 → UI 更新                                              │
+│  ├─ 自研 streamFn → invoke('agent_stream') → Rust SSE 转发           │
+│  └─ 事件订阅 → UI 更新（pi-agent 无 UI、无渲染）                      │
 ├─ IPC (Tauri invoke / listen) ───────────────────────────────────────┤
 │  Rust Backend (lib.rs, 主进程)                                      │
 │  ├─ LLM Proxy (reqwest SSE → Keystore 密钥 → 流式转发)               │
@@ -157,7 +158,7 @@
 | 层 | 技术 |
 |---|---|
 | UI 框架 | React / Vue + Vite |
-| Agent 运行时 | `@earendil-works/pi-agent-core`（纯前端打包） |
+| Agent 运行时 | `@earendil-works/pi-agent-core`（纯前端打包，无 UI/无 Markdown 渲染；不使用内置 `streamProxy`） |
 | IPC | `@tauri-apps/api/core` invoke |
 | 移动框架 | Tauri 2 (Android) |
 | 语言 | Rust |
@@ -165,6 +166,8 @@
 | HTTP | reqwest (Rust, SSE 支持) |
 | 密钥 | `keystore` (Android Keystore via Tauri plugin) |
 | 打包 | APK (ARM64) |
+
+> 打包边界：Agent 只依赖 `pi-agent-core` 根入口（实测 193KB min / 52KB gzip）；禁止 import `providers/all`（1.94MB min / 310KB gzip，且会引入 AWS/OpenAI/Anthropic SDK）。厂商 SDK 与网络请求全部留在 Rust。
 
 ---
 
@@ -363,6 +366,9 @@ CREATE TABLE messages (
 | SQLite 损坏 | WAL 模式 + 定期备份 + 启动时 integrity_check |
 | Tauri Android 兼容性问题 | 提前验证核心 API（invoke/FS/keystore）可用性 |
 | 模型切换导致工具调用格式变化 | pi-agent-core 统一 tool calling 协议，适配层在 Rust |
+| 内置 `streamProxy` 直连 HTTP 代理 | 自研 `streamFn` 经 `invoke` 桥接；内置实现仅作事件解析参考，不引入 fetch/token |
+| 误打包 provider SDK | 只 import 根入口；CI 检查产物无 `aws-sdk/bedrock/openai` 标记 |
+| 对话渲染模型输出导致 XSS | MVP 纯文本流式；Markdown 渲染保持 `html:false`；工具结果纯文本 |
 
 ---
 
@@ -370,7 +376,7 @@ CREATE TABLE messages (
 
 - ❌ 不执行任何 shell 命令
 - ❌ 不访问真实文件系统（只走虚拟 FS）
-- ❌ 不上网（除 LLM API）
+- ❌ 不上网（除 LLM API）；WebView 不直连厂商 API，唯一出口是 Rust 代理
 - ❌ 不做 notebook
 - ❌ 不做 task（后台任务）
 - ❌ 不做 web search / webfetch
