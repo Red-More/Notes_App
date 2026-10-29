@@ -18,19 +18,13 @@ pub fn version_list(
 }
 
 #[tauri::command]
-pub fn version_create(
-    state: State<'_, VfsState>,
-    doc_id: i64,
-) -> Result<DocVersion, ToolError> {
+pub fn version_create(state: State<'_, VfsState>, doc_id: i64) -> Result<DocVersion, ToolError> {
     let mut vfs = state.0.lock().unwrap();
     versions::create(&mut vfs, doc_id)
 }
 
 #[tauri::command]
-pub fn version_restore(
-    state: State<'_, VfsState>,
-    version_id: i64,
-) -> Result<Doc, ToolError> {
+pub fn version_restore(state: State<'_, VfsState>, version_id: i64) -> Result<Doc, ToolError> {
     let mut vfs = state.0.lock().unwrap();
     versions::restore(&mut vfs, version_id)
 }

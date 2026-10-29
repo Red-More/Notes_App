@@ -230,10 +230,7 @@ pub(super) fn row_to_doc(r: &rusqlite::Row<'_>) -> rusqlite::Result<DocRow> {
 }
 
 /// 把 DocRow 组装成前端 DTO。
-pub(super) fn doc_from_row(
-    row: DocRow,
-    folders: &HashMap<String, (i64, String)>,
-) -> Doc {
+pub(super) fn doc_from_row(row: DocRow, folders: &HashMap<String, (i64, String)>) -> Doc {
     let parts = meta::parse_document(&row.content);
     let kind = row
         .meta_kind
@@ -287,7 +284,9 @@ pub(super) fn basename(path: &str) -> &str {
 }
 
 pub(super) fn parent_dir(path: &str) -> &str {
-    path.rsplit_once('/').map(|(parent, _)| parent).unwrap_or(path)
+    path.rsplit_once('/')
+        .map(|(parent, _)| parent)
+        .unwrap_or(path)
 }
 
 /// 读取字段的字符串值（数组会按逗号拼接）。

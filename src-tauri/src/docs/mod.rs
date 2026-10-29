@@ -23,7 +23,12 @@ use serde_json::Value;
 
 use crate::db::schema::NOTES_ROOT;
 use crate::vfs::cap_gate;
-use crate::vfs::{meta, types::WriteRequest, VirtualFs, error::ToolError};
+use crate::vfs::{
+    error::ToolError,
+    meta,
+    types::{WriteRequest, WriteSource},
+    VirtualFs,
+};
 
 use types::{Doc, DocFields, ListQuery};
 use util::{
@@ -150,7 +155,11 @@ pub fn create(
             if date.is_empty() {
                 safe_segment(title, "event")
             } else {
-                format!("{}-{}", safe_segment(&date, "undated"), safe_segment(title, "event"))
+                format!(
+                    "{}-{}",
+                    safe_segment(&date, "undated"),
+                    safe_segment(title, "event")
+                )
             }
         }
         _ => safe_segment(title, kind),
@@ -175,6 +184,7 @@ pub fn create(
         content: markdown,
         create_parents: Some(true),
         auto_frontmatter: Some(false),
+        source: WriteSource::User,
     })?;
 
     let conn = vfs.conn();
@@ -350,10 +360,8 @@ pub fn purge_many(vfs: &mut VirtualFs, ids: &[i64]) -> Result<(), ToolError> {
 
 /// 清空回收站。
 pub fn empty_trash(vfs: &mut VirtualFs) -> Result<(), ToolError> {
-    vfs.conn_mut().execute(
-        "DELETE FROM inodes WHERE kind = 'file' AND deleted = 1",
-        [],
-    )?;
+    vfs.conn_mut()
+        .execute("DELETE FROM inodes WHERE kind = 'file' AND deleted = 1", [])?;
     Ok(())
 }
 

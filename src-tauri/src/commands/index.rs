@@ -17,11 +17,5 @@ pub fn index_query(
     limit: Option<usize>,
 ) -> Result<Vec<DocRef>, ToolError> {
     let vfs = state.0.lock().unwrap();
-    index::query(
-        &vfs,
-        &dimension,
-        &value,
-        kind.as_deref(),
-        limit,
-    )
+    index::query(&vfs, &dimension, &value, kind.as_deref(), limit)
 }

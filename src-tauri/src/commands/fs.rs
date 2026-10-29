@@ -45,6 +45,7 @@ pub fn fs_write(
         content,
         create_parents,
         auto_frontmatter,
+        source: WriteSource::Agent,
     })
 }
 
@@ -65,6 +66,7 @@ pub fn fs_edit(
         new_string,
         replace_all,
         expect_rev,
+        source: WriteSource::Agent,
     })
 }
 

@@ -116,9 +116,7 @@ CREATE INDEX IF NOT EXISTS idx_acl_prefix ON path_acl(path_prefix);
 
 /// 迁移用的列探测：表/列名均为本模块常量，格式化进 SQL 安全。
 fn table_has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
-    let sql = format!(
-        "SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{column}'"
-    );
+    let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{column}'");
     let n: i64 = conn.query_row(&sql, [], |r| r.get(0))?;
     Ok(n > 0)
 }

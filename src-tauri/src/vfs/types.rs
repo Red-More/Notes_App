@@ -28,9 +28,15 @@ pub struct DirEntry {
 
 /// read 的响应：目录与文件是两种形状，用 `kind` 区分。
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ReadResult {
-    Dir { entries: Vec<DirEntry> },
+    Dir {
+        entries: Vec<DirEntry>,
+    },
     File {
         path: String,
         rev: i64,
@@ -52,6 +58,24 @@ pub struct MetaSnapshot {
     pub extra: Option<String>,
 }
 
+/// Write origin: `fs_*` commands always use Agent, `doc_*` commands always use
+/// User. Automatic writes only record `blobs.source`; they never create a
+/// manual version snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteSource {
+    User,
+    Agent,
+}
+
+impl WriteSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Agent => "agent",
+        }
+    }
+}
+
 /// write 的入参。
 #[derive(Debug, Clone)]
 pub struct WriteRequest {
@@ -59,6 +83,7 @@ pub struct WriteRequest {
     pub content: String,
     pub create_parents: Option<bool>,
     pub auto_frontmatter: Option<bool>,
+    pub source: WriteSource,
 }
 
 /// write 的回执。
@@ -78,6 +103,7 @@ pub struct EditRequest {
     pub new_string: String,
     pub replace_all: Option<bool>,
     pub expect_rev: Option<i64>,
+    pub source: WriteSource,
 }
 
 /// edit 的回执。

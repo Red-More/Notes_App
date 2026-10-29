@@ -131,6 +131,10 @@ fn safe_file_name(title: &str) -> String {
         })
         .collect();
     let trimmed = cleaned.trim();
-    let base = if trimmed.is_empty() { "未命名" } else { trimmed };
+    let base = if trimmed.is_empty() {
+        "未命名"
+    } else {
+        trimmed
+    };
     base.chars().take(60).collect()
 }

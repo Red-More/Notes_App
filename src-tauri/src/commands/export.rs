@@ -22,9 +22,12 @@ fn write_bytes<R: Runtime>(
     options.read(false).write(true).create(true).truncate(true);
     // FilePath 的解析错误类型是 Infallible，不存在失败分支。
     let path = FilePath::from_str(dest_path).unwrap();
-    let mut file = app.fs().open(path, options).map_err(|e| ToolError::Storage {
-        message: format!("无法创建导出文件 {dest_path}: {e}"),
-    })?;
+    let mut file = app
+        .fs()
+        .open(path, options)
+        .map_err(|e| ToolError::Storage {
+            message: format!("无法创建导出文件 {dest_path}: {e}"),
+        })?;
     file.write_all(bytes).map_err(|e| ToolError::Storage {
         message: format!("无法写入导出文件 {dest_path}: {e}"),
     })

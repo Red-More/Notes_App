@@ -7,8 +7,8 @@
 
 use rusqlite::{params, OptionalExtension};
 
-use crate::vfs::{index, meta, VirtualFs};
 use crate::vfs::error::ToolError;
+use crate::vfs::{index, meta, VirtualFs};
 
 use super::types::DocVersion;
 use super::util::{basename, fetch_row, now};
@@ -182,11 +182,17 @@ pub fn delete(vfs: &mut VirtualFs, version_id: i64) -> Result<(), ToolError> {
     if rev == head {
         // 当前 head 的 blob 必须保留（文档内容仍指向它），只移除版本台账行，
         // 让 UI 不再展示这个手工快照。
-        tx.execute("DELETE FROM version_meta WHERE id = ?1", params![version_id])?;
+        tx.execute(
+            "DELETE FROM version_meta WHERE id = ?1",
+            params![version_id],
+        )?;
         tx.commit()?;
         return Ok(());
     }
-    tx.execute("DELETE FROM version_meta WHERE id = ?1", params![version_id])?;
+    tx.execute(
+        "DELETE FROM version_meta WHERE id = ?1",
+        params![version_id],
+    )?;
     tx.execute(
         "DELETE FROM blobs WHERE inode = ?1 AND rev = ?2",
         params![doc_id, rev],
@@ -195,6 +201,7 @@ pub fn delete(vfs: &mut VirtualFs, version_id: i64) -> Result<(), ToolError> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_version(
     doc_id: i64,
     id: i64,

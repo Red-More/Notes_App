@@ -41,11 +41,7 @@ pub fn parse_document(content: &str) -> DocumentParts {
     let Some(first) = lines.next() else {
         return parts;
     };
-    if first
-        .trim_end_matches(|c: char| c == '\r' || c == '\n')
-        .trim()
-        != "---"
-    {
+    if first.trim_end_matches(['\r', '\n']).trim() != "---" {
         return parts;
     }
 
@@ -53,7 +49,7 @@ pub fn parse_document(content: &str) -> DocumentParts {
     let mut closed = false;
     let mut raw: Vec<&str> = Vec::new();
     for line in lines {
-        let text = line.trim_end_matches(|c: char| c == '\r' || c == '\n');
+        let text = line.trim_end_matches(['\r', '\n']);
         offset += line.len();
         if text.trim() == "---" {
             closed = true;
@@ -124,10 +120,7 @@ pub fn compose(
         if value.is_null() || !is_safe_key(key) {
             continue;
         }
-        if matches!(
-            key.as_str(),
-            "kind" | "title" | "created_at" | "updated_at"
-        ) {
+        if matches!(key.as_str(), "kind" | "title" | "created_at" | "updated_at") {
             continue;
         }
         out.push_str(&format!("{key}: {}\n", yaml_value(value)));
@@ -173,8 +166,7 @@ pub fn upsert(conn: &Connection, inode: i64, path: &str, content: &str) -> rusql
         .clone()
         .unwrap_or_else(|| infer_title(path, &parts.body));
     let status = status_from_fields(&parts.fields);
-    let due = field_string(&parts.fields, "dueDate")
-        .or_else(|| field_string(&parts.fields, "due"));
+    let due = field_string(&parts.fields, "dueDate").or_else(|| field_string(&parts.fields, "due"));
     let extra = serde_json::to_string(&parts.fields).unwrap_or_else(|_| "{}".to_string());
 
     conn.execute(
@@ -251,7 +243,10 @@ fn status_from_fields(fields: &BTreeMap<String, Value>) -> Option<String> {
     if let Some(status) = field_string(fields, "status") {
         return Some(status);
     }
-    match fields.get("completed").or_else(|| fields.get("isCompleted")) {
+    match fields
+        .get("completed")
+        .or_else(|| fields.get("isCompleted"))
+    {
         Some(Value::Bool(true)) => Some("done".to_string()),
         Some(Value::Bool(false)) => Some("open".to_string()),
         Some(Value::Number(n)) => {

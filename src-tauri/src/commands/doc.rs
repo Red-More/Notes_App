@@ -2,12 +2,16 @@
 
 use tauri::State;
 
-use crate::docs::{self, types::{Doc, DocFields, ListQuery}};
+use crate::docs::{
+    self,
+    types::{Doc, DocFields, ListQuery},
+};
 use crate::vfs::error::ToolError;
 use crate::vfs::VfsState;
 
 /// 通用列表：kind / folder / 搜索 / 排序 / 回收站 / 标签 / 月份过滤。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn doc_list(
     state: State<'_, VfsState>,
     kind: Option<String>,

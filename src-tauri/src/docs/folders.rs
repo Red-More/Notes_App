@@ -6,8 +6,8 @@
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::db::schema::{ensure_notes_root, NOTES_ROOT};
-use crate::vfs::{cap_gate, VirtualFs};
 use crate::vfs::error::ToolError;
+use crate::vfs::{cap_gate, VirtualFs};
 
 use super::types::{Folder, FolderStats};
 use super::util::{basename, now, safe_segment, unique_dir_path, unique_file_path};
@@ -125,10 +125,9 @@ pub fn rename_default(vfs: &mut VirtualFs, name: &str) -> Result<(), ToolError> 
     let name = validate_name(name)?;
     ensure_notes_root(vfs.conn())?;
     let conn = vfs.conn();
-    let id = folder_id_by_path(conn, NOTES_ROOT)?
-        .ok_or_else(|| ToolError::NotFound {
-            path: NOTES_ROOT.to_string(),
-        })?;
+    let id = folder_id_by_path(conn, NOTES_ROOT)?.ok_or_else(|| ToolError::NotFound {
+        path: NOTES_ROOT.to_string(),
+    })?;
     upsert_title(conn, id, &name)?;
     Ok(())
 }
@@ -182,7 +181,10 @@ pub fn delete(vfs: &mut VirtualFs, id: i64) -> Result<(), ToolError> {
             params![new_path, file],
         )?;
     }
-    tx.execute("DELETE FROM inodes WHERE inode = ?1 AND kind = 'directory'", params![id])?;
+    tx.execute(
+        "DELETE FROM inodes WHERE inode = ?1 AND kind = 'directory'",
+        params![id],
+    )?;
     tx.commit()?;
     Ok(())
 }
@@ -225,7 +227,11 @@ fn folder_title(conn: &Connection, path: &str) -> Result<Option<String>, ToolErr
         .flatten())
 }
 
-fn folder_name_exists(conn: &Connection, name: &str, exclude_id: Option<i64>) -> Result<bool, ToolError> {
+fn folder_name_exists(
+    conn: &Connection,
+    name: &str,
+    exclude_id: Option<i64>,
+) -> Result<bool, ToolError> {
     if let Some(default_name) = folder_title(conn, NOTES_ROOT)? {
         if default_name == name {
             return Ok(true);

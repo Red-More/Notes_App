@@ -37,7 +37,9 @@ pub fn init(app: &tauri::AppHandle) -> Result<Connection, Box<dyn std::error::Er
     match wal::checkpoint(&conn) {
         Ok(report) => log::info!(
             "life.db wal checkpoint: frames={}, checkpointed={}, busy={}",
-            report.log_frames, report.checkpointed, report.busy
+            report.log_frames,
+            report.checkpointed,
+            report.busy
         ),
         Err(e) => log::warn!("life.db initial wal checkpoint failed: {e}"),
     }

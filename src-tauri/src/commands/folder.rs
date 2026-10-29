@@ -20,20 +20,13 @@ pub fn folder_create(state: State<'_, VfsState>, name: String) -> Result<Folder,
 }
 
 #[tauri::command]
-pub fn folder_rename(
-    state: State<'_, VfsState>,
-    id: i64,
-    name: String,
-) -> Result<(), ToolError> {
+pub fn folder_rename(state: State<'_, VfsState>, id: i64, name: String) -> Result<(), ToolError> {
     let mut vfs = state.0.lock().unwrap();
     folders::rename(&mut vfs, id, &name)
 }
 
 #[tauri::command]
-pub fn folder_rename_default(
-    state: State<'_, VfsState>,
-    name: String,
-) -> Result<(), ToolError> {
+pub fn folder_rename_default(state: State<'_, VfsState>, name: String) -> Result<(), ToolError> {
     let mut vfs = state.0.lock().unwrap();
     folders::rename_default(&mut vfs, &name)
 }

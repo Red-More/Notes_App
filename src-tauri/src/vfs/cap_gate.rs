@@ -122,9 +122,7 @@ pub fn validate_glob_pattern(pattern: &str) -> Result<String, ToolError> {
         .chars()
         .any(|c| c == '\0' || c == '\\' || c.is_control())
     {
-        return Err(ToolError::invalid(
-            "glob pattern 不能包含反斜杠或控制字符",
-        ));
+        return Err(ToolError::invalid("glob pattern 不能包含反斜杠或控制字符"));
     }
     if pattern.split('/').any(|segment| segment == "..") {
         return Err(ToolError::PathEscape {

@@ -36,7 +36,7 @@ jobs:
         run: pnpm build
 
   backend:
-    name: Backend (cargo test)
+    name: Backend (fmt / clippy / check / test)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -58,6 +58,22 @@ jobs:
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
-      - name: Run backend tests
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Check formatting
+        run: cd src-tauri && cargo fmt --check
+
+      - name: Clippy
+        run: cd src-tauri && cargo clippy --all-targets -- -D warnings
+
+      - name: Check
+        run: cd src-tauri && cargo check --all-targets
+
+      - name: Test
         run: cd src-tauri && cargo test

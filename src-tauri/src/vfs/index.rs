@@ -32,10 +32,7 @@ pub fn refresh(conn: &Connection, inode: i64, path: &str, content: &str) -> rusq
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| meta::infer_kind(path).to_string());
 
-    conn.execute(
-        "DELETE FROM index_entries WHERE inode = ?1",
-        params![inode],
-    )?;
+    conn.execute("DELETE FROM index_entries WHERE inode = ?1", params![inode])?;
 
     insert(conn, inode, DIM_TYPE, &kind)?;
 
@@ -88,7 +85,7 @@ fn insert(conn: &Connection, inode: i64, dimension: &str, value: &str) -> rusqli
 
 fn split_multi(value: &str) -> Vec<String> {
     value
-        .split(|c: char| c == ',' || c == '，' || c == '、')
+        .split([',', '，', '、'])
         .map(|part| part.trim().to_string())
         .filter(|part| !part.is_empty())
         .collect()

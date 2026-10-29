@@ -1,11 +1,13 @@
 mod commands;
 mod db;
 mod docs;
+#[cfg(test)]
+mod tests;
 mod vfs;
 
 use std::sync::Mutex;
 use tauri::Manager;
-use vfs::{VirtualFs, VfsState};
+use vfs::{VfsState, VirtualFs};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -26,12 +28,10 @@ pub fn run() {
             // every build mode, so diagnostics exist on user machines too.
             let log_dir = app.path().app_log_dir()?;
             std::fs::create_dir_all(&log_dir)?;
-            let log_file = tauri_plugin_log::Target::new(
-                tauri_plugin_log::TargetKind::Folder {
-                    path: log_dir,
-                    file_name: Some("notes".into()),
-                },
-            );
+            let log_file = tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Folder {
+                path: log_dir,
+                file_name: Some("notes".into()),
+            });
             app.handle().plugin(
                 tauri_plugin_log::Builder::new()
                     .targets([

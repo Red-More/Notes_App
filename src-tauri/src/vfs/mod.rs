@@ -187,12 +187,12 @@ impl VirtualFs {
         let inode = tx.last_insert_rowid();
         tx.execute(
             "INSERT INTO blobs (inode, rev, content, source, created_at)
-             VALUES (?1, 1, ?2, 'user', ?3)",
-            params![inode, content, now_str],
+             VALUES (?1, 1, ?2, ?3, ?4)",
+            params![inode, content, req.source.as_str(), now_str],
         )?;
         meta::upsert(&tx, inode, &path, &content)?;
         index::refresh(&tx, inode, &path, &content)?;
-        record_version(&tx, inode, 1, "user", &now_str)?;
+        record_version(&tx, inode, 1, &now_str)?;
         tx.commit()?;
 
         Ok(WriteReceipt {
@@ -229,10 +229,7 @@ impl VirtualFs {
         }
         if let Some(expect) = req.expect_rev {
             if expect != current {
-                return Err(ToolError::Conflict {
-                    current,
-                    expect,
-                });
+                return Err(ToolError::Conflict { current, expect });
             }
         }
 
@@ -270,8 +267,8 @@ impl VirtualFs {
         let now_str = now(&tx)?;
         tx.execute(
             "INSERT INTO blobs (inode, rev, content, source, created_at)
-             VALUES (?1, ?2, ?3, 'agent', ?4)",
-            params![inode, next, replaced, now_str],
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![inode, next, replaced, req.source.as_str(), now_str],
         )?;
         tx.execute(
             "UPDATE inodes SET head_rev = ?1, size = ?2, mtime = ?3 WHERE inode = ?4",
@@ -279,7 +276,7 @@ impl VirtualFs {
         )?;
         meta::upsert(&tx, inode, &path, &replaced)?;
         index::refresh(&tx, inode, &path, &replaced)?;
-        record_version(&tx, inode, next, "agent", &now_str)?;
+        record_version(&tx, inode, next, &now_str)?;
         tx.commit()?;
 
         Ok(EditReceipt {
@@ -456,20 +453,20 @@ impl VirtualFs {
     }
 }
 
-/// 记录版本台账，让 UI 能用全局 version_id 定位 (inode, rev)。
+/// Track a revision in `version_meta` so the UI can address (inode, rev).
+/// Automatic writes are always `is_manual=0`; only an explicit
+/// `version_create` snapshot sets `is_manual=1`.
 fn record_version(
     conn: &Connection,
     inode: i64,
     rev: i64,
-    source: &str,
     created_at: &str,
 ) -> rusqlite::Result<()> {
-    let manual = if source == "user" { 1 } else { 0 };
     conn.execute(
         "INSERT OR IGNORE INTO version_meta
              (inode, rev, label, label_description, is_manual, created_at)
-         VALUES (?1, ?2, NULL, NULL, ?3, ?4)",
-        params![inode, rev, manual, created_at],
+         VALUES (?1, ?2, NULL, NULL, 0, ?3)",
+        params![inode, rev, created_at],
     )?;
     Ok(())
 }
