@@ -1,5 +1,8 @@
 import { invoke } from '@tauri-apps/api/core'
 import type {
+  AgentSettings,
+  ChatConversation,
+  ChatMessageRecord,
   Contact,
   Doc,
   DocFields,
@@ -7,6 +10,7 @@ import type {
   DocVersion,
   Folder,
   FolderStats,
+  NewChatMessage,
   Note,
   NoteVersion,
   Schedule,
@@ -453,4 +457,26 @@ export const api = {
     await docApi.delete([id])
     await docApi.purge([id])
   },
+}
+
+/**
+ * Agent 会话与配置 API。
+ * 密钥只经 `agent_key_set` 一次性提交到 Rust，前端不持久化、不回读内容。
+ */
+export const chatApi = {
+  list: () => invoke<ChatConversation[]>('chat_list'),
+  create: (params: { title?: string; provider?: string; model?: string }) =>
+    invoke<ChatConversation>('chat_create', params),
+  rename: (params: { id: number; title: string }) => invoke<void>('chat_rename', params),
+  remove: (id: number) => invoke<void>('chat_delete', { id }),
+  messages: (conversationId: number) =>
+    invoke<ChatMessageRecord[]>('chat_messages', { conversationId }),
+  append: (params: { conversationId: number; messages: NewChatMessage[] }) =>
+    invoke<ChatMessageRecord[]>('chat_append', params),
+  settings: () => invoke<AgentSettings>('agent_settings'),
+  setSettings: (params: { provider: string; model: string }) =>
+    invoke<void>('agent_settings_set', params),
+  setKey: (params: { provider: string; key: string }) => invoke<void>('agent_key_set', params),
+  deleteKey: (provider: string) => invoke<void>('agent_key_delete', { provider }),
+  cancel: (requestId: string) => invoke<void>('agent_cancel', { requestId }),
 }

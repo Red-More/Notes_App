@@ -6,12 +6,13 @@
 //!
 //! v1：inodes / blobs / meta / fts_docs + 默认目录。
 //! v2：软删时间、置顶位、版本台账、交叉索引、路径 ACL 预留表。
+//! v3：Agent 会话表（conversations / messages）与非密钥设置表（settings）。
 //! FTS5 触发器与索引维护仍留到 P2，grep 暂时走 LIKE 回退。
 
 use rusqlite::{params, Connection};
 
 /// 当前 life.db schema 版本。
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// 虚拟文件系统的根路径，与 `vfs::cap_gate::ROOT` 保持一致。
 const ROOT: &str = "/life";
@@ -114,6 +115,41 @@ CREATE TABLE IF NOT EXISTS path_acl (
 CREATE INDEX IF NOT EXISTS idx_acl_prefix ON path_acl(path_prefix);
 ";
 
+const V3_TABLES: &str = "
+-- Agent 会话：只存标题与所用模型；消息单独一张表。
+CREATE TABLE IF NOT EXISTS conversations (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    title      TEXT NOT NULL DEFAULT '',
+    provider   TEXT NOT NULL DEFAULT '',
+    model      TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
+
+-- 消息：role 为 user | assistant | tool；assistant 的工具调用以 JSON 存 tool_calls。
+CREATE TABLE IF NOT EXISTS messages (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER NOT NULL,
+    role            TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool')),
+    content         TEXT NOT NULL DEFAULT '',
+    tool_calls      TEXT,
+    tool_call_id    TEXT,
+    tool_name       TEXT,
+    is_error        INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, id);
+
+-- 设置：只存非敏感配置（provider/model/偏好）；API Key 走 Rust 私有文件，不入库。
+CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+";
+
 /// 迁移用的列探测：表/列名均为本模块常量，格式化进 SQL 安全。
 fn table_has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
     let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{column}'");
@@ -171,6 +207,14 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
                           WHERE v2.inode = version_meta.inode)",
             [],
         )?;
+        tx.pragma_update(None, "user_version", 2)?;
+        tx.commit()?;
+        version = 2;
+    }
+
+    if version < 3 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V3_TABLES)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         version = SCHEMA_VERSION;

@@ -1,3 +1,4 @@
+mod agent;
 mod commands;
 mod db;
 mod docs;
@@ -24,6 +25,9 @@ pub fn run() {
                 eprintln!("life.db index rebuild failed: {e}");
             }
             app.manage(VfsState(Mutex::new(VirtualFs::new(conn))));
+            // Agent 侧状态：HTTP 客户端、私有密钥文件、取消标记。
+            let secret_path = app.path().app_data_dir()?.join("agent-secrets.json");
+            app.manage(agent::AgentState::new(secret_path));
             // Log to the console and a rotating file under the OS log dir in
             // every build mode, so diagnostics exist on user machines too.
             let log_dir = app.path().app_log_dir()?;
@@ -75,6 +79,18 @@ pub fn run() {
             commands::export::export_docs,
             commands::export::export_folder,
             commands::index::index_query,
+            commands::agent::chat_list,
+            commands::agent::chat_create,
+            commands::agent::chat_rename,
+            commands::agent::chat_delete,
+            commands::agent::chat_messages,
+            commands::agent::chat_append,
+            commands::agent::agent_settings,
+            commands::agent::agent_settings_set,
+            commands::agent::agent_key_set,
+            commands::agent::agent_key_delete,
+            commands::agent::agent_stream,
+            commands::agent::agent_cancel,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

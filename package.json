@@ -22,6 +22,8 @@
     "@codemirror/search": "^6.7.2",
     "@codemirror/state": "^6.7.6",
     "@codemirror/view": "^6.43.15",
+    "@earendil-works/pi-agent-core": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0",
     "@lezer/highlight": "^1.2.5",
     "@replit/codemirror-indentation-markers": "^6.5.3",
     "@tauri-apps/api": "^2.12.3",

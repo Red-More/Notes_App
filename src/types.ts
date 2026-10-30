@@ -208,3 +208,54 @@ export interface DocRef {
   title: string
   updatedAt: string
 }
+
+// ---- Agent（chat_* / agent_*） ----
+
+export type ChatRole = 'user' | 'assistant' | 'tool'
+
+/** 一次会话；消息单独存储。 */
+export interface ChatConversation {
+  id: number
+  title: string
+  provider: string
+  model: string
+  createdAt: string
+  updatedAt: string
+  messageCount: number
+}
+
+/** 已落库的一条消息。 */
+export interface ChatMessageRecord {
+  id: number
+  role: ChatRole
+  content: string
+  /** assistant 的工具调用 JSON（字符串）。 */
+  toolCalls: string | null
+  toolCallId: string | null
+  toolName: string | null
+  isError: boolean
+  createdAt: string
+}
+
+/** 追加消息的入参。 */
+export interface NewChatMessage {
+  role: ChatRole
+  content: string
+  toolCalls?: string | null
+  toolCallId?: string | null
+  toolName?: string | null
+  isError?: boolean
+}
+
+export interface AgentKeyStatus {
+  provider: string
+  configured: boolean
+}
+
+/** 设置页可见的 Agent 配置；不含密钥内容。 */
+export interface AgentSettings {
+  provider: string
+  model: string
+  keyConfigured: AgentKeyStatus[]
+  providers: string[]
+}

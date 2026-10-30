@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { ToastHost } from './components/ui'
 import ReminderScheduler from './components/ReminderScheduler'
-import { IconCalendar, IconNote, IconTodo, IconUsers } from './components/Icons'
+import { IconCalendar, IconChat, IconNote, IconTodo, IconUsers } from './components/Icons'
 import { applyTheme, getStoredTheme } from './theme'
 import NoteListPage from './pages/notes/NoteListPage'
 import FolderManagePage from './pages/notes/FolderManagePage'
@@ -12,14 +12,17 @@ import ContactPage from './pages/contacts/ContactPage'
 // The editor carries CodeMirror + the preview renderer; keep them out of the
 // initial list-page bundle and load them when a note is opened.
 const NoteEditorPage = lazy(() => import('./pages/notes/NoteEditorPage'))
+// Agent runtime + chat UI live in their own chunk; list pages stay light.
+const ChatPage = lazy(() => import('./pages/chat/ChatPage'))
 
-type Tab = 'notes' | 'todos' | 'schedules' | 'contacts'
+type Tab = 'chat' | 'notes' | 'todos' | 'schedules' | 'contacts'
 
 type Overlay =
   | { kind: 'editor'; noteId: number | null; folderId: number | null }
   | { kind: 'folders' }
 
 const TABS: Array<{ key: Tab; label: string; icon: typeof IconNote }> = [
+  { key: 'chat', label: '对话', icon: IconChat },
   { key: 'notes', label: '笔记', icon: IconNote },
   { key: 'todos', label: '待办', icon: IconTodo },
   { key: 'schedules', label: '日程', icon: IconCalendar },
@@ -318,22 +321,27 @@ function App() {
         onKeyDown={onPagerKey}
       >
         <div className="pager-track" ref={trackRef}>
+          <section className="pager-page" role="tabpanel" id="panel-chat" aria-label="对话">
+            <Suspense fallback={<div className="page" />}>
+              <ChatPage isActive={index === 0} />
+            </Suspense>
+          </section>
           <section className="pager-page" role="tabpanel" id="panel-notes" aria-label="笔记">
             <NoteListPage
-              isActive={index === 0}
+              isActive={index === 1}
               version={dataVersion}
               onOpenNote={(noteId, folderId) => setOverlay({ kind: 'editor', noteId, folderId })}
               onOpenFolders={() => setOverlay({ kind: 'folders' })}
             />
           </section>
           <section className="pager-page" role="tabpanel" id="panel-todos" aria-label="待办">
-            <TodoPage isActive={index === 1} />
+            <TodoPage isActive={index === 2} />
           </section>
           <section className="pager-page" role="tabpanel" id="panel-schedules" aria-label="日程">
-            <SchedulePage isActive={index === 2} />
+            <SchedulePage isActive={index === 3} />
           </section>
           <section className="pager-page" role="tabpanel" id="panel-contacts" aria-label="人脉">
-            <ContactPage isActive={index === 3} />
+            <ContactPage isActive={index === 4} />
           </section>
         </div>
       </div>

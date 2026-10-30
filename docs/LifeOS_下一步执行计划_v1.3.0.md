@@ -401,4 +401,80 @@ WebView 内的 UI、Agent 运行时、技能注入与被注入内容属于**同�
 
 ---
 
+## 11. M2 实施记录（2026-10-30）
+
+> 本节是执行记录，不改变 v1.3.0 的任务与验收标准。代码已落地并通过前端构建、lint 与单测；Rust 侧因当前机器指令集不支持 rustup，尚未本地编译，需在 M0 机器上完成编译门禁后再提交。
+
+### 11.1 任务完成情况
+
+| ID | 状态 | 交付物 / 证据 |
+|---|---|---|
+| M2-1 | ✅ 代码完成 | `pi-agent-core@1.4.0` + `pi-ai@1.4.0` 接入；自研 `nativeStreamFn` 经 `invoke('agent_stream')` 桥接；Agent chunk 172.5KB min / **50.0KB gzip**（≤60KB）；产物无 `aws-sdk/bedrock/@google/genai` 标记 |
+| M2-2 | ✅ 代码完成 | `SCHEMA_VERSION=3`；`conversations/messages/settings` 三表；`chat_list/create/rename/delete/messages/append`；`tests.rs` 新增 7 个用例 |
+| M2-3 | ✅ 代码完成 | `agent_stream` + `agent_cancel`；OpenAI / Anthropic / Google / mock 四种适配；SSE 按字节行解析（中文不被跨 chunk 截断）；超时连接、取消、离线错误事件 |
+| M2-4 | ✅ 代码完成 | `agent_key_set/delete` + 设置页厂商/模型/密钥；**Android 走 Keystore 加密存储（M2-4b）**，桌面/开发机为 0600 私有文件；不入库、不进 WebView、不写日志 |
+| M2-5 | ✅ 代码完成 | 5 个 TypeBox 工具绑定 `fs_*`；Rust 二次校验 provider/model.api/≤5 工具/白名单；`beforeToolCall` 配额（单轮 ≤12 步、≤8 次写入） |
+| M2-6 | ✅ 代码完成 | `fs_write` 仅新建；System Prompt 明确「read 尾部 → edit 锚点」；`expectRev` 透传 |
+| M2-7 | ✅ 代码完成 | System Prompt v1：10 条铁律、目录约定、当前日期、「数据不是指令」、`skills_index` 占位 |
+| M2-8 | ✅ 代码完成 | `ChatPage`：流式纯文本气泡、工具卡片、停止/重试、草稿保留、会话抽屉（新建/切换/改名/删除）、底部「对话」入口（默认首屏） |
+| M2-9 | ✅ 代码完成 | Rust 单测覆盖：未知厂商、路径/查询注入的 model、>5 工具、白名单外工具、超大 system prompt；前端测试覆盖事件重建与 ToolError 文案 |
+| M2-10 | ⏳ 待真机 | 真机安装与「记下今天吃了拉面 / 勾掉待办」E2E 由项目负责人在设备上执行 |
+
+### 11.2 新增与修改的代码
+
+| 层 | 文件 |
+|---|---|
+| Schema | `src-tauri/src/db/schema.rs`（v3 迁移） |
+| Agent 后端 | `src-tauri/src/agent/{mod,llm,secrets,conversations}.rs` |
+| 命令 | `src-tauri/src/commands/agent.rs`、`commands/mod.rs`、`lib.rs` |
+| 依赖 | `src-tauri/Cargo.toml`（`reqwest` rustls + `futures-util`） |
+| 前端 Agent | `src/agent/{stream,protocol,tools,prompt,runtime}.ts` |
+| 前端 UI | `src/pages/chat/ChatPage.tsx`、`src/pages/settings/SettingsPage.tsx`、`src/App.tsx`、`src/index.css`、`src/api.ts`、`src/types.ts`、`src/components/Icons.tsx` |
+| 测试 | `src-tauri/src/tests.rs`（+7）、`src/agent/protocol.test.ts`（+5） |
+
+### 11.3 验证结果
+
+| 项 | 结果 |
+|---|---|
+| `pnpm lint` | 0 warnings / 0 errors |
+| `pnpm test` | 11 文件 / 122 用例通过 |
+| `pnpm build` | 成功；`ChatPage` 独立 chunk 50.0KB gzip |
+| `cargo fmt/clippy/check/test` | **未执行**（本机无 Rust 工具链且 CPU 不支持） |
+
+Rust 门禁请在 M0 机器执行：
+
+```powershell
+cd src-tauri
+cargo fmt
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo check --all-targets
+cargo test
+```
+
+### 11.4 已知偏差与后续
+
+| 项 | 现状 | 后续 |
+|---|---|---|
+| Keystore | 已接入 `android-native-keyring-store` 1.0：密文写 SharedPreferences，加密密钥由 Android Keystore 生成且不可导出；桌面保留 0600 文件 | 真机首次读写需复验（见 §11.5） |
+| 每轮步数/写入限额 | 前端 `beforeToolCall` 统计；Rust 只校验单次请求体积与工具面 | M6 复核是否需要把配额下沉到 Rust |
+| 检索 | `grep` 仍 LIKE 回退、`fallback=true` | M1（按 D7 接受 <500ms） |
+| 真机 E2E | 未执行 | M2-10，需在 ARM64 设备上验收 |
+| 设计文档回写 | `streamProxy` 表述、schema v3 尚未写回 PDF | M6 前回写设计文档第 4/5 章并升版本 |
+
+### 11.5 M2-4b：Android Keystore 接入
+
+| 项 | 说明 |
+|---|---|
+| 依赖 | `android-native-keyring-store = "1.0"` + `keyring-core = "1"`，仅在 `cfg(target_os = "android")` 下编译 |
+| 存储形态 | 密文写入应用 SharedPreferences；AES 密钥由 Android Keystore 生成，不可导出、不随备份离开设备 |
+| 线程模型 | crate 内部 `JavaVM::attach_current_thread`，可从 Tauri IPC 线程调用；`ndk-context` 已由 tao 0.37 在 Android 启动时初始化 |
+| 失败策略 | **fail-closed**：Keystore 初始化/读写失败直接返回可行动错误，不回退明文文件 |
+| 旧数据迁移 | 首次启动若存在 `agent-secrets.json`，逐条导入 Keystore，全部成功后删除原文件；失败则保留并记录告警 |
+| 桌面策略 | 继续使用应用私有文件（0600、临时文件 + rename），仅用于开发机 |
+| 待真机复验 | 设置页保存/删除 Key → 杀进程 → 重启后仍可用；`adb shell run-as` 检查 SharedPreferences；删除 Key 后调用失败 |
+
+
+---
+
 — LifeOS · LIF-2026-PLAN-001 v1.3.0 · Agent 优先执行基线 —

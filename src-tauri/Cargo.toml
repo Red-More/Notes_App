@@ -6,7 +6,8 @@ authors = ["you"]
 license = ""
 repository = ""
 edition = "2021"
-rust-version = "1.77.2"
+# Android Keystore 依赖（android-native-keyring-store 1.0）要求 rustc ≥ 1.88。
+rust-version = "1.88"
 
 [lib]
 name = "app_lib"
@@ -27,3 +28,12 @@ tauri-plugin-notification = "2.6.0"
 tauri-plugin-opener = "2"
 rusqlite = { version = "0.37", features = ["bundled"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# Agent LLM 代理：唯一网络出口，SSE 流式转发；rustls 便于 Android 交叉编译。
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+futures-util = "0.3"
+
+# M2-4b：Android Keystore。凭据密文写 SharedPreferences，加密密钥由 Keystore 生成且不可导出。
+# 仅 Android 目标编译；其 ndk-context 依赖已由 Tauri 的 tao 运行时初始化。
+[target.'cfg(target_os = "android")'.dependencies]
+android-native-keyring-store = "1.0"
+keyring-core = "1"

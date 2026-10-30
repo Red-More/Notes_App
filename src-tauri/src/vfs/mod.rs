@@ -40,6 +40,8 @@ const MAX_GREP_RESULTS: usize = 200;
 const MAX_CONTEXT_LINES: usize = 3;
 /// 单条 preview 的字符上限。
 const MAX_PREVIEW_CHARS: usize = 240;
+/// `.agents` 只读技能区：模型工具一律不得列出/检索其中的内容（M3 才按需注入）。
+const AGENTS_DIR: &str = "/.agents";
 
 /// VirtualFs 持有唯一数据库连接；所有方法都在这条连接上执行。
 pub struct VirtualFs {
@@ -292,25 +294,37 @@ impl VirtualFs {
         let pattern = cap_gate::validate_glob_pattern(&req.pattern)?;
         let full_pattern = format!("{root}/{pattern}");
         let case_sensitive = req.case_sensitive.unwrap_or(true);
+        // `.agents` 只读区排除：相对 pattern（如 .agents/*.md）一样到不了这里。
+        let agents_pattern = format!("{ROOT}{AGENTS_DIR}/*");
+        let agents_exact = format!("{ROOT}{AGENTS_DIR}");
 
         let sql = if case_sensitive {
-            "SELECT path, kind, mtime, head_rev FROM inodes
-             WHERE deleted = 0 AND path GLOB ?1
-             ORDER BY path ASC LIMIT ?2"
+            format!(
+                "SELECT path, kind, mtime, head_rev FROM inodes
+                 WHERE deleted = 0 AND path GLOB ?1
+                   AND path NOT GLOB ?2 AND path != ?3
+                 ORDER BY path ASC LIMIT ?4"
+            )
         } else {
-            "SELECT path, kind, mtime, head_rev FROM inodes
-             WHERE deleted = 0 AND LOWER(path) GLOB LOWER(?1)
-             ORDER BY path ASC LIMIT ?2"
+            format!(
+                "SELECT path, kind, mtime, head_rev FROM inodes
+                 WHERE deleted = 0 AND LOWER(path) GLOB LOWER(?1)
+                   AND path NOT GLOB ?2 AND path != ?3
+                 ORDER BY path ASC LIMIT ?4"
+            )
         };
-        let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map(params![full_pattern, MAX_GLOB_RESULTS], |r| {
-            Ok(GlobEntry {
-                path: r.get(0)?,
-                kind: r.get(1)?,
-                mtime: r.get(2)?,
-                head_rev: r.get(3)?,
-            })
-        })?;
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            params![full_pattern, agents_pattern, agents_exact, MAX_GLOB_RESULTS],
+            |r| {
+                Ok(GlobEntry {
+                    path: r.get(0)?,
+                    kind: r.get(1)?,
+                    mtime: r.get(2)?,
+                    head_rev: r.get(3)?,
+                })
+            },
+        )?;
         let mut entries = Vec::new();
         for row in rows {
             entries.push(row?);
@@ -332,14 +346,22 @@ impl VirtualFs {
             .clamp(1, MAX_GREP_RESULTS);
         let context = req.context_lines.unwrap_or(0).min(MAX_CONTEXT_LINES);
 
+        // `.agents` 只读区排除：即便调用方省略 path（默认全库检索）也到不了这里。
+        let agents_pattern = format!("{ROOT}{AGENTS_DIR}/*");
+        let agents_exact = format!("{ROOT}{AGENTS_DIR}");
         let mut sql = String::from(
             "SELECT i.path, i.head_rev, b.content
              FROM inodes i
              JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
              WHERE i.deleted = 0 AND i.kind = 'file'
-               AND instr(lower(b.content), lower(?1)) > 0",
+               AND instr(lower(b.content), lower(?1)) > 0
+               AND i.path NOT GLOB ?2 AND i.path != ?3",
         );
-        let mut args: Vec<SqlValue> = vec![SqlValue::Text(pattern.clone())];
+        let mut args: Vec<SqlValue> = vec![
+            SqlValue::Text(pattern.clone()),
+            SqlValue::Text(agents_pattern),
+            SqlValue::Text(agents_exact),
+        ];
 
         if target != ROOT {
             let kind: Option<String> = self
@@ -352,11 +374,11 @@ impl VirtualFs {
                 .optional()?;
             match kind.as_deref() {
                 Some("file") => {
-                    sql.push_str(" AND i.path = ?2");
+                    sql.push_str(" AND i.path = ?4");
                     args.push(SqlValue::Text(target));
                 }
                 Some(_) => {
-                    sql.push_str(" AND i.path LIKE ?2 ESCAPE '\\'");
+                    sql.push_str(" AND i.path LIKE ?4 ESCAPE '\\'");
                     let prefix = format!("{}%", cap_gate::escape_like(&format!("{target}/")));
                     args.push(SqlValue::Text(prefix));
                 }
