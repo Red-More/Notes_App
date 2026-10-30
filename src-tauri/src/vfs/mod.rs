@@ -299,21 +299,17 @@ impl VirtualFs {
         let agents_exact = format!("{ROOT}{AGENTS_DIR}");
 
         let sql = if case_sensitive {
-            format!(
-                "SELECT path, kind, mtime, head_rev FROM inodes
+            "SELECT path, kind, mtime, head_rev FROM inodes
                  WHERE deleted = 0 AND path GLOB ?1
                    AND path NOT GLOB ?2 AND path != ?3
                  ORDER BY path ASC LIMIT ?4"
-            )
         } else {
-            format!(
-                "SELECT path, kind, mtime, head_rev FROM inodes
+            "SELECT path, kind, mtime, head_rev FROM inodes
                  WHERE deleted = 0 AND LOWER(path) GLOB LOWER(?1)
                    AND path NOT GLOB ?2 AND path != ?3
                  ORDER BY path ASC LIMIT ?4"
-            )
         };
-        let mut stmt = self.conn.prepare(&sql)?;
+        let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map(
             params![full_pattern, agents_pattern, agents_exact, MAX_GLOB_RESULTS],
             |r| {

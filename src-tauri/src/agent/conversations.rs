@@ -316,9 +316,8 @@ pub fn settings(conn: &Connection, keys: &[(String, bool)]) -> Result<AgentSetti
         _ => crate::agent::DEFAULT_PROVIDER.to_string(),
     };
     let model = match stored_provider.as_deref() {
-        Some(p) if crate::agent::is_provider(p) => {
-            read_setting(conn, KEY_MODEL)?.unwrap_or_else(|| crate::agent::DEFAULT_MODEL.to_string())
-        }
+        Some(p) if crate::agent::is_provider(p) => read_setting(conn, KEY_MODEL)?
+            .unwrap_or_else(|| crate::agent::DEFAULT_MODEL.to_string()),
         _ => crate::agent::DEFAULT_MODEL.to_string(),
     };
     Ok(AgentSettings {
@@ -331,15 +330,14 @@ pub fn settings(conn: &Connection, keys: &[(String, bool)]) -> Result<AgentSetti
                 configured: *configured,
             })
             .collect(),
-        providers: crate::agent::PROVIDERS.iter().map(|p| p.to_string()).collect(),
+        providers: crate::agent::PROVIDERS
+            .iter()
+            .map(|p| p.to_string())
+            .collect(),
     })
 }
 
-pub fn set_settings(
-    conn: &Connection,
-    provider: &str,
-    model: &str,
-) -> Result<(), ToolError> {
+pub fn set_settings(conn: &Connection, provider: &str, model: &str) -> Result<(), ToolError> {
     if !crate::agent::is_provider(provider) {
         return Err(ToolError::invalid("不支持的厂商"));
     }

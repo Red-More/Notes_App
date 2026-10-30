@@ -37,11 +37,7 @@ pub fn chat_create(
 }
 
 #[tauri::command]
-pub fn chat_rename(
-    state: State<'_, VfsState>,
-    id: i64,
-    title: String,
-) -> Result<(), ToolError> {
+pub fn chat_rename(state: State<'_, VfsState>, id: i64, title: String) -> Result<(), ToolError> {
     let vfs = state.0.lock().unwrap();
     conversations::rename(&vfs, id, title)
 }
@@ -114,10 +110,7 @@ pub fn agent_key_set(
 }
 
 #[tauri::command]
-pub fn agent_key_delete(
-    state: State<'_, AgentState>,
-    provider: String,
-) -> Result<(), ToolError> {
+pub fn agent_key_delete(state: State<'_, AgentState>, provider: String) -> Result<(), ToolError> {
     if !crate::agent::is_provider(&provider) {
         return Err(ToolError::invalid("不支持的厂商"));
     }

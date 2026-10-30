@@ -439,7 +439,9 @@ pub fn validate_request(req: &ProxyRequest) -> Result<(), ToolError> {
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
     {
-        return Err(ToolError::invalid("模型名只能包含字母、数字、点、下划线、短横线"));
+        return Err(ToolError::invalid(
+            "模型名只能包含字母、数字、点、下划线、短横线",
+        ));
     }
     if req.context.messages.len() > MAX_MESSAGES {
         return Err(ToolError::invalid(format!("消息条数超过 {MAX_MESSAGES}")));
@@ -556,7 +558,11 @@ pub async fn run(
         emit_error(
             emit,
             message,
-            if cancel.load(Ordering::SeqCst) { "aborted" } else { "error" },
+            if cancel.load(Ordering::SeqCst) {
+                "aborted"
+            } else {
+                "error"
+            },
         );
     }
     Ok(())
@@ -568,13 +574,11 @@ pub async fn run(
 
 // mock 只在调试构建编译：release 包不包含本地假回复通道。
 #[cfg(debug_assertions)]
-async fn mock_stream(
-    turns: &[Turn],
-    cancel: &AtomicBool,
-    emit: Emit<'_>,
-) -> Result<(), ToolError> {
+async fn mock_stream(turns: &[Turn], cancel: &AtomicBool, emit: Emit<'_>) -> Result<(), ToolError> {
     let index = 0usize;
-    emit(StreamEvent::TextStart { content_index: index });
+    emit(StreamEvent::TextStart {
+        content_index: index,
+    });
     let prompt = turns
         .iter()
         .rev()
@@ -606,7 +610,9 @@ async fn mock_stream(
             delta,
         });
     }
-    emit(StreamEvent::TextEnd { content_index: index });
+    emit(StreamEvent::TextEnd {
+        content_index: index,
+    });
     emit(StreamEvent::Done {
         reason: "stop".to_string(),
         usage: Usage {
@@ -637,7 +643,10 @@ async fn send_json(
     for (name, value) in headers {
         builder = builder.header(*name, value.clone());
     }
-    let resp = builder.send().await.map_err(|e| format!("网络请求失败：{e}"))?;
+    let resp = builder
+        .send()
+        .await
+        .map_err(|e| format!("网络请求失败：{e}"))?;
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
@@ -672,7 +681,7 @@ where
         while let Some(pos) = buffer.iter().position(|b| *b == b'\n') {
             let line: Vec<u8> = buffer.drain(..=pos).collect();
             let line = String::from_utf8_lossy(&line);
-            let line = line.trim_end_matches(|c| c == '\r' || c == '\n');
+            let line = line.trim_end_matches(['\r', '\n']);
             if let Some(data) = line.strip_prefix("data:") {
                 let data = data.trim();
                 if !data.is_empty() {
@@ -937,7 +946,9 @@ async fn openai_stream(
     }
 
     if let Some(index) = text_index {
-        emit(StreamEvent::TextEnd { content_index: index });
+        emit(StreamEvent::TextEnd {
+            content_index: index,
+        });
     }
     for tool in &tool_states {
         emit(StreamEvent::ToolCallEnd {
@@ -1013,7 +1024,10 @@ fn anthropic_body(
 
     let mut body = Map::new();
     body.insert("model".into(), json!(model));
-    body.insert("max_tokens".into(), json!(options.max_tokens.unwrap_or(4096)));
+    body.insert(
+        "max_tokens".into(),
+        json!(options.max_tokens.unwrap_or(4096)),
+    );
     body.insert("stream".into(), json!(true));
     if !system.trim().is_empty() {
         body.insert("system".into(), json!(system));
@@ -1104,7 +1118,9 @@ async fn anthropic_stream(
                 match block.get("type").and_then(Value::as_str).unwrap_or("") {
                     "text" => {
                         text_blocks.push(index);
-                        emit(StreamEvent::TextStart { content_index: index });
+                        emit(StreamEvent::TextStart {
+                            content_index: index,
+                        });
                     }
                     "tool_use" => {
                         let id = block
@@ -1163,7 +1179,9 @@ async fn anthropic_stream(
             "content_block_stop" => {
                 let index = event.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                 if text_blocks.contains(&index) {
-                    emit(StreamEvent::TextEnd { content_index: index });
+                    emit(StreamEvent::TextEnd {
+                        content_index: index,
+                    });
                 }
                 if let Some(tool) = tool_states.iter().find(|t| t.block == index) {
                     let payload =
@@ -1223,12 +1241,7 @@ async fn anthropic_stream(
 // Google Gemini（streamGenerateContent）
 // ---------------------------------------------------------------------------
 
-fn google_body(
-    system: &str,
-    tools: &[ToolSpec],
-    turns: &[Turn],
-    options: &Options,
-) -> Value {
+fn google_body(system: &str, tools: &[ToolSpec], turns: &[Turn], options: &Options) -> Value {
     let mut contents: Vec<Value> = Vec::new();
     for turn in turns {
         match turn.role {
@@ -1302,10 +1315,7 @@ async fn google_stream(
     cancel: &AtomicBool,
     emit: Emit<'_>,
 ) -> Result<(), String> {
-    let url = format!(
-        "{GOOGLE_PREFIX}{}:streamGenerateContent?alt=sse",
-        req.model
-    );
+    let url = format!("{GOOGLE_PREFIX}{}:streamGenerateContent?alt=sse", req.model);
     let body = google_body(req.system, req.tools, req.turns, req.options);
     let headers = [
         ("x-goog-api-key", key.to_string()),
@@ -1323,7 +1333,10 @@ async fn google_stream(
             return;
         };
         if let Some(u) = chunk.get("usageMetadata") {
-            usage.input = u.get("promptTokenCount").and_then(Value::as_i64).unwrap_or(0);
+            usage.input = u
+                .get("promptTokenCount")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
             usage.output = u
                 .get("candidatesTokenCount")
                 .and_then(Value::as_i64)
@@ -1400,7 +1413,9 @@ async fn google_stream(
     }
 
     if let Some(index) = text_index {
-        emit(StreamEvent::TextEnd { content_index: index });
+        emit(StreamEvent::TextEnd {
+            content_index: index,
+        });
     }
     emit(StreamEvent::Done {
         reason: if tool_calls > 0 { "toolUse" } else { "stop" }.to_string(),

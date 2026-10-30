@@ -246,10 +246,12 @@ export default function ChatPage({ isActive }: Props) {
         setItems(recordsToItems(records))
         // 优先用显式覆盖（设置变更新模型）；设置尚未加载时退回会话自身记录的 profile，
         // 不再在前端硬编码 mock —— release 构建里 mock 是不可用的。
+        // 读 ref 而不是 settings state，避免本回调随设置对象变化而重建。
+        const current = settingsRef.current
         const activeProfile =
           override ??
-          (settings
-            ? { provider: settings.provider, model: settings.model }
+          (current
+            ? { provider: current.provider, model: current.model }
             : { provider: conv.provider, model: conv.model })
         const agent = createAgent(activeProfile, toAgentMessages(records, activeProfile))
         unsubscribeRef.current = agent.subscribe((event) => {
@@ -263,7 +265,7 @@ export default function ChatPage({ isActive }: Props) {
         scrollToBottom()
       }
     },
-    [disposeAgent, handleEvent, scrollToBottom, settings],
+    [disposeAgent, handleEvent, scrollToBottom],
   )
 
   const bootstrap = useCallback(async () => {
@@ -301,6 +303,7 @@ export default function ChatPage({ isActive }: Props) {
 
   // 页面激活时刷新配置；模型变化则重建 Agent（历史保持）。
   // 只依赖 isActive：effect 内写回 settings 的新对象不会再触发自身，避免无限 IPC 循环。
+  // openConversation 内部读 settingsRef，本身不随 settings 对象变化，可安全加入依赖。
   useEffect(() => {
     if (!isActive || !bootRef.current) return
     let disposed = false
@@ -326,7 +329,7 @@ export default function ChatPage({ isActive }: Props) {
     return () => {
       disposed = true
     }
-  }, [isActive])
+  }, [isActive, openConversation])
 
   const ensureTitle = useCallback(async (text: string) => {
     const conv = conversationRef.current
@@ -445,7 +448,9 @@ export default function ChatPage({ isActive }: Props) {
   }, [renameId, renameText])
 
   const providerLabel =
-    settings?.provider === 'mock' ? 'mock（未配置真实模型）' : `${settings?.provider ?? ''} · ${settings?.model ?? ''}`
+    settings?.provider === 'mock'
+      ? 'mock（未配置真实模型）'
+      : `${settings?.provider ?? ''} · ${settings?.model ?? ''}`
 
   return (
     <div className="page chat-page">
@@ -453,7 +458,11 @@ export default function ChatPage({ isActive }: Props) {
         title="对话"
         actions={[
           { icon: <IconChat size={22} />, label: '会话列表', onClick: () => setDrawerOpen(true) },
-          { icon: <IconPlus size={22} />, label: '新建对话', onClick: () => void newConversation() },
+          {
+            icon: <IconPlus size={22} />,
+            label: '新建对话',
+            onClick: () => void newConversation(),
+          },
         ]}
       />
 
@@ -474,7 +483,11 @@ export default function ChatPage({ isActive }: Props) {
                 <div className="chat-tool-head">
                   <span className="chat-tool-name">{item.toolName}</span>
                   <span className="chat-tool-state">
-                    {item.status === 'running' ? '执行中…' : item.status === 'error' ? '失败' : '完成'}
+                    {item.status === 'running'
+                      ? '执行中…'
+                      : item.status === 'error'
+                        ? '失败'
+                        : '完成'}
                   </span>
                 </div>
                 {item.args && item.args !== '{}' && (
@@ -530,7 +543,11 @@ export default function ChatPage({ isActive }: Props) {
           title="会话"
           onClose={() => setDrawerOpen(false)}
           footer={
-            <button type="button" className="btn btn-primary" onClick={() => void newConversation()}>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => void newConversation()}
+            >
               新建对话
             </button>
           }

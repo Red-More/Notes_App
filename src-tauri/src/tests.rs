@@ -686,7 +686,10 @@ fn run_trims_long_histories_but_keeps_system_messages() {
         messages.push(serde_json::json!({ "role": "user", "content": format!("m{i}") }));
     }
     let trimmed = llm::trim_messages(&messages);
-    assert!(trimmed.len() <= 200, "history must be capped to the request limit");
+    assert!(
+        trimmed.len() <= 200,
+        "history must be capped to the request limit"
+    );
     assert_eq!(trimmed[0]["role"], "system", "system messages must be kept");
     assert_eq!(trimmed[0]["content"], "base");
     assert_eq!(

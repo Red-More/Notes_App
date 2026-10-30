@@ -131,7 +131,7 @@ export function createAgent(
     // 读并行、写串行：写工具自身声明 executionMode: 'sequential'。
     toolExecution: 'parallel',
     // 配额硬限额：按“最近一条 user 消息之后”统计，避免模型循环调用拖垮设备。
-    beforeToolCall: async ({ toolCall, context }) => {
+    beforeToolCall: async ({ context }) => {
       let steps = 0
       let writes = 0
       for (let i = context.messages.length - 1; i >= 0; i -= 1) {
