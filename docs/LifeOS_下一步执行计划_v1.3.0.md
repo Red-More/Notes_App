@@ -403,14 +403,14 @@ WebView 内的 UI、Agent 运行时、技能注入与被注入内容属于**同�
 
 ## 11. M2 实施记录（2026-10-30）
 
-> 本节是执行记录，不改变 v1.3.0 的任务与验收标准。代码已落地并通过前端构建、lint 与单测；Rust 侧因当前机器指令集不支持 rustup，尚未本地编译，需在 M0 机器上完成编译门禁后再提交。
+> 本节是执行记录，不改变 v1.3.0 的任务与验收标准。代码已落地，并在本机（cargo 1.98.1 / Node 24.19.0）完成前端与 Rust 全部门禁复跑。
 
 ### 11.1 任务完成情况
 
 | ID | 状态 | 交付物 / 证据 |
 |---|---|---|
-| M2-1 | ✅ 代码完成 | `pi-agent-core@1.4.0` + `pi-ai@1.4.0` 接入；自研 `nativeStreamFn` 经 `invoke('agent_stream')` 桥接；Agent chunk 172.5KB min / **50.0KB gzip**（≤60KB）；产物无 `aws-sdk/bedrock/@google/genai` 标记 |
-| M2-2 | ✅ 代码完成 | `SCHEMA_VERSION=3`；`conversations/messages/settings` 三表；`chat_list/create/rename/delete/messages/append`；`tests.rs` 新增 7 个用例 |
+| M2-1 | ✅ 代码完成 | `pi-agent-core@1.4.0` + `pi-ai@1.4.0` 接入；自研 `nativeStreamFn` 经 `invoke('agent_stream')` 桥接；Agent chunk 169.3KB min / **48.2KB gzip**（≤60KB）；产物无 `aws-sdk/bedrock/@google/genai` 标记 |
+| M2-2 | ✅ 代码完成 | `SCHEMA_VERSION=3`；`conversations/messages/settings` 三表；`chat_list/create/rename/delete/messages/append`；`tests.rs` 新增 8 个用例 |
 | M2-3 | ✅ 代码完成 | `agent_stream` + `agent_cancel`；OpenAI / Anthropic / Google / mock 四种适配；SSE 按字节行解析（中文不被跨 chunk 截断）；超时连接、取消、离线错误事件 |
 | M2-4 | ✅ 代码完成 | `agent_key_set/delete` + 设置页厂商/模型/密钥；**Android 走 Keystore 加密存储（M2-4b）**，桌面/开发机为 0600 私有文件；不入库、不进 WebView、不写日志 |
 | M2-5 | ✅ 代码完成 | 5 个 TypeBox 工具绑定 `fs_*`；Rust 二次校验 provider/model.api/≤5 工具/白名单；`beforeToolCall` 配额（单轮 ≤12 步、≤8 次写入） |
@@ -430,22 +430,31 @@ WebView 内的 UI、Agent 运行时、技能注入与被注入内容属于**同�
 | 依赖 | `src-tauri/Cargo.toml`（`reqwest` rustls + `futures-util`） |
 | 前端 Agent | `src/agent/{stream,protocol,tools,prompt,runtime}.ts` |
 | 前端 UI | `src/pages/chat/ChatPage.tsx`、`src/pages/settings/SettingsPage.tsx`、`src/App.tsx`、`src/index.css`、`src/api.ts`、`src/types.ts`、`src/components/Icons.tsx` |
-| 测试 | `src-tauri/src/tests.rs`（+7）、`src/agent/protocol.test.ts`（+5） |
+| 测试 | `src-tauri/src/tests.rs`（+8）、`src/agent/protocol.test.ts`（+5） |
 
 ### 11.3 验证结果
 
 | 项 | 结果 |
 |---|---|
-| `pnpm lint` | 0 warnings / 0 errors |
+| `pnpm lint` | 0 warnings / 0 errors（复验前有 2 条警告，已修复） |
 | `pnpm test` | 11 文件 / 122 用例通过 |
-| `pnpm build` | 成功；`ChatPage` 独立 chunk 50.0KB gzip |
-| `cargo fmt/clippy/check/test` | **未执行**（本机无 Rust 工具链且 CPU 不支持） |
+| `pnpm build` | 成功；`ChatPage` 独立 chunk 48.2KB gzip / 169.3KB min |
+| `cargo fmt --check` | 通过 |
+| `cargo clippy --all-targets -- -D warnings` | 通过（复验前有 3 条 deny 级错误，已修复） |
+| `cargo check --all-targets` | 通过 |
+| `cargo test` | 16 passed（8 个 M0 + 8 个 M2） |
 
-Rust 门禁请在 M0 机器执行：
+复验中修复的问题：
+
+1. `src/agent/runtime.ts`：`beforeToolCall` 解构了未使用的 `toolCall` 参数，改为只取 `context`。
+2. `src/pages/chat/ChatPage.tsx`：激活刷新 effect 缺少 `openConversation` 依赖；改为在 `openConversation` 内读 `settingsRef`，使回调稳定后再加入依赖，避免设置对象变化触发 IPC 循环。
+3. `src-tauri/src/agent/llm.rs`：`trim_end_matches` 手工字符比较触发 `clippy::manual_pattern_char_comparison`，改为 `['\r', '\n']`。
+4. `src-tauri/src/vfs/mod.rs`：`glob` 中两处无参数的 `format!` 触发 `clippy::useless_format`，改为字符串字面量。
+
+Rust 门禁复跑命令（本机 cargo 1.98.1 已验证全绿）：
 
 ```powershell
 cd src-tauri
-cargo fmt
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo check --all-targets
