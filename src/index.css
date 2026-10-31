@@ -3555,3 +3555,17 @@ body.split-resizing {
   border-radius: var(--radius);
   background: var(--surface-2, var(--surface));
 }
+
+.media-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--accent-weak);
+  overflow: hidden;
+}
+
+.media-progress span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}

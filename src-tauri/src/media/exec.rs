@@ -126,7 +126,7 @@ pub async fn run(app: AppHandle, job_id: i64) {
     };
 
     let cancel = app.state::<MediaState>().register_cancel(job_id);
-    let outcome = execute(&app, kind, &entry, &params, &job_params, &key, &cancel).await;
+    let outcome = execute(&app, job_id, kind, &entry, &params, &job_params, &key, &cancel).await;
     app.state::<MediaState>().release(job_id);
     // The cancel command already wrote the terminal state; do not overwrite it.
     if cancel.load(Ordering::SeqCst) {
@@ -180,6 +180,7 @@ pub async fn run(app: AppHandle, job_id: i64) {
 
 async fn execute(
     app: &AppHandle,
+    job_id: i64,
     kind: jobs::JobKind,
     entry: &ModelEntry,
     params: &LlmParams,
@@ -191,7 +192,7 @@ async fn execute(
         jobs::JobKind::Classify => classify(app, entry, params, job, key, cancel).await,
         jobs::JobKind::Tts => tts(app, entry, params, job, key, cancel).await,
         jobs::JobKind::Image => image(app, entry, params, job, key, cancel).await,
-        jobs::JobKind::Video => video(app, entry, params, job, key, cancel).await,
+        jobs::JobKind::Video => video(app, job_id, entry, params, job, key, cancel).await,
         jobs::JobKind::Asr => asr(app, entry, params, job, key, cancel).await,
     }
 }
@@ -463,6 +464,7 @@ fn parse_asr_text(payload: &Value) -> Result<String, String> {
 
 async fn video(
     app: &AppHandle,
+    job_id: i64,
     entry: &ModelEntry,
     params: &LlmParams,
     job: &Value,
@@ -500,6 +502,9 @@ async fn video(
         let status = get_json(app, &poll_url, Some(key)).await?;
         if let Some(message) = video_error(&status) {
             return Err(message);
+        }
+        if let Some(percent) = video_progress(&status) {
+            update_progress(app, job_id, percent);
         }
         let state = video_status(&status);
         if matches!(state.as_str(), "completed" | "succeeded" | "success" | "done") {
@@ -616,6 +621,29 @@ fn video_url(payload: &Value) -> Option<String> {
                 .and_then(Value::as_str)
         })
         .map(str::to_string)
+}
+
+fn video_progress(payload: &Value) -> Option<u32> {
+    let raw = payload
+        .get("progress")
+        .or_else(|| payload.get("output").and_then(|output| output.get("progress")))?;
+    if let Some(percent) = raw.as_u64() {
+        return Some(percent.min(100) as u32);
+    }
+    let fraction = raw.as_f64()?;
+    if !fraction.is_finite() {
+        return None;
+    }
+    Some((fraction * 100.0).round().clamp(0.0, 100.0) as u32)
+}
+
+fn update_progress(app: &AppHandle, job_id: i64, percent: u32) {
+    let vfs = app.state::<VfsState>();
+    let db = vfs.0.lock().unwrap();
+    if let Err(e) = jobs::set_progress(db.conn(), job_id, percent) {
+        // Cancelled or already finished jobs reject progress updates.
+        log::debug!("media job {job_id} progress skipped: {e}");
+    }
 }
 
 fn video_error(payload: &Value) -> Option<String> {
@@ -823,5 +851,12 @@ mod tests {
         assert_eq!(video_error(&failed).as_deref(), Some("content policy"));
         let task = json!({"data": {"id": "task_9"}});
         assert_eq!(video_task_id(&task).as_deref(), Some("task_9"));
+        assert_eq!(video_progress(&json!({"progress": 42})), Some(42));
+        assert_eq!(video_progress(&json!({"progress": 0.5})), Some(50));
+        assert_eq!(
+            video_progress(&json!({"output": {"progress": 0.1}})),
+            Some(10)
+        );
+        assert_eq!(video_progress(&json!({})), None);
     }
 }

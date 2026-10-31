@@ -173,6 +173,9 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   const [videoPrompt, setVideoPrompt] = useState('')
   const [videoBusy, setVideoBusy] = useState(false)
   const [videoUrl, setVideoUrl] = useState('')
+  const [videoJobId, setVideoJobId] = useState<number | null>(null)
+  const [videoProgress, setVideoProgress] = useState(0)
+  const [videoStatus, setVideoStatus] = useState<MediaJob['status'] | ''>('')
   const [asrOpen, setAsrOpen] = useState(false)
   const [asrModels, setAsrModels] = useState<AgentModelInfo[]>([])
   const [asrModelId, setAsrModelId] = useState('')
@@ -833,13 +836,35 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
       return
     }
     setVideoBusy(true)
+    setVideoProgress(0)
+    setVideoStatus('pending')
     try {
       const job = await mediaApi.submit({
         kind: 'video',
         modelEntry: videoModelId,
         params: { prompt },
       })
-      const done = await waitForJob(job.id)
+      setVideoJobId(job.id)
+      let done: MediaJob | null = null
+      for (let i = 0; i < JOB_POLL_LIMIT; i += 1) {
+        const current = await mediaApi.get(job.id)
+        setVideoStatus(current.status)
+        setVideoProgress(current.progress)
+        if (
+          current.status === 'succeeded' ||
+          current.status === 'failed' ||
+          current.status === 'cancelled'
+        ) {
+          done = current
+          break
+        }
+        await new Promise((resolve) => setTimeout(resolve, JOB_POLL_MS))
+      }
+      if (!done) throw new Error('视频生成超时，请稍后重试')
+      if (done.status === 'cancelled') {
+        toast('视频生成已取消')
+        return
+      }
       if (done.status !== 'succeeded' || done.assetId == null) {
         toast(done.error || '视频生成失败')
         return
@@ -850,6 +875,17 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
       toast(friendlyError(e))
     } finally {
       setVideoBusy(false)
+      setVideoJobId(null)
+    }
+  }
+
+  const cancelVideoJob = async () => {
+    if (!videoJobId) return
+    try {
+      await mediaApi.cancel(videoJobId)
+      toast('已请求取消视频任务')
+    } catch (e) {
+      toast(friendlyError(e))
     }
   }
 
@@ -1525,6 +1561,16 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
               >
                 关闭
               </button>
+              {videoBusy && (
+                <button
+                  type="button"
+                  className="btn btn-plain"
+                  disabled={!videoJobId}
+                  onClick={() => void cancelVideoJob()}
+                >
+                  取消任务
+                </button>
+              )}
               <button
                 type="button"
                 className="btn btn-primary"
@@ -1560,10 +1606,20 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
               placeholder="描述想要的视频画面"
             />
           </div>
+          {videoBusy && (
+            <div className="form-field">
+              <span className="form-label">
+                {videoStatus === 'pending' ? '排队中…' : `生成中 ${videoProgress}%`}
+              </span>
+              <div className="media-progress">
+                <span style={{ width: `${Math.min(100, Math.max(0, videoProgress))}%` }} />
+              </div>
+            </div>
+          )}
           {videoUrl && (
             <video className="ai-video-player" controls autoPlay src={videoUrl} />
           )}
-          <p className="settings-note">视频生成通常需要数分钟，期间可关闭弹窗，作业会在后台完成。</p>
+          <p className="settings-note">视频生成通常需要数分钟；生成期间可取消任务。</p>
         </Modal>
       )}
 
