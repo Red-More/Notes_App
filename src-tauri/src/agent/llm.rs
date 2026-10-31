@@ -4,15 +4,15 @@
 //! - 参数：`{ requestId, model, context, options }`（`context.messages` 是 pi-ai `Message[]`）；
 //! - 输出：`ProxyAssistantMessageEvent` 形状的 `data:` 事件（不含 `partial`，由前端重建）。
 //!
-//! 这样前端 `streamFn` 只是把 `fetch(proxyUrl/api/stream)` 换成
-//! `invoke('agent_stream')`，不需要理解任何厂商协议。
+//! 支持三种用户自定义协议：OpenAI Chat Completions、OpenAI Responses API、
+//! Anthropic Messages。
 //!
 //! 安全约束（Rust 侧二次校验，不信任前端）：
-//! - provider 必须是 `openai | anthropic | google`（`mock` 仅在调试构建可用），
-//!   `model.baseUrl` 一律忽略；
-//! - model id 只允许 `[A-Za-z0-9._-]`，防止把路径/查询串塞进 Google URL；
+//! - model.provider 必须是 `life.db` 中已存在的模型条目 id；`model.baseUrl`
+//!   一律忽略，URL 只来自持久化的模型配置（HTTPS、无凭据、非内网地址）；
+//! - `model.api` 必须与条目的协议一致，`model.id` 必须与条目保存的 Model ID 一致；
 //! - 工具声明最多 5 个且必须在 `fs_*` 白名单内；
-//! - Key 只从 Rust 私有存储读取，请求体不接受 `apiKey`；
+//! - Key 只从 Rust 私有存储（Keystore / 0600 文件）读取，请求体不接受 `apiKey`；
 //! - 禁用重定向、仅 HTTPS。
 
 use std::collections::BTreeMap;
@@ -23,16 +23,18 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
+use super::model_store::{self, ApiFormat, ModelEntry};
+use super::params::LlmParams;
 use super::{AgentState, TOOL_ALLOWLIST};
 use crate::vfs::error::ToolError;
 
-const OPENAI_URL: &str = "https://api.openai.com/v1/chat/completions";
-const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1/messages";
-const GOOGLE_PREFIX: &str = "https://generativelanguage.googleapis.com/v1beta/models/";
 const MAX_SYSTEM_BYTES: usize = 64 * 1024;
 const MAX_MESSAGES: usize = 200;
 const MAX_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MODEL_CHARS: usize = 100;
+/// Anthropic rejects requests without `max_tokens`; used only when the user
+/// left both `max_tokens` and the output context window empty.
+const ANTHROPIC_REQUIRED_MAX_TOKENS: u32 = 4096;
 
 // ---------------------------------------------------------------------------
 // 请求：pi 的 { model, context, options }
@@ -261,7 +263,6 @@ struct Turn {
     text: String,
     tool_calls: Vec<ToolCallSpec>,
     tool_call_id: Option<String>,
-    tool_name: Option<String>,
     is_error: bool,
 }
 
@@ -345,7 +346,6 @@ fn to_turns(messages: &[Value]) -> Vec<Turn> {
                 text: message.get("content").map(text_of).unwrap_or_default(),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
-                tool_name: None,
                 is_error: false,
             }),
             "assistant" => {
@@ -376,7 +376,6 @@ fn to_turns(messages: &[Value]) -> Vec<Turn> {
                     text,
                     tool_calls: calls,
                     tool_call_id: None,
-                    tool_name: None,
                     is_error: false,
                 });
             }
@@ -397,10 +396,6 @@ fn to_turns(messages: &[Value]) -> Vec<Turn> {
                         .get("toolCallId")
                         .and_then(Value::as_str)
                         .map(|s| s.to_string()),
-                    tool_name: message
-                        .get("toolName")
-                        .and_then(Value::as_str)
-                        .map(|s| s.to_string()),
                     is_error: error,
                 });
             }
@@ -414,34 +409,27 @@ fn to_turns(messages: &[Value]) -> Vec<Turn> {
 // 校验
 // ---------------------------------------------------------------------------
 
-pub fn validate_request(req: &ProxyRequest) -> Result<(), ToolError> {
-    if !super::is_provider(&req.model.provider) {
-        return Err(ToolError::invalid("不支持的厂商"));
+pub fn validate_request(req: &ProxyRequest, entry: &ModelEntry) -> Result<(), ToolError> {
+    if req.model.provider != entry.id {
+        return Err(ToolError::invalid("未找到模型"));
     }
     if req.request_id.trim().is_empty() || req.request_id.chars().count() > 64 {
         return Err(ToolError::invalid("requestId 非法"));
     }
-    // api 与 provider 必须自洽；baseUrl/headers 等字段一律忽略。
-    let expected_api = match req.model.provider.as_str() {
-        "openai" => "openai-completions",
-        "anthropic" => "anthropic-messages",
-        "google" => "google-generative-ai",
-        _ => "",
-    };
-    if !expected_api.is_empty() && !req.model.api.is_empty() && req.model.api != expected_api {
-        return Err(ToolError::invalid("model.api 与 provider 不一致"));
+    // baseUrl/headers 等字段一律忽略：URL 只能来自 life.db 中的模型条目。
+    if !req.model.api.is_empty() && req.model.api != entry.format.pi_api() {
+        return Err(ToolError::invalid("model.api 与模型协议不一致"));
     }
     let model = req.model.id.trim();
     if model.is_empty() || model.chars().count() > MAX_MODEL_CHARS {
         return Err(ToolError::invalid("模型名非法"));
     }
-    if !model
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-    {
-        return Err(ToolError::invalid(
-            "模型名只能包含字母、数字、点、下划线、短横线",
-        ));
+    if model.chars().any(char::is_control) {
+        return Err(ToolError::invalid("模型名包含控制字符"));
+    }
+    // The request may only use the model id saved for this entry.
+    if model != entry.model_id {
+        return Err(ToolError::invalid("请求模型与已保存的 Model ID 不一致"));
     }
     if req.context.messages.len() > MAX_MESSAGES {
         return Err(ToolError::invalid(format!("消息条数超过 {MAX_MESSAGES}")));
@@ -502,34 +490,27 @@ pub(crate) fn trim_messages(messages: &[Value]) -> Vec<Value> {
 pub async fn run(
     state: &AgentState,
     req: ProxyRequest,
+    entry: &ModelEntry,
+    params: &LlmParams,
     cancel: Arc<AtomicBool>,
     emit: Emit<'_>,
 ) -> Result<(), ToolError> {
     // 长会话先裁剪再校验：宁可丢弃最旧的对话轮次，也不能让整次请求失败。
     let mut req = req;
     req.context.messages = trim_messages(&req.context.messages);
-    validate_request(&req)?;
+    validate_request(&req, entry)?;
     emit(StreamEvent::Start);
 
     let (system, tools) = replay_system(&req.context.messages);
     let turns = to_turns(&req.context.messages);
-    let provider = req.model.provider.clone();
-    let model = req.model.id.clone();
+    let model = entry.model_id.clone();
 
-    // mock 只在调试构建走本地分支；release 下 validate_request 已拒绝该 provider。
-    #[cfg(debug_assertions)]
-    {
-        if provider == "mock" {
-            return mock_stream(&turns, &cancel, emit).await;
-        }
-    }
-
-    let key = match state.secrets.get(&provider) {
+    let key = match state.secrets.get(&entry.id) {
         Ok(Some(key)) if !key.trim().is_empty() => key,
         Ok(_) => {
             emit_error(
                 emit,
-                format!("尚未配置 {provider} 的 API Key，请到设置页填写"),
+                format!("尚未配置 {} 的 API Key，请到设置页编辑模型", entry.label),
                 "error",
             );
             return Ok(());
@@ -540,18 +521,35 @@ pub async fn run(
         }
     };
 
+    let stream = params.stream_enabled();
+    // URL 只能来自 life.db 的模型条目；请求体里的 baseUrl 一律忽略。
+    let endpoint = model_store::endpoint(entry);
     let prepared = Prepared {
         model: &model,
+        endpoint: &endpoint,
         system: &system,
         tools: &tools,
         turns: &turns,
         options: &req.options,
+        params,
     };
-    let result = match provider.as_str() {
-        "openai" => openai_stream(state, &key, &prepared, &cancel, emit).await,
-        "anthropic" => anthropic_stream(state, &key, &prepared, &cancel, emit).await,
-        "google" => google_stream(state, &key, &prepared, &cancel, emit).await,
-        _ => unreachable!("provider validated"),
+    let result = match (entry.format, stream) {
+        (ApiFormat::OpenAiChat, true) => {
+            openai_stream(state, &key, &prepared, &cancel, emit).await
+        }
+        (ApiFormat::OpenAiChat, false) => openai_json(state, &key, &prepared, &cancel, emit).await,
+        (ApiFormat::OpenAiResponses, true) => {
+            responses_stream(state, &key, &prepared, &cancel, emit).await
+        }
+        (ApiFormat::OpenAiResponses, false) => {
+            responses_json(state, &key, &prepared, &cancel, emit).await
+        }
+        (ApiFormat::AnthropicMessages, true) => {
+            anthropic_stream(state, &key, &prepared, &cancel, emit).await
+        }
+        (ApiFormat::AnthropicMessages, false) => {
+            anthropic_json(state, &key, &prepared, &cancel, emit).await
+        }
     };
 
     if let Err(message) = result {
@@ -569,63 +567,6 @@ pub async fn run(
 }
 
 // ---------------------------------------------------------------------------
-// mock：无 Key 本地开发
-// ---------------------------------------------------------------------------
-
-// mock 只在调试构建编译：release 包不包含本地假回复通道。
-#[cfg(debug_assertions)]
-async fn mock_stream(turns: &[Turn], cancel: &AtomicBool, emit: Emit<'_>) -> Result<(), ToolError> {
-    let index = 0usize;
-    emit(StreamEvent::TextStart {
-        content_index: index,
-    });
-    let prompt = turns
-        .iter()
-        .rev()
-        .find(|t| matches!(t.role, Role::User))
-        .map(|t| t.text.trim().to_string())
-        .unwrap_or_default();
-    let reply = if prompt.is_empty() {
-        "（mock）我在。当前未配置真实模型，这条回复来自本地 mock 通道。".to_string()
-    } else {
-        format!(
-            "（mock）收到：{}. 配置真实厂商与 API Key 后即可获得真实回答。",
-            prompt.chars().take(40).collect::<String>()
-        )
-    };
-    // 按字符切块而不是按字节：避免在 UTF-8 多字节字符中间截断产生乱码。
-    let chars: Vec<char> = reply.chars().collect();
-    for piece in chars.chunks(12) {
-        if cancel.load(Ordering::SeqCst) {
-            emit(StreamEvent::Error {
-                reason: "aborted".to_string(),
-                error_message: "已取消".to_string(),
-                usage: Usage::default(),
-            });
-            return Ok(());
-        }
-        let delta: String = piece.iter().collect();
-        emit(StreamEvent::TextDelta {
-            content_index: index,
-            delta,
-        });
-    }
-    emit(StreamEvent::TextEnd {
-        content_index: index,
-    });
-    emit(StreamEvent::Done {
-        reason: "stop".to_string(),
-        usage: Usage {
-            input: prompt.chars().count() as i64,
-            output: reply.chars().count() as i64,
-            total_tokens: (prompt.chars().count() + reply.chars().count()) as i64,
-            ..Usage::default()
-        },
-    });
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // HTTP / SSE 基础设施
 // ---------------------------------------------------------------------------
 
@@ -634,12 +575,16 @@ async fn send_json(
     url: &str,
     headers: &[(&str, String)],
     body: &Value,
+    timeout: Option<std::time::Duration>,
 ) -> Result<reqwest::Response, String> {
     // 客户端初始化失败时以错误形式回给 UI，绝不降级到裸 Client。
     let Some(client) = &state.client else {
         return Err("HTTP 客户端初始化失败，请重启应用".to_string());
     };
     let mut builder = client.post(url).json(body);
+    if let Some(limit) = timeout {
+        builder = builder.timeout(limit);
+    }
     for (name, value) in headers {
         builder = builder.header(*name, value.clone());
     }
@@ -699,10 +644,13 @@ where
 /// 一次请求里与厂商无关的已准备数据，避免适配器参数过长。
 struct Prepared<'a> {
     model: &'a str,
+    /// Fully built endpoint from the stored model entry.
+    endpoint: &'a str,
     system: &'a str,
     tools: &'a [ToolSpec],
     turns: &'a [Turn],
     options: &'a Options,
+    params: &'a LlmParams,
 }
 
 // ---------------------------------------------------------------------------
@@ -797,6 +745,22 @@ fn openai_body(
     Value::Object(body)
 }
 
+/// Base OpenAI body + stored params + passthrough, with `stream` honoured.
+fn prepare_openai_body(req: &Prepared<'_>) -> Result<Value, ToolError> {
+    let mut body = openai_body(req.model, req.system, req.tools, req.turns, req.options);
+    let Some(map) = body.as_object_mut() else {
+        unreachable!("openai body is always an object")
+    };
+    let stream = req.params.stream_enabled();
+    req.params.apply_openai(map);
+    map.insert("stream".into(), json!(stream));
+    if !stream {
+        map.remove("stream_options");
+    }
+    req.params.merge_extra(map)?;
+    Ok(body)
+}
+
 struct OpenAiToolState {
     /// OpenAI 侧 `tool_calls[i].index`，唯一对应一次工具调用。
     openai_index: usize,
@@ -814,12 +778,12 @@ async fn openai_stream(
     cancel: &AtomicBool,
     emit: Emit<'_>,
 ) -> Result<(), String> {
-    let body = openai_body(req.model, req.system, req.tools, req.turns, req.options);
+    let body = prepare_openai_body(req).map_err(|e| e.to_string())?;
     let headers = [
         ("authorization", format!("Bearer {key}")),
         ("content-type", "application/json".to_string()),
     ];
-    let resp = send_json(state, OPENAI_URL, &headers, &body).await?;
+    let resp = send_json(state, req.endpoint, &headers, &body, req.params.timeout()).await?;
 
     let mut next_index = 0usize;
     let mut text_index: Option<usize> = None;
@@ -975,6 +939,445 @@ async fn openai_stream(
 }
 
 // ---------------------------------------------------------------------------
+// OpenAI Responses API（/v1/responses）
+// ---------------------------------------------------------------------------
+
+fn responses_body(
+    model: &str,
+    system: &str,
+    tools: &[ToolSpec],
+    turns: &[Turn],
+    options: &Options,
+) -> Value {
+    let mut input: Vec<Value> = Vec::new();
+    for turn in turns {
+        match turn.role {
+            Role::Assistant => {
+                if !turn.text.is_empty() {
+                    input.push(json!({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{ "type": "output_text", "text": turn.text }],
+                    }));
+                }
+                for call in &turn.tool_calls {
+                    input.push(json!({
+                        "type": "function_call",
+                        "call_id": call.id,
+                        "name": call.name,
+                        "arguments": serde_json::to_string(&call.arguments)
+                            .unwrap_or_else(|_| "{}".to_string()),
+                    }));
+                }
+            }
+            Role::Tool => input.push(json!({
+                "type": "function_call_output",
+                "call_id": turn.tool_call_id.clone().unwrap_or_default(),
+                "output": turn.text,
+            })),
+            Role::User => input.push(json!({
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": turn.text }],
+            })),
+        }
+    }
+
+    let mut body = Map::new();
+    body.insert("model".into(), json!(model));
+    body.insert("input".into(), Value::Array(input));
+    body.insert("stream".into(), json!(true));
+    if !system.trim().is_empty() {
+        body.insert("instructions".into(), json!(system));
+    }
+    if !tools.is_empty() {
+        let specs: Vec<Value> = tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "type": "function",
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                })
+            })
+            .collect();
+        body.insert("tools".into(), Value::Array(specs));
+        body.insert("tool_choice".into(), json!("auto"));
+    }
+    if let Some(temp) = options.temperature {
+        body.insert("temperature".into(), json!(temp));
+    }
+    if let Some(max) = options.max_tokens {
+        body.insert("max_output_tokens".into(), json!(max));
+    }
+    Value::Object(body)
+}
+
+/// Base Responses body + stored params + passthrough, with `stream` honoured.
+fn prepare_responses_body(req: &Prepared<'_>) -> Result<Value, ToolError> {
+    let mut body = responses_body(req.model, req.system, req.tools, req.turns, req.options);
+    let Some(map) = body.as_object_mut() else {
+        unreachable!("responses body is always an object")
+    };
+    req.params.apply_openai_responses(map);
+    map.insert("stream".into(), json!(req.params.stream_enabled()));
+    req.params.merge_extra(map)?;
+    Ok(body)
+}
+
+struct ResponsesToolState {
+    output_index: usize,
+    block: usize,
+    call_id: String,
+    name: String,
+    args: String,
+    done: bool,
+}
+
+fn responses_usage(response: &Value) -> Usage {
+    let mut usage = Usage::default();
+    if let Some(u) = response.get("usage") {
+        usage.input = u.get("input_tokens").and_then(Value::as_i64).unwrap_or(0);
+        usage.output = u.get("output_tokens").and_then(Value::as_i64).unwrap_or(0);
+        usage.cache_read = u
+            .get("input_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        usage.total_tokens = u
+            .get("total_tokens")
+            .and_then(Value::as_i64)
+            .unwrap_or(usage.input + usage.output);
+    }
+    usage
+}
+
+async fn responses_stream(
+    state: &AgentState,
+    key: &str,
+    req: &Prepared<'_>,
+    cancel: &AtomicBool,
+    emit: Emit<'_>,
+) -> Result<(), String> {
+    let body = prepare_responses_body(req).map_err(|e| e.to_string())?;
+    let headers = [
+        ("authorization", format!("Bearer {key}")),
+        ("content-type", "application/json".to_string()),
+    ];
+    let resp = send_json(state, req.endpoint, &headers, &body, req.params.timeout()).await?;
+
+    let mut next_index = 0usize;
+    let mut text_index: Option<usize> = None;
+    let mut text_ended = false;
+    let mut tool_states: Vec<ResponsesToolState> = Vec::new();
+    let mut usage = Usage::default();
+    let mut incomplete_reason: Option<String> = None;
+    let mut error_message: Option<String> = None;
+
+    let outcome = read_sse(resp, cancel, |data| {
+        let Ok(event) = serde_json::from_str::<Value>(data) else {
+            return;
+        };
+        match event.get("type").and_then(Value::as_str).unwrap_or("") {
+            "response.output_item.added" => {
+                let item = event.get("item").cloned().unwrap_or(Value::Null);
+                if item.get("type").and_then(Value::as_str) != Some("function_call") {
+                    return;
+                }
+                let output_index = event
+                    .get("output_index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                if tool_states.iter().any(|t| t.output_index == output_index) {
+                    return;
+                }
+                let block = next_index;
+                next_index += 1;
+                let call_id = item
+                    .get("call_id")
+                    .or_else(|| item.get("id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("call_{output_index}"));
+                let name = item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                emit(StreamEvent::ToolCallStart {
+                    content_index: block,
+                    id: call_id.clone(),
+                    tool_name: name.clone(),
+                });
+                tool_states.push(ResponsesToolState {
+                    output_index,
+                    block,
+                    call_id,
+                    name,
+                    args: String::new(),
+                    done: false,
+                });
+            }
+            "response.output_text.delta" | "response.refusal.delta" => {
+                if text_ended {
+                    return;
+                }
+                let Some(delta) = event.get("delta").and_then(Value::as_str) else {
+                    return;
+                };
+                if delta.is_empty() {
+                    return;
+                }
+                let index = *text_index.get_or_insert_with(|| {
+                    let index = next_index;
+                    next_index += 1;
+                    emit(StreamEvent::TextStart {
+                        content_index: index,
+                    });
+                    index
+                });
+                emit(StreamEvent::TextDelta {
+                    content_index: index,
+                    delta: delta.to_string(),
+                });
+            }
+            "response.function_call_arguments.delta" => {
+                let output_index = event
+                    .get("output_index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                let Some(state) = tool_states
+                    .iter_mut()
+                    .find(|t| t.output_index == output_index && !t.done)
+                else {
+                    return;
+                };
+                let Some(delta) = event.get("delta").and_then(Value::as_str) else {
+                    return;
+                };
+                if delta.is_empty() {
+                    return;
+                }
+                state.args.push_str(delta);
+                emit(StreamEvent::ToolCallDelta {
+                    content_index: state.block,
+                    delta: delta.to_string(),
+                });
+            }
+            "response.output_item.done" => {
+                let item = event.get("item").cloned().unwrap_or(Value::Null);
+                let output_index = event
+                    .get("output_index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                match item.get("type").and_then(Value::as_str).unwrap_or("") {
+                    "function_call" => {
+                        let Some(state) = tool_states
+                            .iter_mut()
+                            .find(|t| t.output_index == output_index)
+                        else {
+                            return;
+                        };
+                        if state.done {
+                            return;
+                        }
+                        // Prefer the complete arguments carried by the done item.
+                        let args = item
+                            .get("arguments")
+                            .and_then(Value::as_str)
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or(&state.args)
+                            .to_string();
+                        state.done = true;
+                        emit(StreamEvent::ToolCallEnd {
+                            content_index: state.block,
+                            tool_call: ToolCallPayload::new(
+                                state.call_id.clone(),
+                                state.name.clone(),
+                                &args,
+                            ),
+                        });
+                    }
+                    "message" => {
+                        if let Some(index) = text_index {
+                            if !text_ended {
+                                emit(StreamEvent::TextEnd {
+                                    content_index: index,
+                                });
+                                text_ended = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "response.completed" | "response.incomplete" | "response.failed" => {
+                let response = event.get("response").cloned().unwrap_or(Value::Null);
+                usage = responses_usage(&response);
+                if let Some(reason) = response
+                    .get("incomplete_details")
+                    .and_then(|d| d.get("reason"))
+                    .and_then(Value::as_str)
+                {
+                    incomplete_reason = Some(reason.to_string());
+                }
+                if let Some(error) = response.get("error") {
+                    let code = error.get("code").and_then(Value::as_str).unwrap_or("");
+                    let message = error.get("message").and_then(Value::as_str).unwrap_or("");
+                    let text = format!("{code}: {message}");
+                    error_message = Some(text.trim_matches([':', ' ']).to_string());
+                }
+            }
+            "error" => {
+                let code = event.get("code").and_then(Value::as_str).unwrap_or("");
+                let message = event.get("message").and_then(Value::as_str).unwrap_or("");
+                let text = format!("{code}: {message}");
+                error_message = Some(text.trim_matches([':', ' ']).to_string());
+            }
+            _ => {}
+        }
+    })
+    .await?;
+
+    if matches!(outcome, SseOutcome::Cancelled) {
+        emit(StreamEvent::Error {
+            reason: "aborted".to_string(),
+            error_message: "已取消".to_string(),
+            usage,
+        });
+        return Ok(());
+    }
+    if let Some(message) = error_message {
+        emit(StreamEvent::Error {
+            reason: "error".to_string(),
+            error_message: message,
+            usage,
+        });
+        return Ok(());
+    }
+
+    if let Some(index) = text_index {
+        if !text_ended {
+            emit(StreamEvent::TextEnd {
+                content_index: index,
+            });
+        }
+    }
+    for state in tool_states.iter().filter(|state| !state.done) {
+        emit(StreamEvent::ToolCallEnd {
+            content_index: state.block,
+            tool_call: ToolCallPayload::new(state.call_id.clone(), state.name.clone(), &state.args),
+        });
+    }
+    let reason = if incomplete_reason.as_deref() == Some("max_output_tokens") {
+        "length"
+    } else if tool_states.is_empty() {
+        "stop"
+    } else {
+        "toolUse"
+    };
+    emit(StreamEvent::Done {
+        reason: reason.to_string(),
+        usage,
+    });
+    Ok(())
+}
+
+async fn responses_json(
+    state: &AgentState,
+    key: &str,
+    req: &Prepared<'_>,
+    cancel: &AtomicBool,
+    emit: Emit<'_>,
+) -> Result<(), String> {
+    let body = prepare_responses_body(req).map_err(|e| e.to_string())?;
+    let headers = [
+        ("authorization", format!("Bearer {key}")),
+        ("content-type", "application/json".to_string()),
+    ];
+    let resp = send_json(state, req.endpoint, &headers, &body, req.params.timeout()).await?;
+    let payload = read_json_response(resp).await?;
+    if cancel.load(Ordering::SeqCst) {
+        emit(StreamEvent::Error {
+            reason: "aborted".to_string(),
+            error_message: "已取消".to_string(),
+            usage: Usage::default(),
+        });
+        return Ok(());
+    }
+
+    let usage = responses_usage(&payload);
+    let mut index = 0usize;
+    let mut has_tools = false;
+    if let Some(items) = payload.get("output").and_then(Value::as_array) {
+        for item in items {
+            match item.get("type").and_then(Value::as_str).unwrap_or("") {
+                "message" => {
+                    let text = item
+                        .get("content")
+                        .and_then(Value::as_array)
+                        .map(|parts| {
+                            parts
+                                .iter()
+                                .filter_map(|part| {
+                                    part.get("text")
+                                        .or_else(|| part.get("refusal"))
+                                        .and_then(Value::as_str)
+                                })
+                                .collect::<Vec<_>>()
+                                .join("")
+                        })
+                        .unwrap_or_default();
+                    emit_text_block(emit, index, &text);
+                    if !text.trim().is_empty() {
+                        index += 1;
+                    }
+                }
+                "function_call" => {
+                    let id = item
+                        .get("call_id")
+                        .or_else(|| item.get("id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let name = item
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let args = item
+                        .get("arguments")
+                        .and_then(Value::as_str)
+                        .unwrap_or("{}");
+                    emit_raw_tool_block(emit, index, id, name, args);
+                    index += 1;
+                    has_tools = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    let reason = if payload
+        .get("incomplete_details")
+        .and_then(|d| d.get("reason"))
+        .and_then(Value::as_str)
+        == Some("max_output_tokens")
+    {
+        "length"
+    } else if has_tools {
+        "toolUse"
+    } else {
+        "stop"
+    };
+    emit(StreamEvent::Done {
+        reason: reason.to_string(),
+        usage,
+    });
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Anthropic（/v1/messages）
 // ---------------------------------------------------------------------------
 
@@ -1024,9 +1427,11 @@ fn anthropic_body(
 
     let mut body = Map::new();
     body.insert("model".into(), json!(model));
+    // Anthropic requires `max_tokens`; an explicit user budget wins, otherwise
+    // the protocol minimum keeps the request valid.
     body.insert(
         "max_tokens".into(),
-        json!(options.max_tokens.unwrap_or(4096)),
+        json!(options.max_tokens.unwrap_or(ANTHROPIC_REQUIRED_MAX_TOKENS)),
     );
     body.insert("stream".into(), json!(true));
     if !system.trim().is_empty() {
@@ -1065,6 +1470,20 @@ fn push_turn(messages: &mut Vec<Value>, role: &str, blocks: Vec<Value>) {
     messages.push(json!({ "role": role, "content": Value::Array(blocks) }));
 }
 
+/// Base Anthropic body + stored params + passthrough, with `stream` honoured.
+fn prepare_anthropic_body(req: &Prepared<'_>) -> Result<Value, ToolError> {
+    let mut body = anthropic_body(req.model, req.system, req.tools, req.turns, req.options);
+    let Some(map) = body.as_object_mut() else {
+        unreachable!("anthropic body is always an object")
+    };
+    // `apply_anthropic` overwrites the protocol fallback whenever the user set
+    // an output budget; otherwise the fallback keeps the request valid.
+    req.params.apply_anthropic(map);
+    map.insert("stream".into(), json!(req.params.stream_enabled()));
+    req.params.merge_extra(map)?;
+    Ok(body)
+}
+
 struct AnthropicToolState {
     block: usize,
     id: String,
@@ -1079,13 +1498,13 @@ async fn anthropic_stream(
     cancel: &AtomicBool,
     emit: Emit<'_>,
 ) -> Result<(), String> {
-    let body = anthropic_body(req.model, req.system, req.tools, req.turns, req.options);
+    let body = prepare_anthropic_body(req).map_err(|e| e.to_string())?;
     let headers = [
         ("x-api-key", key.to_string()),
         ("anthropic-version", "2023-06-01".to_string()),
         ("content-type", "application/json".to_string()),
     ];
-    let resp = send_json(state, ANTHROPIC_URL, &headers, &body).await?;
+    let resp = send_json(state, req.endpoint, &headers, &body, req.params.timeout()).await?;
 
     let mut usage = Usage::default();
     let mut text_blocks: Vec<usize> = Vec::new();
@@ -1238,188 +1657,208 @@ async fn anthropic_stream(
 }
 
 // ---------------------------------------------------------------------------
-// Google Gemini（streamGenerateContent）
+// 非流式路径（stream=false）：一次性响应，仍以相同事件序列回给前端
 // ---------------------------------------------------------------------------
 
-fn google_body(system: &str, tools: &[ToolSpec], turns: &[Turn], options: &Options) -> Value {
-    let mut contents: Vec<Value> = Vec::new();
-    for turn in turns {
-        match turn.role {
-            Role::Assistant => {
-                let mut parts: Vec<Value> = Vec::new();
-                if !turn.text.is_empty() {
-                    parts.push(json!({ "text": turn.text }));
-                }
-                for call in &turn.tool_calls {
-                    parts.push(json!({
-                        "functionCall": { "name": call.name, "args": call.arguments }
-                    }));
-                }
-                if !parts.is_empty() {
-                    contents.push(json!({ "role": "model", "parts": parts }));
-                }
-            }
-            Role::Tool => contents.push(json!({
-                "role": "user",
-                "parts": [{
-                    "functionResponse": {
-                        "name": turn.tool_name.clone().unwrap_or_default(),
-                        "response": { "result": turn.text }
-                    }
-                }]
-            })),
-            Role::User => {
-                contents.push(json!({ "role": "user", "parts": [{ "text": turn.text }] }))
-            }
-        }
+fn emit_text_block(emit: Emit<'_>, index: usize, text: &str) {
+    if text.trim().is_empty() {
+        return;
     }
-
-    let mut body = Map::new();
-    if !system.trim().is_empty() {
-        body.insert(
-            "systemInstruction".into(),
-            json!({ "parts": [{ "text": system }] }),
-        );
-    }
-    body.insert("contents".into(), Value::Array(contents));
-    if !tools.is_empty() {
-        let decls: Vec<Value> = tools
-            .iter()
-            .map(|t| {
-                json!({
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
-                })
-            })
-            .collect();
-        body.insert("tools".into(), json!([{ "functionDeclarations": decls }]));
-    }
-    let mut generation = Map::new();
-    if let Some(temp) = options.temperature {
-        generation.insert("temperature".into(), json!(temp));
-    }
-    if let Some(max) = options.max_tokens {
-        generation.insert("maxOutputTokens".into(), json!(max));
-    }
-    if !generation.is_empty() {
-        body.insert("generationConfig".into(), Value::Object(generation));
-    }
-    Value::Object(body)
+    emit(StreamEvent::TextStart {
+        content_index: index,
+    });
+    emit(StreamEvent::TextDelta {
+        content_index: index,
+        delta: text.to_string(),
+    });
+    emit(StreamEvent::TextEnd {
+        content_index: index,
+    });
 }
 
-async fn google_stream(
+fn emit_tool_block(emit: Emit<'_>, index: usize, id: String, name: String, arguments: &Value) {
+    let args = serde_json::to_string(arguments).unwrap_or_else(|_| "{}".to_string());
+    emit_raw_tool_block(emit, index, id, name, &args);
+}
+
+/// Same as `emit_tool_block`, but the provider already gave us raw JSON text.
+fn emit_raw_tool_block(emit: Emit<'_>, index: usize, id: String, name: String, args: &str) {
+    emit(StreamEvent::ToolCallStart {
+        content_index: index,
+        id: id.clone(),
+        tool_name: name.clone(),
+    });
+    emit(StreamEvent::ToolCallDelta {
+        content_index: index,
+        delta: args.to_string(),
+    });
+    emit(StreamEvent::ToolCallEnd {
+        content_index: index,
+        tool_call: ToolCallPayload::new(id, name, args),
+    });
+}
+
+async fn read_json_response(resp: reqwest::Response) -> Result<Value, String> {
+    resp.json::<Value>()
+        .await
+        .map_err(|e| format!("响应不是合法 JSON：{e}"))
+}
+
+async fn openai_json(
     state: &AgentState,
     key: &str,
     req: &Prepared<'_>,
     cancel: &AtomicBool,
     emit: Emit<'_>,
 ) -> Result<(), String> {
-    let url = format!("{GOOGLE_PREFIX}{}:streamGenerateContent?alt=sse", req.model);
-    let body = google_body(req.system, req.tools, req.turns, req.options);
+    let body = prepare_openai_body(req).map_err(|e| e.to_string())?;
     let headers = [
-        ("x-goog-api-key", key.to_string()),
+        ("authorization", format!("Bearer {key}")),
         ("content-type", "application/json".to_string()),
     ];
-    let resp = send_json(state, &url, &headers, &body).await?;
-
-    let mut next_index = 0usize;
-    let mut text_index: Option<usize> = None;
-    let mut tool_calls = 0usize;
-    let mut usage = Usage::default();
-
-    let outcome = read_sse(resp, cancel, |data| {
-        let Ok(chunk) = serde_json::from_str::<Value>(data) else {
-            return;
-        };
-        if let Some(u) = chunk.get("usageMetadata") {
-            usage.input = u
-                .get("promptTokenCount")
-                .and_then(Value::as_i64)
-                .unwrap_or(0);
-            usage.output = u
-                .get("candidatesTokenCount")
-                .and_then(Value::as_i64)
-                .unwrap_or(0);
-            usage.total_tokens = u
-                .get("totalTokenCount")
-                .and_then(Value::as_i64)
-                .unwrap_or(usage.input + usage.output);
-        }
-        let Some(parts) = chunk
-            .get("candidates")
-            .and_then(Value::as_array)
-            .and_then(|a| a.first())
-            .and_then(|c| c.get("content"))
-            .and_then(|c| c.get("parts"))
-            .and_then(Value::as_array)
-        else {
-            return;
-        };
-        for part in parts {
-            if let Some(text) = part.get("text").and_then(Value::as_str) {
-                if !text.is_empty() {
-                    let index = *text_index.get_or_insert_with(|| {
-                        let index = next_index;
-                        next_index += 1;
-                        emit(StreamEvent::TextStart {
-                            content_index: index,
-                        });
-                        index
-                    });
-                    emit(StreamEvent::TextDelta {
-                        content_index: index,
-                        delta: text.to_string(),
-                    });
-                }
-            }
-            if let Some(call) = part.get("functionCall") {
-                let name = call
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let args = call.get("args").cloned().unwrap_or_else(|| json!({}));
-                let id = format!("call_{tool_calls}");
-                tool_calls += 1;
-                let index = next_index;
-                next_index += 1;
-                emit(StreamEvent::ToolCallStart {
-                    content_index: index,
-                    id: id.clone(),
-                    tool_name: name.clone(),
-                });
-                let args_text = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
-                emit(StreamEvent::ToolCallDelta {
-                    content_index: index,
-                    delta: args_text.clone(),
-                });
-                emit(StreamEvent::ToolCallEnd {
-                    content_index: index,
-                    tool_call: ToolCallPayload::new(id, name, &args_text),
-                });
-            }
-        }
-    })
-    .await?;
-
-    if matches!(outcome, SseOutcome::Cancelled) {
+    let resp = send_json(state, req.endpoint, &headers, &body, req.params.timeout()).await?;
+    let payload = read_json_response(resp).await?;
+    if cancel.load(Ordering::SeqCst) {
         emit(StreamEvent::Error {
             reason: "aborted".to_string(),
             error_message: "已取消".to_string(),
-            usage,
+            usage: Usage::default(),
         });
         return Ok(());
     }
 
-    if let Some(index) = text_index {
-        emit(StreamEvent::TextEnd {
-            content_index: index,
-        });
+    let mut usage = Usage::default();
+    if let Some(u) = payload.get("usage") {
+        usage.input = u.get("prompt_tokens").and_then(Value::as_i64).unwrap_or(0);
+        usage.output = u
+            .get("completion_tokens")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        usage.total_tokens = u
+            .get("total_tokens")
+            .and_then(Value::as_i64)
+            .unwrap_or(usage.input + usage.output);
     }
+
+    let choice = payload
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first());
+    let mut index = 0usize;
+    if let Some(message) = choice.and_then(|c| c.get("message")) {
+        if let Some(text) = message.get("content").and_then(Value::as_str) {
+            emit_text_block(emit, index, text);
+            index += 1;
+        }
+        if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
+            for (offset, call) in calls.iter().enumerate() {
+                let id = call
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("call_{offset}"));
+                let name = call
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let arguments = call
+                    .get("function")
+                    .and_then(|f| f.get("arguments"))
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                emit_tool_block(emit, index, id, name, &arguments);
+                index += 1;
+            }
+        }
+    }
+    let reason = match choice
+        .and_then(|c| c.get("finish_reason"))
+        .and_then(Value::as_str)
+        .unwrap_or("stop")
+    {
+        "tool_calls" => "toolUse",
+        "length" => "length",
+        _ => "stop",
+    };
     emit(StreamEvent::Done {
-        reason: if tool_calls > 0 { "toolUse" } else { "stop" }.to_string(),
+        reason: reason.to_string(),
         usage,
     });
     Ok(())
 }
+
+async fn anthropic_json(
+    state: &AgentState,
+    key: &str,
+    req: &Prepared<'_>,
+    cancel: &AtomicBool,
+    emit: Emit<'_>,
+) -> Result<(), String> {
+    let body = prepare_anthropic_body(req).map_err(|e| e.to_string())?;
+    let headers = [
+        ("x-api-key", key.to_string()),
+        ("anthropic-version", "2023-06-01".to_string()),
+        ("content-type", "application/json".to_string()),
+    ];
+    let resp = send_json(state, req.endpoint, &headers, &body, req.params.timeout()).await?;
+    let payload = read_json_response(resp).await?;
+    if cancel.load(Ordering::SeqCst) {
+        emit(StreamEvent::Error {
+            reason: "aborted".to_string(),
+            error_message: "已取消".to_string(),
+            usage: Usage::default(),
+        });
+        return Ok(());
+    }
+
+    let mut usage = Usage::default();
+    if let Some(u) = payload.get("usage") {
+        usage.input = u.get("input_tokens").and_then(Value::as_i64).unwrap_or(0);
+        usage.output = u.get("output_tokens").and_then(Value::as_i64).unwrap_or(0);
+        usage.total_tokens = usage.input + usage.output;
+    }
+
+    let mut index = 0usize;
+    if let Some(blocks) = payload.get("content").and_then(Value::as_array) {
+        for block in blocks {
+            match block.get("type").and_then(Value::as_str).unwrap_or("") {
+                "text" => {
+                    if let Some(text) = block.get("text").and_then(Value::as_str) {
+                        emit_text_block(emit, index, text);
+                        index += 1;
+                    }
+                }
+                "tool_use" => {
+                    let id = block
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let name = block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
+                    emit_tool_block(emit, index, id, name, &input);
+                    index += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    let reason = match payload.get("stop_reason").and_then(Value::as_str) {
+        Some("tool_use") => "toolUse",
+        Some("max_tokens") => "length",
+        _ if index > 0 => "stop",
+        _ => "stop",
+    };
+    emit(StreamEvent::Done {
+        reason: reason.to_string(),
+        usage,
+    });
+    Ok(())
+}
+

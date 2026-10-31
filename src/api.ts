@@ -1,8 +1,10 @@
 import { invoke } from '@tauri-apps/api/core'
 import type {
+  AgentModelInfo,
   AgentSettings,
   ChatConversation,
   ChatMessageRecord,
+  ConnectionTestResult,
   Contact,
   Doc,
   DocFields,
@@ -10,6 +12,8 @@ import type {
   DocVersion,
   Folder,
   FolderStats,
+  LlmParams,
+  ModelApiFormat,
   NewChatMessage,
   Note,
   NoteVersion,
@@ -460,13 +464,12 @@ export const api = {
 }
 
 /**
- * Agent 会话与配置 API。
- * 密钥只经 `agent_key_set` 一次性提交到 Rust，前端不持久化、不回读内容。
+ * Agent 会话、自定义模型与参数 API。
+ * 添加模型时密钥一次性提交到 Rust，前端不持久化、不回读内容。
  */
 export const chatApi = {
   list: () => invoke<ChatConversation[]>('chat_list'),
-  create: (params: { title?: string; provider?: string; model?: string }) =>
-    invoke<ChatConversation>('chat_create', params),
+  create: (params: { title?: string } = {}) => invoke<ChatConversation>('chat_create', params),
   rename: (params: { id: number; title: string }) => invoke<void>('chat_rename', params),
   remove: (id: number) => invoke<void>('chat_delete', { id }),
   messages: (conversationId: number) =>
@@ -474,9 +477,35 @@ export const chatApi = {
   append: (params: { conversationId: number; messages: NewChatMessage[] }) =>
     invoke<ChatMessageRecord[]>('chat_append', params),
   settings: () => invoke<AgentSettings>('agent_settings'),
-  setSettings: (params: { provider: string; model: string }) =>
-    invoke<void>('agent_settings_set', params),
-  setKey: (params: { provider: string; key: string }) => invoke<void>('agent_key_set', params),
-  deleteKey: (provider: string) => invoke<void>('agent_key_delete', { provider }),
+  saveModel: (input: {
+    id?: string
+    label?: string
+    format: ModelApiFormat
+    baseUrl: string
+    modelId: string
+    fullUrl?: boolean
+    apiKey?: string
+  }) => invoke<AgentModelInfo>('agent_model_save', { input }),
+  deleteModel: (id: string) => invoke<void>('agent_model_delete', { id }),
+  activateModel: (id: string) => invoke<void>('agent_model_activate', { id }),
+  testConnection: (input: {
+    id?: string
+    format: ModelApiFormat
+    baseUrl: string
+    modelId: string
+    fullUrl?: boolean
+    apiKey?: string
+  }) => invoke<ConnectionTestResult>('agent_test_connection', { input }),
+  modelsList: (input: {
+    id?: string
+    format: ModelApiFormat
+    baseUrl: string
+    fullUrl?: boolean
+    apiKey?: string
+  }) => invoke<string[]>('agent_models_list', { input }),
+  paramsGet: (modelEntryId: string) =>
+    invoke<LlmParams>('agent_params_get', { modelEntryId }),
+  paramsSet: (modelEntryId: string, params: LlmParams) =>
+    invoke<void>('agent_params_set', { modelEntryId, params }),
   cancel: (requestId: string) => invoke<void>('agent_cancel', { requestId }),
 }

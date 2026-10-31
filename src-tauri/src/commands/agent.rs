@@ -1,39 +1,46 @@
-//! Agent 命令：会话、设置、密钥、流式代理。
+//! Agent 命令：会话、自定义模型、参数、密钥、流式代理。
 //!
 //! 边界：
 //! - 会话命令只读写 `conversations/messages`，不碰 `/life` 文档；
-//! - `agent_key_*` 是密钥唯一入口，回执只有布尔状态，不回传内容；
-//! - `agent_stream` 的 provider/model/tools 在 Rust 侧二次校验，前端不可绕过。
+//! - 模型配置（含 baseURL）只经这里写入 `settings`，`agent_stream` 不接受 URL；
+//! - API Key 随模型条目保存/删除，回执只有状态，不回传内容；
+//! - `agent_stream` 的模型条目/协议/tools 在 Rust 侧二次校验，前端不可绕过。
 
 use tauri::ipc::Channel;
 use tauri::State;
 
-use crate::agent::conversations::Conversation;
-use crate::agent::{conversations, llm, AgentState, PROVIDERS};
+use serde::Deserialize;
+
+use crate::agent::discovery::ConnectionTest;
+use crate::agent::model_store::{
+    self, AgentSettings, ApiFormat, ModelEntry, ModelInput, ModelView,
+};
+use crate::agent::params::{self, LlmParams};
+use crate::agent::{conversations, discovery, llm, AgentState};
 use crate::vfs::error::ToolError;
 use crate::vfs::VfsState;
 
 #[tauri::command]
-pub fn chat_list(state: State<'_, VfsState>) -> Result<Vec<Conversation>, ToolError> {
+pub fn chat_list(
+    state: State<'_, VfsState>,
+) -> Result<Vec<conversations::Conversation>, ToolError> {
     let vfs = state.0.lock().unwrap();
     conversations::list(&vfs)
 }
 
+/// 新建会话：始终使用当前激活的自定义模型；没有模型时要求用户先添加。
 #[tauri::command]
 pub fn chat_create(
     state: State<'_, VfsState>,
     title: Option<String>,
-    provider: Option<String>,
-    model: Option<String>,
 ) -> Result<conversations::Conversation, ToolError> {
     let vfs = state.0.lock().unwrap();
-    let settings = conversations::settings(vfs.conn(), &[])?;
-    let provider = provider.unwrap_or(settings.provider);
-    let model = model.unwrap_or(settings.model);
-    if !crate::agent::is_provider(&provider) {
-        return Err(ToolError::invalid("不支持的厂商"));
-    }
-    conversations::create(&vfs, title, provider, model)
+    let settings = model_store::settings(vfs.conn(), &[])?;
+    let active = settings
+        .active_id
+        .ok_or_else(|| ToolError::invalid("请先在设置中添加并启用一个模型"))?;
+    let entry = model_store::resolve(vfs.conn(), &active)?;
+    conversations::create(&vfs, title, entry.id, entry.model_id)
 }
 
 #[tauri::command]
@@ -67,67 +74,137 @@ pub fn chat_append(
     conversations::append(&vfs, conversation_id, messages)
 }
 
-/// 读取 Agent 配置：只返回“是否已配置 Key”，不返回内容。
+fn key_status(
+    conn: &rusqlite::Connection,
+    secrets: &crate::agent::secrets::SecretStore,
+) -> Result<Vec<(String, bool)>, ToolError> {
+    Ok(model_store::configs(conn)?
+        .into_iter()
+        .map(|entry| {
+            let configured = secrets.has(&entry.id);
+            (entry.id, configured)
+        })
+        .collect())
+}
+
+/// 读取模型列表：只返回“是否已配置 Key”，不返回内容。
 #[tauri::command]
 pub fn agent_settings(
     vfs_state: State<'_, VfsState>,
     agent_state: State<'_, AgentState>,
-) -> Result<conversations::AgentSettings, ToolError> {
+) -> Result<AgentSettings, ToolError> {
     let vfs = vfs_state.0.lock().unwrap();
-    let keys: Vec<(String, bool)> = PROVIDERS
-        .iter()
-        .map(|p| ((*p).to_string(), agent_state.secrets.has(p)))
-        .collect();
-    conversations::settings(vfs.conn(), &keys)
+    model_store::cleanup_legacy(vfs.conn(), &agent_state.secrets);
+    let keys = key_status(vfs.conn(), &agent_state.secrets)?;
+    model_store::settings(vfs.conn(), &keys)
+}
+
+/// 新增或编辑模型条目。新增时 API Key 必填；编辑时留空表示保留旧 Key。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelSaveInput {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+    pub format: ApiFormat,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub model_id: String,
+    #[serde(default)]
+    pub full_url: bool,
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 #[tauri::command]
-pub fn agent_settings_set(
-    state: State<'_, VfsState>,
-    provider: String,
-    model: String,
+pub fn agent_model_save(
+    vfs_state: State<'_, VfsState>,
+    agent_state: State<'_, AgentState>,
+    input: ModelSaveInput,
+) -> Result<ModelView, ToolError> {
+    let new_key = validate_key(input.api_key.as_deref())?;
+    let creating = input.id.trim().is_empty();
+    if creating && new_key.is_none() {
+        return Err(ToolError::invalid("API Key 必填"));
+    }
+    let vfs = vfs_state.0.lock().unwrap();
+    model_store::cleanup_legacy(vfs.conn(), &agent_state.secrets);
+    let saved = model_store::save(
+        vfs.conn(),
+        ModelInput {
+            id: input.id,
+            label: input.label,
+            format: input.format,
+            base_url: input.base_url,
+            model_id: input.model_id,
+            full_url: input.full_url,
+        },
+    )?;
+    if let Some(key) = new_key {
+        if let Err(message) = agent_state.secrets.set(&saved.id, key) {
+            // Do not leave a half-configured entry behind on creation.
+            if creating {
+                let _ = model_store::delete(vfs.conn(), &saved.id);
+            }
+            return Err(ToolError::Storage { message });
+        }
+    } else if !agent_state.secrets.has(&saved.id) {
+        return Err(ToolError::invalid("API Key 未保存，请重新填写"));
+    }
+    Ok(ModelView {
+        configured: agent_state.secrets.has(&saved.id),
+        id: saved.id,
+        label: saved.label,
+        format: saved.format,
+        base_url: saved.base_url,
+        full_url: saved.full_url,
+        model_id: saved.model_id,
+    })
+}
+
+/// 删除模型条目；密钥与参数随后清理，激活指针自动前移。
+#[tauri::command]
+pub fn agent_model_delete(
+    vfs_state: State<'_, VfsState>,
+    agent_state: State<'_, AgentState>,
+    id: String,
 ) -> Result<(), ToolError> {
+    let vfs = vfs_state.0.lock().unwrap();
+    model_store::delete(vfs.conn(), &id)?;
+    if let Err(e) = agent_state.secrets.delete(&id) {
+        log::warn!("model key cleanup failed for {id}: {e}");
+    }
+    if let Err(e) = params::remove(vfs.conn(), &id) {
+        log::warn!("model params cleanup failed for {id}: {e}");
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn agent_model_activate(state: State<'_, VfsState>, id: String) -> Result<(), ToolError> {
     let vfs = state.0.lock().unwrap();
-    conversations::set_settings(vfs.conn(), &provider, &model)
-}
-
-#[tauri::command]
-pub fn agent_key_set(
-    state: State<'_, AgentState>,
-    provider: String,
-    key: String,
-) -> Result<(), ToolError> {
-    if !crate::agent::is_provider(&provider) || provider == "mock" {
-        return Err(ToolError::invalid("该厂商不需要或不存在 API Key"));
-    }
-    if key.trim().is_empty() || key.len() > 4096 || key.chars().any(|c| c.is_control()) {
-        return Err(ToolError::invalid("API Key 为空、过长或包含控制字符"));
-    }
-    state
-        .secrets
-        .set(&provider, &key)
-        .map_err(|message| ToolError::Storage { message })
-}
-
-#[tauri::command]
-pub fn agent_key_delete(state: State<'_, AgentState>, provider: String) -> Result<(), ToolError> {
-    if !crate::agent::is_provider(&provider) {
-        return Err(ToolError::invalid("不支持的厂商"));
-    }
-    state
-        .secrets
-        .delete(&provider)
-        .map_err(|message| ToolError::Storage { message })
+    model_store::set_active(vfs.conn(), &id)
 }
 
 /// 流式对话：`request` 与 pi-agent 内置 `streamProxy` 的入参同构，
 /// 事件经 `Channel` 回到 WebView；返回时流已结束。
 #[tauri::command]
 pub async fn agent_stream(
+    vfs_state: State<'_, VfsState>,
     state: State<'_, AgentState>,
     request: llm::ProxyRequest,
     on_event: Channel<llm::StreamEvent>,
 ) -> Result<(), ToolError> {
+    // 只在查找配置时持锁，随后立刻释放，避免流式期间阻塞其它命令。
+    let (entry, params) = {
+        let vfs = vfs_state.0.lock().unwrap();
+        model_store::cleanup_legacy(vfs.conn(), &state.secrets);
+        let entry = model_store::resolve(vfs.conn(), &request.model.provider)?;
+        let params = params::get(vfs.conn(), &entry.id);
+        (entry, params)
+    };
     let request_id = request.request_id.clone();
     let cancel = state.register_cancel(&request_id);
     let emit = |event: llm::StreamEvent| {
@@ -135,9 +212,137 @@ pub async fn agent_stream(
             log::warn!("agent stream channel closed: {e}");
         }
     };
-    let result = llm::run(state.inner(), request, cancel, &emit).await;
+    let result = llm::run(state.inner(), request, &entry, &params, cancel, &emit).await;
     state.clear_cancel(&request_id);
     result
+}
+
+/// 动态拉取模型列表。输入来自“添加模型”表单；Full URL 模式无法发现模型。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelDiscoveryInput {
+    #[serde(default)]
+    pub id: String,
+    pub format: ApiFormat,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub full_url: bool,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+#[tauri::command]
+pub async fn agent_models_list(
+    vfs_state: State<'_, VfsState>,
+    state: State<'_, AgentState>,
+    input: ModelDiscoveryInput,
+) -> Result<Vec<String>, ToolError> {
+    let base_url = model_store::validate_base_url(&input.base_url)?;
+    let key = match validate_key(input.api_key.as_deref())? {
+        Some(key) => key.to_string(),
+        None => {
+            let id = input.id.trim();
+            if id.is_empty() {
+                return Err(ToolError::invalid("请先填写 API Key 再拉取模型列表"));
+            }
+            let stored = {
+                let vfs = vfs_state.0.lock().unwrap();
+                model_store::resolve(vfs.conn(), id)?
+            };
+            state
+                .secrets
+                .get(&stored.id)
+                .map_err(|message| ToolError::Storage { message })?
+                .ok_or_else(|| ToolError::invalid("请先填写 API Key 再拉取模型列表"))?
+        }
+    };
+    discovery::fetch(state.inner(), input.format, &base_url, input.full_url, &key).await
+}
+
+/// 真实连通性测试：保存前后都可用；Key 不会被此路径持久化。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestConnectionInput {
+    #[serde(default)]
+    pub id: String,
+    pub format: ApiFormat,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub model_id: String,
+    #[serde(default)]
+    pub full_url: bool,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+#[tauri::command]
+pub async fn agent_test_connection(
+    vfs_state: State<'_, VfsState>,
+    state: State<'_, AgentState>,
+    input: TestConnectionInput,
+) -> Result<ConnectionTest, ToolError> {
+    let entry = ModelEntry {
+        id: if input.id.trim().is_empty() {
+            "test".to_string()
+        } else {
+            input.id.trim().to_string()
+        },
+        label: "测试连接".to_string(),
+        format: input.format,
+        base_url: model_store::normalize_anthropic_base(
+            model_store::validate_base_url(&input.base_url)?,
+            input.format,
+            input.full_url,
+        ),
+        full_url: input.full_url,
+        model_id: input.model_id.trim().to_string(),
+    };
+    if entry.model_id.is_empty() {
+        return Err(ToolError::invalid("请先填写 Model ID"));
+    }
+    let key = match validate_key(input.api_key.as_deref())? {
+        Some(key) => key.to_string(),
+        None => {
+            if input.id.trim().is_empty() {
+                return Err(ToolError::invalid("请先填写 API Key"));
+            }
+            let stored_id = {
+                let vfs = vfs_state.0.lock().unwrap();
+                model_store::resolve(vfs.conn(), entry.id.as_str())?.id
+            };
+            state
+                .secrets
+                .get(&stored_id)
+                .map_err(|message| ToolError::Storage { message })?
+                .ok_or_else(|| ToolError::invalid("请先填写 API Key"))?
+        }
+    };
+    discovery::test_connection(state.inner(), &entry, &key).await
+}
+
+/// 读取某模型条目的参数配置；未保存过时返回空对象。
+#[tauri::command]
+pub fn agent_params_get(
+    vfs_state: State<'_, VfsState>,
+    model_entry_id: String,
+) -> Result<LlmParams, ToolError> {
+    let vfs = vfs_state.0.lock().unwrap();
+    model_store::resolve(vfs.conn(), &model_entry_id)?;
+    Ok(params::get(vfs.conn(), &model_entry_id))
+}
+
+/// 保存某模型条目的参数配置；空对象等价于清除。
+#[tauri::command]
+pub fn agent_params_set(
+    vfs_state: State<'_, VfsState>,
+    model_entry_id: String,
+    params: LlmParams,
+) -> Result<(), ToolError> {
+    let vfs = vfs_state.0.lock().unwrap();
+    model_store::resolve(vfs.conn(), &model_entry_id)?;
+    params::save(vfs.conn(), &model_entry_id, &params)
 }
 
 /// 取消指定请求；下一次读到 chunk 时停止并回 `aborted`。
@@ -145,4 +350,14 @@ pub async fn agent_stream(
 pub fn agent_cancel(state: State<'_, AgentState>, request_id: String) -> Result<(), ToolError> {
     state.cancel(&request_id);
     Ok(())
+}
+
+fn validate_key(raw: Option<&str>) -> Result<Option<&str>, ToolError> {
+    let Some(key) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if key.len() > 4096 || key.chars().any(char::is_control) {
+        return Err(ToolError::invalid("API Key 过长或包含控制字符"));
+    }
+    Ok(Some(key))
 }

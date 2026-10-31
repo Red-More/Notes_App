@@ -9,22 +9,60 @@ import type { AssistantMessage, Model, ToolCall, Usage } from '@earendil-works/p
 import { buildSystemPrompt } from './prompt'
 import { nativeStreamFn } from './stream'
 import { createTools } from './tools'
-import type { ChatMessageRecord } from '../types'
+import type { ChatMessageRecord, AgentSettings, ModelApiFormat } from '../types'
 import { parseDbTime } from '../utils'
 
-const MAX_STEPS_PER_RUN = 12
+const DEFAULT_TOOL_ROUNDS = 500
+const MAX_STEPS_PER_RUN = 500
 const MAX_WRITES_PER_RUN = 8
 
 export interface AgentProfile {
+  /** Model entry id; the Rust proxy resolves the real endpoint from it. */
   provider: string
+  /** Model ID sent to the provider. */
   model: string
+  /** pi-ai api kind derived from the stored model format. */
+  api: string
+  /** Optional capability hints persisted per model. */
+  contextWindow?: number
+  maxTokens?: number
+  supportsImages?: boolean
+  reasoning?: boolean
+  toolRounds?: number
 }
 
-const API_BY_PROVIDER: Record<string, string> = {
-  openai: 'openai-completions',
-  anthropic: 'anthropic-messages',
-  google: 'google-generative-ai',
-  mock: 'mock',
+/** Map the stored wire format to the pi-ai api descriptor. */
+export function apiForFormat(format: ModelApiFormat | undefined): string {
+  switch (format) {
+    case 'anthropic-messages':
+      return 'anthropic-messages'
+    case 'openai-responses':
+      return 'openai-responses'
+    default:
+      return 'openai-completions'
+  }
+}
+
+/**
+ * Build a profile for a conversation. The requested entry wins; a deleted
+ * entry falls back to the active model. `null` means the user has no model yet.
+ */
+export function profileFromSettings(
+  settings: AgentSettings,
+  entryId: string | undefined,
+  model: string | undefined,
+): AgentProfile | null {
+  const entry =
+    settings.models.find((item) => item.id === entryId) ??
+    settings.models.find((item) => item.id === settings.activeId)
+  if (!entry) return null
+  return {
+    provider: entry.id,
+    // The saved entry is authoritative: editing its Model ID applies to old
+    // conversations as well.
+    model: entry.modelId || (model ?? ''),
+    api: apiForFormat(entry.format),
+  }
 }
 
 function zeroUsage(): Usage {
@@ -46,14 +84,14 @@ export function createAppModel(profile: AgentProfile): Model<string> {
   return {
     id: profile.model,
     name: profile.model,
-    api: API_BY_PROVIDER[profile.provider] ?? 'openai-completions',
+    api: profile.api,
     provider: profile.provider,
     baseUrl: '',
-    input: ['text'],
+    input: profile.supportsImages ? ['text', 'image'] : ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 128000,
-    maxTokens: 4096,
-    reasoning: false,
+    contextWindow: profile.contextWindow ?? 128000,
+    maxTokens: profile.maxTokens ?? 4096,
+    reasoning: profile.reasoning ?? false,
   }
 }
 
@@ -78,7 +116,7 @@ function toAssistantMessage(record: ChatMessageRecord, profile: AgentProfile): A
   return {
     role: 'assistant',
     content,
-    api: API_BY_PROVIDER[profile.provider] ?? 'openai-completions',
+    api: profile.api,
     provider: profile.provider,
     model: profile.model,
     usage: zeroUsage(),
@@ -132,6 +170,7 @@ export function createAgent(
     toolExecution: 'parallel',
     // 配额硬限额：按“最近一条 user 消息之后”统计，避免模型循环调用拖垮设备。
     beforeToolCall: async ({ context }) => {
+      const maxSteps = Math.min(profile.toolRounds ?? DEFAULT_TOOL_ROUNDS, MAX_STEPS_PER_RUN)
       let steps = 0
       let writes = 0
       for (let i = context.messages.length - 1; i >= 0; i -= 1) {
@@ -147,10 +186,10 @@ export function createAgent(
           }
         }
       }
-      if (steps >= MAX_STEPS_PER_RUN) {
+      if (steps >= maxSteps) {
         return {
           block: true,
-          reason: `单轮工具调用超过 ${MAX_STEPS_PER_RUN} 步，请先总结已获得的信息再继续`,
+          reason: `单轮工具调用超过 ${maxSteps} 步，请先总结已获得的信息再继续`,
           terminate: true,
         }
       }

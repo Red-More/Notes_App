@@ -57,24 +57,6 @@ pub struct NewMessage {
     pub is_error: bool,
 }
 
-/// 设置页可见的 Agent 配置；不含密钥内容。
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentSettings {
-    pub provider: String,
-    pub model: String,
-    /// 各厂商是否已配置 Key。
-    pub key_configured: Vec<KeyStatus>,
-    pub providers: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KeyStatus {
-    pub provider: String,
-    pub configured: bool,
-}
-
 fn now(conn: &Connection) -> Result<String, ToolError> {
     Ok(conn.query_row("SELECT datetime('now','localtime')", [], |r| r.get(0))?)
 }
@@ -129,8 +111,12 @@ pub fn create(
     provider: String,
     model: String,
 ) -> Result<Conversation, ToolError> {
-    if model.chars().count() > MAX_MODEL_CHARS {
-        return Err(ToolError::invalid("模型名过长"));
+    if model.chars().count() > MAX_MODEL_CHARS || model.chars().any(char::is_control) {
+        return Err(ToolError::invalid("模型名非法"));
+    }
+    let entry = crate::agent::model_store::resolve(vfs.conn(), &provider)?;
+    if model != entry.model_id {
+        return Err(ToolError::invalid("模型与会话配置不一致"));
     }
     let conn = vfs.conn();
     let title = match title {
@@ -300,73 +286,4 @@ fn row_to_message(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
         is_error: r.get::<_, i64>(6)? != 0,
         created_at: r.get(7)?,
     })
-}
-
-// ---- settings（非密钥配置） ----
-
-const KEY_PROVIDER: &str = "agent.provider";
-const KEY_MODEL: &str = "agent.model";
-
-pub fn settings(conn: &Connection, keys: &[(String, bool)]) -> Result<AgentSettings, ToolError> {
-    let stored_provider = read_setting(conn, KEY_PROVIDER)?;
-    // 存储值可能来自调试包的 mock：无效厂商一律回退到当前构建的默认值，
-    // 并丢弃与之配套的模型，避免 release 包继续带着 mock-fast 去请求真实厂商。
-    let provider = match stored_provider.as_deref() {
-        Some(p) if crate::agent::is_provider(p) => p.to_string(),
-        _ => crate::agent::DEFAULT_PROVIDER.to_string(),
-    };
-    let model = match stored_provider.as_deref() {
-        Some(p) if crate::agent::is_provider(p) => read_setting(conn, KEY_MODEL)?
-            .unwrap_or_else(|| crate::agent::DEFAULT_MODEL.to_string()),
-        _ => crate::agent::DEFAULT_MODEL.to_string(),
-    };
-    Ok(AgentSettings {
-        provider,
-        model,
-        key_configured: keys
-            .iter()
-            .map(|(p, configured)| KeyStatus {
-                provider: p.clone(),
-                configured: *configured,
-            })
-            .collect(),
-        providers: crate::agent::PROVIDERS
-            .iter()
-            .map(|p| p.to_string())
-            .collect(),
-    })
-}
-
-pub fn set_settings(conn: &Connection, provider: &str, model: &str) -> Result<(), ToolError> {
-    if !crate::agent::is_provider(provider) {
-        return Err(ToolError::invalid("不支持的厂商"));
-    }
-    let model = model.trim();
-    if model.is_empty() || model.chars().count() > MAX_MODEL_CHARS {
-        return Err(ToolError::invalid("模型名非法"));
-    }
-    let at = now(conn)?;
-    write_setting(conn, KEY_PROVIDER, provider, &at)?;
-    write_setting(conn, KEY_MODEL, model, &at)?;
-    Ok(())
-}
-
-fn read_setting(conn: &Connection, key: &str) -> Result<Option<String>, ToolError> {
-    let value: Option<String> = conn
-        .query_row(
-            "SELECT value FROM settings WHERE key = ?1",
-            params![key],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(value)
-}
-
-fn write_setting(conn: &Connection, key: &str, value: &str, at: &str) -> Result<(), ToolError> {
-    conn.execute(
-        "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-        params![key, value, at],
-    )?;
-    Ok(())
 }

@@ -31,6 +31,8 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # Agent LLM 代理：唯一网络出口，SSE 流式转发；rustls 便于 Android 交叉编译。
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 futures-util = "0.3"
+# Provider base URL validation: HTTPS-only, public host, no credentials.
+url = "2"
 
 # M2-4b：Android Keystore。凭据密文写 SharedPreferences，加密密钥由 Keystore 生成且不可导出。
 # 仅 Android 目标编译；其 ndk-context 依赖已由 Tauri 的 tao 运行时初始化。

@@ -2,40 +2,21 @@
 //!
 //! 边界：
 //! - LLM 请求只从 Rust 发起；WebView 通过自研 `streamFn` 走 `agent_stream` 桥接。
-//! - `agent_stream` 只接受 provider 枚举，不接受任意 URL / base_url / api_key。
-//! - API Key 存在应用私有文件（0600），不进 SQLite、不进 JS、不进日志。
+//! - `agent_stream` 只接受模型条目 id，不接受任意 URL / base_url / api_key。
+//! - API Key 存在 Keystore（Android）或 0600 私有文件（桌面），不进 SQLite、不进 JS、不进日志。
 //! - 会话与消息落 `life.db`；模型可见的工具永远只有 5 个 `fs_*`。
 
 pub mod conversations;
+pub mod discovery;
 pub mod llm;
+pub mod model_store;
+pub mod params;
 pub mod secrets;
 
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-
-/// 支持的厂商。枚举之外的字符串一律拒绝，映射到固定 base URL。
-/// `mock` 只在调试构建注册：release 包既不能选择，也不能被前端伪造调用。
-#[cfg(debug_assertions)]
-pub const PROVIDERS: &[&str] = &["openai", "anthropic", "google", "mock"];
-
-#[cfg(not(debug_assertions))]
-pub const PROVIDERS: &[&str] = &["openai", "anthropic", "google"];
-
-/// 首次启动或配置损坏时的默认 provider。
-#[cfg(debug_assertions)]
-pub const DEFAULT_PROVIDER: &str = "mock";
-
-#[cfg(not(debug_assertions))]
-pub const DEFAULT_PROVIDER: &str = "openai";
-
-/// 与默认 provider 配套的默认模型。
-#[cfg(debug_assertions)]
-pub const DEFAULT_MODEL: &str = "mock-fast";
-
-#[cfg(not(debug_assertions))]
-pub const DEFAULT_MODEL: &str = "gpt-4o-mini";
 
 /// 模型可见的工具白名单，Rust 侧二次校验。
 pub const TOOL_ALLOWLIST: [&str; 5] = ["fs_read", "fs_write", "fs_edit", "fs_glob", "fs_grep"];
@@ -95,9 +76,4 @@ impl AgentState {
             }
         }
     }
-}
-
-/// provider 是否在枚举内。
-pub fn is_provider(value: &str) -> bool {
-    PROVIDERS.contains(&value)
 }

@@ -2869,3 +2869,176 @@ body.split-resizing {
   gap: 10px;
   margin-top: 8px;
 }
+
+/* Agent settings: user-defined model list */
+.model-row {
+  background: var(--surface);
+  border: 1.5px solid transparent;
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  box-shadow: var(--shadow);
+}
+
+.model-row.active {
+  border-color: var(--accent-border);
+  background: var(--accent-weak);
+}
+
+.model-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.model-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.model-badge {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border: 1px solid var(--accent-border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.model-meta {
+  font-size: 12px;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.model-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.model-actions .restore-default {
+  padding: 8px 10px;
+}
+
+.restore-default.danger {
+  color: var(--danger);
+}
+
+.restore-default:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.model-add {
+  width: 100%;
+}
+
+.form-required {
+  color: var(--danger);
+}
+
+.settings-switch-row.function-toggle {
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 4px 2px 8px;
+  border-top: none;
+}
+
+.settings-switch-row.function-toggle input {
+  accent-color: var(--accent);
+}
+
+.field-counter {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.field-counter .form-input {
+  padding-right: 56px;
+}
+
+.counter-text {
+  position: absolute;
+  right: 12px;
+  color: var(--text-3);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.param-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip-btn {
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.chip-btn.active {
+  border-color: var(--accent-border);
+  background: var(--accent-weak);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* Agent settings: layered parameter rows */
+.param-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+}
+
+.param-label {
+  flex: 0 0 150px;
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+.param-row input[type='range'] {
+  flex: 1;
+  accent-color: var(--accent);
+}
+
+.param-number {
+  width: 84px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.param-number.wide {
+  width: 150px;
+}
+
+.param-json {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.param-error {
+  color: var(--danger);
+}
+
+.settings-switch-row.compact {
+  gap: 8px;
+}

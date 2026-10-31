@@ -5,7 +5,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { chatApi } from '../../api'
-import { createAgent, extractAssistant, toAgentMessages } from '../../agent/runtime'
+import { createAgent, extractAssistant, profileFromSettings, toAgentMessages } from '../../agent/runtime'
 import type { AgentProfile } from '../../agent/runtime'
 import type { AgentEvent } from '@earendil-works/pi-agent-core'
 import type { AgentSettings, ChatConversation, ChatMessageRecord } from '../../types'
@@ -69,6 +69,24 @@ function toolResultText(result: unknown): string {
   const value = result as { content?: Array<{ text?: string }> } | null
   if (!value?.content) return ''
   return value.content.map((block) => block.text ?? '').join('\n')
+}
+
+/** Merge persisted per-model capabilities into the pi profile. */
+async function withCapabilities(profile: AgentProfile): Promise<AgentProfile> {
+  try {
+    const params = await chatApi.paramsGet(profile.provider)
+    return {
+      ...profile,
+      contextWindow: params.contextWindowInput,
+      maxTokens: params.contextWindowOutput ?? params.maxTokens,
+      supportsImages: params.supportsImages ?? false,
+      reasoning: params.thinkingMode === 'on',
+      toolRounds: params.toolRounds,
+    }
+  } catch {
+    // Capability hints are optional; a read failure must not block chat.
+    return profile
+  }
 }
 
 export default function ChatPage({ isActive }: Props) {
@@ -236,7 +254,7 @@ export default function ChatPage({ isActive }: Props) {
   }, [])
 
   const openConversation = useCallback(
-    async (conv: ChatConversation, override?: AgentProfile) => {
+    async (conv: ChatConversation) => {
       disposeAgent()
       conversationRef.current = conv
       setConversation(conv)
@@ -244,15 +262,16 @@ export default function ChatPage({ isActive }: Props) {
       try {
         const records = await chatApi.messages(conv.id)
         setItems(recordsToItems(records))
-        // 优先用显式覆盖（设置变更新模型）；设置尚未加载时退回会话自身记录的 profile，
-        // 不再在前端硬编码 mock —— release 构建里 mock 是不可用的。
-        // 读 ref 而不是 settings state，避免本回调随设置对象变化而重建。
+        // 优先使用会话记录里的模型条目；该条目被删除后回退到当前激活模型。
         const current = settingsRef.current
-        const activeProfile =
-          override ??
-          (current
-            ? { provider: current.provider, model: current.model }
-            : { provider: conv.provider, model: conv.model })
+        const baseProfile = current
+          ? profileFromSettings(current, conv.provider, conv.model)
+          : null
+        if (!baseProfile) {
+          // 没有可用模型时仍可查看历史，只是不能发送。
+          return
+        }
+        const activeProfile = await withCapabilities(baseProfile)
         const agent = createAgent(activeProfile, toAgentMessages(records, activeProfile))
         unsubscribeRef.current = agent.subscribe((event) => {
           handleEvent(event)
@@ -276,16 +295,14 @@ export default function ChatPage({ isActive }: Props) {
       setConversations(list)
       let target = list[0]
       if (!target) {
-        target = await chatApi.create({
-          provider: nextSettings.provider,
-          model: nextSettings.model,
-        })
+        if (!nextSettings.activeId) {
+          setLoading(false)
+          return
+        }
+        target = await chatApi.create()
         setConversations([target])
       }
-      await openConversation(target, {
-        provider: nextSettings.provider,
-        model: nextSettings.model,
-      })
+      await openConversation(target)
     } catch (e) {
       toast(friendlyError(e))
       setLoading(false)
@@ -311,17 +328,16 @@ export default function ChatPage({ isActive }: Props) {
       try {
         const next = await chatApi.settings()
         if (disposed) return
-        const prev = settingsRef.current
-        const changed = !prev || next.provider !== prev.provider || next.model !== prev.model
         setSettings(next)
         settingsRef.current = next
+        // Rebuild on every activation so per-model capability edits are applied.
         const conv = conversationRef.current
-        if (changed && conv) {
-          await openConversation(
-            { ...conv, provider: next.provider, model: next.model },
-            { provider: next.provider, model: next.model },
-          )
+        if (!conv) return
+        if (!next.activeId && next.models.length === 0) {
+          disposeAgent()
+          return
         }
+        await openConversation(conv)
       } catch (e) {
         console.error('刷新 Agent 配置失败', e)
       }
@@ -329,7 +345,7 @@ export default function ChatPage({ isActive }: Props) {
     return () => {
       disposed = true
     }
-  }, [isActive, openConversation])
+  }, [disposeAgent, isActive, openConversation])
 
   const ensureTitle = useCallback(async (text: string) => {
     const conv = conversationRef.current
@@ -390,11 +406,12 @@ export default function ChatPage({ isActive }: Props) {
   }, [])
 
   const newConversation = useCallback(async () => {
+    if (!settings?.activeId) {
+      toast('请先在设置 → AI 助理中添加并启用一个模型')
+      return
+    }
     try {
-      const created = await chatApi.create({
-        provider: settings?.provider,
-        model: settings?.model,
-      })
+      const created = await chatApi.create()
       setConversations((prev) => [created, ...prev])
       setDrawerOpen(false)
       await openConversation(created)
@@ -447,10 +464,11 @@ export default function ChatPage({ isActive }: Props) {
     }
   }, [renameId, renameText])
 
-  const providerLabel =
-    settings?.provider === 'mock'
-      ? 'mock（未配置真实模型）'
-      : `${settings?.provider ?? ''} · ${settings?.model ?? ''}`
+  const activeModel = settings?.models.find((item) => item.id === settings.activeId) ?? null
+  const modelLabel = activeModel
+    ? `${activeModel.label} · ${activeModel.modelId}`
+    : '未添加模型'
+  const hasModel = settings?.activeId != null
 
   return (
     <div className="page chat-page">
@@ -466,7 +484,7 @@ export default function ChatPage({ isActive }: Props) {
         ]}
       />
 
-      <div className="chat-status">{providerLabel}</div>
+      <div className="chat-status">{modelLabel}</div>
 
       <div className="page-scroll chat-scroll" ref={scrollRef}>
         {loading ? (
@@ -474,7 +492,11 @@ export default function ChatPage({ isActive }: Props) {
         ) : items.length === 0 ? (
           <EmptyState
             icon={<IconChat size={44} />}
-            text="说一句话就能记事：试试“记下今天吃了拉面”"
+            text={
+              hasModel
+                ? '说一句话就能记事：试试“记下今天吃了拉面”'
+                : '请先在设置 → AI 助理中添加并启用一个模型'
+            }
           />
         ) : (
           items.map((item) =>
@@ -512,7 +534,8 @@ export default function ChatPage({ isActive }: Props) {
           className="chat-input"
           value={input}
           rows={1}
-          placeholder={settings?.provider === 'mock' ? 'mock 模式：输入任意内容试试' : '说点什么…'}
+          placeholder={hasModel ? '说点什么…' : '请先添加模型'}
+          disabled={!hasModel}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
@@ -530,7 +553,7 @@ export default function ChatPage({ isActive }: Props) {
             type="button"
             className="chat-send"
             aria-label="发送"
-            disabled={input.trim() === ''}
+            disabled={input.trim() === '' || !hasModel}
             onClick={() => void send()}
           >
             <IconSend size={20} />
@@ -582,7 +605,7 @@ export default function ChatPage({ isActive }: Props) {
                   >
                     <span className="chat-conv-title">{conv.title}</span>
                     <span className="chat-conv-meta">
-                      {conv.messageCount} 条 · {conv.provider}
+                      {conv.messageCount} 条 · {conv.model}
                     </span>
                   </button>
                 )}

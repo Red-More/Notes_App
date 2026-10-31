@@ -1,6 +1,4 @@
-import { useSyncExternalStore, useState, useEffect } from 'react'
-import { chatApi } from '../../api'
-import type { AgentSettings } from '../../types'
+import { useSyncExternalStore, useState } from 'react'
 import { getStoredTheme, setStoredTheme, type Theme } from '../../theme'
 import {
   DEFAULT_INTERVAL,
@@ -31,7 +29,7 @@ import {
   type LayoutPrefs,
 } from '../../editor/layout'
 import { toast } from '../../toast'
-import { friendlyError } from '../../utils'
+import AgentSettingsSection from './AgentSettingsSection'
 import {
   getMermaidEnhance,
   setMermaidEnhance,
@@ -63,13 +61,6 @@ const LAYOUT_MODE_OPTIONS: Array<{ key: LayoutMode; label: string }> = [
   { key: 'split', label: '分屏' },
   { key: 'preview', label: '仅预览' },
 ]
-
-const PROVIDER_LABELS: Record<string, string> = {
-  openai: 'OpenAI',
-  anthropic: 'Anthropic',
-  google: 'Gemini',
-  mock: 'Mock（离线）',
-}
 
 interface RowProps {
   meta: SaveStrategyMeta
@@ -145,97 +136,6 @@ export default function SettingsPage({ onBack }: Props) {
   const [layout, setLayout] = useState(() => getLayoutPrefs())
   const [hintFor, setHintFor] = useState<SaveStrategyKey | null>(null)
   const [tipFor, setTipFor] = useState<SaveStrategyKey | null>(null)
-  const [agent, setAgent] = useState<AgentSettings | null>(null)
-  const [modelDraft, setModelDraft] = useState('')
-  const [keyDraft, setKeyDraft] = useState('')
-  const [agentSaving, setAgentSaving] = useState(false)
-
-  useEffect(() => {
-    void (async () => {
-      try {
-        const settings = await chatApi.settings()
-        setAgent(settings)
-        setModelDraft(settings.model)
-      } catch (e) {
-        console.error('读取 Agent 配置失败', e)
-      }
-    })()
-  }, [])
-
-  const keyConfigured = agent?.keyConfigured.some(
-    (item) => item.provider === agent.provider && item.configured,
-  )
-
-  const chooseProvider = async (provider: string) => {
-    if (!agent) return
-    const prev = agent
-    setAgent({ ...agent, provider })
-    try {
-      await chatApi.setSettings({ provider, model: modelDraft.trim() || agent.model })
-      toast(`已切换到 ${PROVIDER_LABELS[provider] ?? provider}`)
-    } catch (e) {
-      // 保存失败回滚 UI，避免显示未持久化的厂商。
-      setAgent(prev)
-      toast(friendlyError(e))
-    }
-  }
-
-  const saveModel = async () => {
-    if (!agent) return
-    const model = modelDraft.trim()
-    if (!model) {
-      toast('请填写模型名')
-      return
-    }
-    setAgentSaving(true)
-    try {
-      await chatApi.setSettings({ provider: agent.provider, model })
-      setAgent({ ...agent, model })
-      toast('模型已保存')
-    } catch (e) {
-      toast(friendlyError(e))
-    } finally {
-      setAgentSaving(false)
-    }
-  }
-
-  const saveKey = async () => {
-    if (!agent) return
-    const key = keyDraft.trim()
-    if (!key) {
-      toast('请粘贴 API Key')
-      return
-    }
-    try {
-      await chatApi.setKey({ provider: agent.provider, key })
-      setKeyDraft('')
-      setAgent({
-        ...agent,
-        keyConfigured: agent.keyConfigured.map((item) =>
-          item.provider === agent.provider ? { ...item, configured: true } : item,
-        ),
-      })
-      toast('密钥已保存到本机（不会进入网页环境）')
-    } catch (e) {
-      toast(friendlyError(e))
-    }
-  }
-
-  const deleteKey = async () => {
-    if (!agent) return
-    try {
-      await chatApi.deleteKey(agent.provider)
-      setAgent({
-        ...agent,
-        keyConfigured: agent.keyConfigured.map((item) =>
-          item.provider === agent.provider ? { ...item, configured: false } : item,
-        ),
-      })
-      toast('密钥已删除')
-    } catch (e) {
-      toast(friendlyError(e))
-    }
-  }
   const mermaidEnhance = useSyncExternalStore(
     subscribeMermaidEnhance,
     getMermaidEnhance,
@@ -327,78 +227,7 @@ export default function SettingsPage({ onBack }: Props) {
           <ChipRow items={THEME_OPTIONS} value={theme} onChange={handleTheme} />
         </div>
 
-        <div className="settings-section-title">AI 助理</div>
-        {agent ? (
-          <>
-            <div className="form-field">
-              <span className="form-label">厂商</span>
-              <ChipRow
-                items={agent.providers.map((provider) => ({
-                  key: provider,
-                  label: PROVIDER_LABELS[provider] ?? provider,
-                }))}
-                value={agent.provider}
-                onChange={(provider) => void chooseProvider(provider)}
-              />
-              <p className="settings-note">
-                provider 只能是枚举内的厂商；请求由 Rust 发出，WebView 不直连模型服务。
-              </p>
-            </div>
-            <div className="form-field">
-              <label className="form-label" htmlFor="agent-model">
-                模型
-              </label>
-              <input
-                id="agent-model"
-                className="form-input"
-                value={modelDraft}
-                onChange={(e) => setModelDraft(e.target.value)}
-                placeholder="如 gpt-4o-mini / claude-sonnet-4-6 / gemini-2.0-flash"
-              />
-              <button
-                type="button"
-                className="restore-default"
-                disabled={agentSaving}
-                onClick={() => void saveModel()}
-              >
-                保存模型
-              </button>
-            </div>
-            {agent.provider !== 'mock' && (
-              <div className="form-field">
-                <span className="form-label">
-                  API Key（{keyConfigured ? '已配置' : '未配置'}）
-                </span>
-                <input
-                  className="form-input"
-                  type="password"
-                  value={keyDraft}
-                  autoComplete="off"
-                  placeholder={keyConfigured ? '已保存；粘贴新值可覆盖' : '粘贴 API Key'}
-                  onChange={(e) => setKeyDraft(e.target.value)}
-                />
-                <div className="chat-key-actions">
-                  <button type="button" className="restore-default" onClick={() => void saveKey()}>
-                    保存密钥
-                  </button>
-                  {keyConfigured && (
-                    <button type="button" className="restore-default" onClick={() => void deleteKey()}>
-                      删除密钥
-                    </button>
-                  )}
-                </div>
-                <p className="settings-note">
-                  Android 上密钥写入 Keystore 加密存储（加密密钥不可导出）；桌面开发机为
-                  应用私有文件（0600）。密钥不写数据库、不下发网页环境、不写日志。
-                </p>
-              </div>
-            )}
-          </>
-        ) : (
-          <div className="form-field">
-            <p className="settings-note">读取 Agent 配置…</p>
-          </div>
-        )}
+        <AgentSettingsSection />
 
         <div className="settings-section-title">编辑与保存</div>
         <div className="form-field">

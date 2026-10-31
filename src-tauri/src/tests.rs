@@ -5,7 +5,9 @@
 use rusqlite::params;
 use serde_json::Value;
 
-use crate::agent::{conversations, llm, secrets};
+use crate::agent::model_store::{self, ApiFormat, ModelEntry, ModelInput};
+use crate::agent::params::{self, LlmParams};
+use crate::agent::{conversations, discovery, llm, secrets};
 use crate::db;
 use crate::docs::{self, types::DocFields, versions};
 use crate::vfs::cap_gate;
@@ -427,8 +429,34 @@ fn write_source_semantics() {
 }
 
 // ---------------------------------------------------------------------------
-// M2 Agent 闭环：schema v3、会话、设置、密钥、代理请求校验
+// Agent 自定义模型：注册表、激活、URL 校验、参数、代理请求
 // ---------------------------------------------------------------------------
+
+fn add_model(vfs: &VirtualFs, label: &str, model_id: &str) -> ModelEntry {
+    model_store::save(
+        vfs.conn(),
+        ModelInput {
+            id: String::new(),
+            label: label.into(),
+            format: ApiFormat::OpenAiChat,
+            base_url: "https://api.example.com/v1".into(),
+            model_id: model_id.into(),
+            full_url: false,
+        },
+    )
+    .expect("model should be created")
+}
+
+fn put_setting(vfs: &VirtualFs, key: &str, value: &str) {
+    vfs.conn()
+        .execute(
+            "INSERT INTO settings (key, value, updated_at)
+             VALUES (?1, ?2, datetime('now','localtime'))
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )
+        .expect("setting should be written");
+}
 
 #[test]
 fn schema_v3_creates_agent_tables() {
@@ -453,11 +481,12 @@ fn schema_v3_creates_agent_tables() {
 #[test]
 fn conversation_lifecycle_persists_messages() {
     let vfs = test_vfs();
+    let entry = add_model(&vfs, "测试模型", "demo-model");
     let conv = conversations::create(
         &vfs,
         Some("第一段对话".into()),
-        "mock".into(),
-        "mock-fast".into(),
+        entry.id.clone(),
+        entry.model_id.clone(),
     )
     .unwrap();
     assert_eq!(conv.message_count, 0);
@@ -514,7 +543,8 @@ fn conversation_lifecycle_persists_messages() {
 #[test]
 fn conversation_rejects_unknown_roles_and_bad_titles() {
     let vfs = test_vfs();
-    let conv = conversations::create(&vfs, None, "mock".into(), "mock-fast".into()).unwrap();
+    let entry = add_model(&vfs, "测试模型", "demo-model");
+    let conv = conversations::create(&vfs, None, entry.id.clone(), entry.model_id.clone()).unwrap();
     let bad_role = conversations::append(
         &vfs,
         conv.id,
@@ -533,36 +563,252 @@ fn conversation_rejects_unknown_roles_and_bad_titles() {
 }
 
 #[test]
-fn agent_settings_default_to_mock_and_persist_choice() {
+fn model_registry_starts_empty_and_persists_crud() {
     let vfs = test_vfs();
-    let settings = conversations::settings(vfs.conn(), &[("mock".to_string(), false)]).unwrap();
-    #[cfg(debug_assertions)]
-    {
-        assert_eq!(settings.provider, "mock");
-        assert_eq!(settings.model, "mock-fast");
-        assert_eq!(settings.providers.len(), 4);
+    let empty = model_store::settings(vfs.conn(), &[]).unwrap();
+    assert!(empty.active_id.is_none(), "no preset models may exist");
+    assert!(empty.models.is_empty());
+
+    let first = add_model(&vfs, "第一个模型", "demo-model");
+    assert!(first.id.starts_with("custom_"));
+    let settings = model_store::settings(vfs.conn(), &[]).unwrap();
+    assert_eq!(
+        settings.active_id.as_deref(),
+        Some(first.id.as_str()),
+        "the first model becomes active automatically"
+    );
+    assert_eq!(settings.models.len(), 1);
+
+    let edited = model_store::save(
+        vfs.conn(),
+        ModelInput {
+            id: first.id.clone(),
+            label: "改名后".into(),
+            format: ApiFormat::AnthropicMessages,
+            base_url: "https://api.example.com/v1".into(),
+            model_id: "demo-model-2".into(),
+            full_url: true,
+        },
+    )
+    .unwrap();
+    assert_eq!(edited.label, "改名后");
+    assert_eq!(edited.model_id, "demo-model-2");
+    assert!(edited.full_url);
+    assert_eq!(
+        model_store::resolve(vfs.conn(), &first.id)
+            .unwrap()
+            .format,
+        ApiFormat::AnthropicMessages
+    );
+
+    let second = add_model(&vfs, "第二个模型", "another-model");
+    model_store::set_active(vfs.conn(), &second.id).unwrap();
+    assert_eq!(
+        model_store::settings(vfs.conn(), &[])
+            .unwrap()
+            .active_id
+            .as_deref(),
+        Some(second.id.as_str())
+    );
+
+    model_store::delete(vfs.conn(), &second.id).unwrap();
+    let healed = model_store::settings(vfs.conn(), &[]).unwrap();
+    assert_eq!(
+        healed.active_id.as_deref(),
+        Some(first.id.as_str()),
+        "deleting the active model must fall back to a remaining one"
+    );
+
+    model_store::delete(vfs.conn(), &first.id).unwrap();
+    assert!(model_store::settings(vfs.conn(), &[])
+        .unwrap()
+        .active_id
+        .is_none());
+    assert!(model_store::set_active(vfs.conn(), "custom_x").is_err());
+    assert!(model_store::delete(vfs.conn(), "custom_x").is_err());
+}
+
+#[test]
+fn model_registry_validates_base_url_and_labels() {
+    let vfs = test_vfs();
+    let invalid = [
+        "http://api.example.com/v1",
+        "https://localhost/v1",
+        "https://192.168.1.10/v1",
+        "https://10.0.0.8/v1",
+        "https://user:pass@api.example.com/v1",
+        "https://api.example.com/v1?key=1",
+        "https://api.example.com/v1#frag",
+        "",
+    ];
+    for base_url in invalid {
+        let result = model_store::save(
+            vfs.conn(),
+            ModelInput {
+                id: String::new(),
+                label: "测试".into(),
+                format: ApiFormat::OpenAiChat,
+                base_url: base_url.into(),
+                model_id: "demo".into(),
+                full_url: false,
+            },
+        );
+        assert!(result.is_err(), "{base_url} must be rejected");
     }
-    #[cfg(not(debug_assertions))]
-    {
-        assert_eq!(settings.provider, "openai");
-        assert_eq!(settings.model, "gpt-4o-mini");
-        assert_eq!(settings.providers.len(), 3);
-        assert!(
-            !settings.providers.iter().any(|p| p == "mock"),
-            "release builds must not expose mock"
+
+    let no_model = model_store::save(
+        vfs.conn(),
+        ModelInput {
+            id: String::new(),
+            label: String::new(),
+            format: ApiFormat::OpenAiChat,
+            base_url: "https://api.example.com/v1".into(),
+            model_id: String::new(),
+            full_url: false,
+        },
+    );
+    assert!(no_model.is_err(), "Model ID is required");
+
+    let fallback = add_model(&vfs, "", "display-fallback");
+    assert_eq!(
+        fallback.label, "display-fallback",
+        "display name falls back to the model id"
+    );
+    assert!(model_store::save(
+        vfs.conn(),
+        ModelInput {
+            id: fallback.id,
+            label: "长".repeat(65),
+            format: ApiFormat::OpenAiChat,
+            base_url: "https://api.example.com/v1".into(),
+            model_id: "display-fallback".into(),
+            full_url: false,
+        },
+    )
+    .is_err());
+}
+
+#[test]
+fn model_endpoints_cover_three_formats() {
+    for (format, base_url, suffix) in [
+        (
+            ApiFormat::OpenAiChat,
+            "https://api.example.com/v1",
+            "/chat/completions",
+        ),
+        (
+            ApiFormat::OpenAiResponses,
+            "https://api.example.com/v1",
+            "/responses",
+        ),
+        (
+            ApiFormat::AnthropicMessages,
+            "https://api.example.com",
+            "/v1/messages",
+        ),
+    ] {
+        let entry = ModelEntry {
+            id: "custom_1".into(),
+            label: "测试".into(),
+            format,
+            base_url: base_url.into(),
+            full_url: false,
+            model_id: "demo-model".into(),
+        };
+        assert_eq!(
+            model_store::endpoint(&entry),
+            format!("{base_url}{suffix}")
+        );
+        let full = ModelEntry {
+            full_url: true,
+            ..entry
+        };
+        assert_eq!(
+            model_store::endpoint(&full),
+            base_url,
+            "full URL mode must not append a path"
         );
     }
+}
 
-    conversations::set_settings(vfs.conn(), "openai", "gpt-4o-mini").unwrap();
-    let saved = conversations::settings(vfs.conn(), &[]).unwrap();
-    assert_eq!(saved.provider, "openai");
-    assert_eq!(saved.model, "gpt-4o-mini");
-
-    assert!(
-        conversations::set_settings(vfs.conn(), "evil", "whatever").is_err(),
-        "providers outside the enum must be rejected"
+#[test]
+fn anthropic_base_url_normalizes_legacy_v1_suffix() {
+    let vfs = test_vfs();
+    let legacy = model_store::save(
+        vfs.conn(),
+        ModelInput {
+            id: String::new(),
+            label: "旧 Anthropic".into(),
+            format: ApiFormat::AnthropicMessages,
+            base_url: "https://api.example.com/v1".into(),
+            model_id: "claude-demo".into(),
+            full_url: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(legacy.base_url, "https://api.example.com");
+    assert_eq!(
+        model_store::endpoint(&legacy),
+        "https://api.example.com/v1/messages"
     );
-    assert!(conversations::set_settings(vfs.conn(), "openai", "").is_err());
+
+    let full = model_store::save(
+        vfs.conn(),
+        ModelInput {
+            id: String::new(),
+            label: "Full URL".into(),
+            format: ApiFormat::AnthropicMessages,
+            base_url: "https://api.example.com/v1/messages".into(),
+            model_id: "claude-demo".into(),
+            full_url: true,
+        },
+    )
+    .unwrap();
+    assert_eq!(full.base_url, "https://api.example.com/v1/messages");
+    assert_eq!(
+        model_store::endpoint(&full),
+        "https://api.example.com/v1/messages"
+    );
+}
+
+#[test]
+fn legacy_provider_settings_are_cleaned_once() {
+    let dir = std::env::temp_dir().join(format!("lifeos-legacy-{}", std::process::id()));
+    let path = dir.join("agent-secrets.json");
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = secrets::SecretStore::new(path.clone());
+    let vfs = test_vfs();
+
+    put_setting(
+        &vfs,
+        "agent.provider_configs",
+        r#"[{"id":"deepseek","label":"DeepSeek"}]"#,
+    );
+    put_setting(&vfs, "agent.provider", "deepseek");
+    put_setting(&vfs, "agent.model", "deepseek-chat");
+    put_setting(&vfs, "agent.params.v1", "{}");
+    store.set("deepseek", "sk-legacy").unwrap();
+
+    model_store::cleanup_legacy(vfs.conn(), &store);
+    let legacy_count: i64 = vfs
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM settings WHERE key IN
+             ('agent.provider','agent.model','agent.provider_configs','agent.params.v1')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(legacy_count, 0, "legacy settings must be deleted");
+    assert!(!store.has("deepseek"), "legacy provider key must be deleted");
+
+    // A real model added afterwards must survive a second cleanup call.
+    let entry = add_model(&vfs, "新模型", "demo-model");
+    store.set(&entry.id, "sk-new").unwrap();
+    model_store::cleanup_legacy(vfs.conn(), &store);
+    assert!(store.has(&entry.id), "v2 keys must not be touched");
+    assert_eq!(model_store::configs(vfs.conn()).unwrap().len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -627,24 +873,39 @@ fn proxy_request(provider: &str, model: &str) -> llm::ProxyRequest {
     }
 }
 
+fn test_entry(id: &str, model_id: &str) -> ModelEntry {
+    ModelEntry {
+        id: id.into(),
+        label: "测试".into(),
+        format: ApiFormat::OpenAiChat,
+        base_url: "https://api.example.com/v1".into(),
+        full_url: false,
+        model_id: model_id.into(),
+    }
+}
+
 #[test]
 fn proxy_request_rejects_untrusted_inputs() {
-    assert!(llm::validate_request(&proxy_request("evil", "gpt-4o")).is_err());
-    assert!(llm::validate_request(&proxy_request("openai", "../etc/passwd")).is_err());
-    assert!(llm::validate_request(&proxy_request("openai", "gpt-4o?x=1")).is_err());
-    assert!(llm::validate_request(&proxy_request("openai", "gpt-4o-mini")).is_ok());
-    #[cfg(debug_assertions)]
+    let entry = test_entry("custom_1", "gpt-4o-mini");
+    assert!(llm::validate_request(&proxy_request("evil", "gpt-4o-mini"), &entry).is_err());
+    assert!(llm::validate_request(&proxy_request("custom_1", ""), &entry).is_err());
     assert!(
-        llm::validate_request(&proxy_request("mock", "mock-fast")).is_ok(),
-        "mock is available in debug builds"
+        llm::validate_request(&proxy_request("custom_1", "gpt-4o-mini"), &entry).is_ok(),
+        "the stored model id must pass"
     );
-    #[cfg(not(debug_assertions))]
     assert!(
-        llm::validate_request(&proxy_request("mock", "mock-fast")).is_err(),
-        "mock must be rejected in release builds"
+        llm::validate_request(&proxy_request("custom_1", "other-model"), &entry).is_err(),
+        "requests must not switch the model id"
     );
 
-    let mut tools = proxy_request("openai", "gpt-4o");
+    let mut anthropic_api = proxy_request("custom_1", "gpt-4o-mini");
+    anthropic_api.model.api = "anthropic-messages".into();
+    assert!(
+        llm::validate_request(&anthropic_api, &entry).is_err(),
+        "api must match the entry protocol"
+    );
+
+    let mut tools = proxy_request("custom_1", "gpt-4o-mini");
     tools.context.messages = vec![serde_json::json!({
         "role": "system",
         "content": "ok",
@@ -653,27 +914,27 @@ fn proxy_request_rejects_untrusted_inputs() {
             .collect::<Vec<_>>(),
     })];
     assert!(
-        llm::validate_request(&tools).is_err(),
+        llm::validate_request(&tools, &entry).is_err(),
         "more than five tools must be rejected"
     );
 
-    let mut bash = proxy_request("openai", "gpt-4o");
+    let mut bash = proxy_request("custom_1", "gpt-4o-mini");
     bash.context.messages = vec![serde_json::json!({
         "role": "system",
         "content": "ok",
         "toolsAdded": [{"name": "bash"}],
     })];
     assert!(
-        llm::validate_request(&bash).is_err(),
+        llm::validate_request(&bash, &entry).is_err(),
         "tools outside the fs_* allowlist must be rejected"
     );
 
-    let mut huge = proxy_request("openai", "gpt-4o");
+    let mut huge = proxy_request("custom_1", "gpt-4o-mini");
     huge.context.messages = vec![serde_json::json!({
         "role": "system",
         "content": "x".repeat(70 * 1024),
     })];
-    assert!(llm::validate_request(&huge).is_err());
+    assert!(llm::validate_request(&huge, &entry).is_err());
 }
 
 #[test]
@@ -697,4 +958,178 @@ fn run_trims_long_histories_but_keeps_system_messages() {
         "m249",
         "most recent turns must be kept"
     );
+}
+
+#[test]
+fn llm_params_roundtrip_and_validation() {
+    let vfs = test_vfs();
+    let valid = LlmParams {
+        temperature: Some(0.7),
+        top_p: Some(0.9),
+        top_k: Some(40),
+        max_tokens: Some(2048),
+        stop: Some(vec!["END".into()]),
+        stream: Some(false),
+        timeout_seconds: Some(60),
+        frequency_penalty: Some(0.2),
+        presence_penalty: Some(-0.1),
+        seed: Some(7),
+        logit_bias: Some(
+            serde_json::json!({"50256": -10})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+        extra: Some(
+            serde_json::json!({"safety_settings": {"level": "low"}})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+        context_window_input: Some(8192),
+        context_window_output: Some(1024),
+        tool_rounds: Some(500),
+        supports_images: Some(false),
+        thinking_mode: Some(params::ThinkingMode::Default),
+    };
+    params::save(vfs.conn(), "custom_1", &valid).unwrap();
+    let loaded = params::get(vfs.conn(), "custom_1");
+    assert_eq!(loaded, valid);
+    assert!(params::get(vfs.conn(), "custom_2").is_empty());
+
+    let mut invalid = valid.clone();
+    invalid.temperature = Some(3.0);
+    assert!(params::save(vfs.conn(), "custom_1", &invalid).is_err());
+    let mut invalid = valid.clone();
+    invalid.timeout_seconds = Some(1);
+    assert!(params::save(vfs.conn(), "custom_1", &invalid).is_err());
+    let mut invalid = valid.clone();
+    invalid.extra = Some(
+        serde_json::json!({"messages": []})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    assert!(params::save(vfs.conn(), "custom_1", &invalid).is_err());
+
+    params::save(vfs.conn(), "custom_1", &LlmParams::default()).unwrap();
+    assert!(params::get(vfs.conn(), "custom_1").is_empty());
+
+    params::save(vfs.conn(), "custom_1", &valid).unwrap();
+    params::remove(vfs.conn(), "custom_1").unwrap();
+    assert!(params::get(vfs.conn(), "custom_1").is_empty());
+}
+
+#[test]
+fn llm_params_map_to_each_protocol() {
+    let params = LlmParams {
+        temperature: Some(0.5),
+        top_p: Some(0.8),
+        top_k: Some(20),
+        max_tokens: Some(1024),
+        stop: Some(vec!["STOP".into()]),
+        frequency_penalty: Some(0.1),
+        presence_penalty: Some(0.2),
+        seed: Some(9),
+        ..LlmParams::default()
+    };
+    let mut openai = serde_json::Map::new();
+    params.apply_openai(&mut openai);
+    assert_eq!(openai["temperature"], 0.5);
+    assert_eq!(openai["top_p"], 0.8);
+    assert_eq!(openai["max_tokens"], 1024);
+    assert!(openai.get("top_k").is_none(), "top_k is Anthropic-only");
+    assert_eq!(openai["stop"][0], "STOP");
+
+    let mut anthropic = serde_json::Map::new();
+    params.apply_anthropic(&mut anthropic);
+    assert_eq!(anthropic["top_k"], 20);
+    assert_eq!(anthropic["stop_sequences"][0], "STOP");
+    assert!(
+        anthropic.get("seed").is_none(),
+        "seed is not Anthropic-native"
+    );
+
+    let mut responses = serde_json::Map::new();
+    params.apply_openai_responses(&mut responses);
+    assert_eq!(responses["temperature"], 0.5);
+    assert_eq!(responses["top_p"], 0.8);
+    assert_eq!(responses["max_output_tokens"], 1024);
+    assert!(
+        responses.get("stop").is_none(),
+        "Responses API has no stop field"
+    );
+
+    let extra = serde_json::json!({"custom_flag": true})
+        .as_object()
+        .unwrap()
+        .clone();
+    let mut body = serde_json::Map::new();
+    let with_extra = LlmParams {
+        extra: Some(extra),
+        ..LlmParams::default()
+    };
+    with_extra.merge_extra(&mut body).unwrap();
+    assert_eq!(body["custom_flag"], true);
+    let mut guarded = serde_json::Map::new();
+    let reserved = LlmParams {
+        extra: Some(
+            serde_json::json!({"tools": []})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+        ..LlmParams::default()
+    };
+    assert!(reserved.merge_extra(&mut guarded).is_err());
+}
+
+#[test]
+fn unset_params_are_never_written_into_the_body() {
+    let empty = LlmParams::default();
+    let mut openai = serde_json::Map::new();
+    empty.apply_openai(&mut openai);
+    let mut anthropic = serde_json::Map::new();
+    empty.apply_anthropic(&mut anthropic);
+    let mut responses = serde_json::Map::new();
+    empty.apply_openai_responses(&mut responses);
+    for body in [&openai, &anthropic, &responses] {
+        assert!(
+            body.is_empty(),
+            "untouched advanced settings must not add sampling defaults"
+        );
+    }
+}
+
+#[test]
+fn model_list_parsers_handle_known_shapes() {
+    let openai = serde_json::json!({
+        "data": [{"id": "b-model"}, {"id": "a-model"}, {"id": "a-model"}, {"id": ""}]
+    });
+    let list = discovery::parse_models(&openai).unwrap();
+    assert_eq!(list, vec!["a-model".to_string(), "b-model".to_string()]);
+
+    for format in [
+        ApiFormat::OpenAiChat,
+        ApiFormat::OpenAiResponses,
+        ApiFormat::AnthropicMessages,
+    ] {
+        assert!(discovery::parse_models(&serde_json::json!({})).is_err());
+        // The format does not affect the wire shape: all use `data[].id`.
+        let _ = format;
+    }
+}
+
+#[test]
+fn params_output_capability_maps_to_max_tokens() {
+    let params = LlmParams {
+        context_window_output: Some(512),
+        ..LlmParams::default()
+    };
+    let mut openai = serde_json::Map::new();
+    params.apply_openai(&mut openai);
+    assert_eq!(openai["max_tokens"], 512);
+    let mut responses = serde_json::Map::new();
+    params.apply_openai_responses(&mut responses);
+    assert_eq!(responses["max_output_tokens"], 512);
 }

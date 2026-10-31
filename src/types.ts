@@ -247,15 +247,50 @@ export interface NewChatMessage {
   isError?: boolean
 }
 
-export interface AgentKeyStatus {
-  provider: string
+/** Wire protocol used by one user-defined model entry. */
+export type ModelApiFormat = 'openai-chat' | 'openai-responses' | 'anthropic-messages'
+
+/** One user-added model; never contains the API key itself. */
+export interface AgentModelInfo {
+  id: string
+  label: string
+  format: ModelApiFormat
+  baseUrl: string
+  /** True when the URL is the complete endpoint (no path appended). */
+  fullUrl: boolean
+  modelId: string
   configured: boolean
 }
 
-/** 设置页可见的 Agent 配置；不含密钥内容。 */
+/** Model list payload; the app ships no preset models. */
 export interface AgentSettings {
-  provider: string
+  activeId: string | null
+  models: AgentModelInfo[]
+}
+
+/** Layered per-model generation parameters persisted by Rust. */
+export interface LlmParams {
+  temperature?: number
+  topP?: number
+  topK?: number
+  maxTokens?: number
+  stop?: string[]
+  stream?: boolean
+  timeoutSeconds?: number
+  frequencyPenalty?: number
+  presencePenalty?: number
+  seed?: number
+  logitBias?: Record<string, number>
+  extra?: Record<string, unknown>
+  contextWindowInput?: number
+  contextWindowOutput?: number
+  toolRounds?: number
+  supportsImages?: boolean
+  thinkingMode?: 'default' | 'on' | 'off'
+}
+
+export interface ConnectionTestResult {
+  latencyMs: number
+  status: number
   model: string
-  keyConfigured: AgentKeyStatus[]
-  providers: string[]
 }
