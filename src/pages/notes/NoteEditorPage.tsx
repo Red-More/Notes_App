@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { convertFileSrc } from '@tauri-apps/api/core'
 import { save } from '@tauri-apps/plugin-dialog'
-import { api } from '../../api'
+import { api, chatApi, mediaApi } from '../../api'
 import {
   computeKbInset,
   diffLines,
@@ -10,7 +11,7 @@ import {
   friendlyError,
   safeFileName,
 } from '../../utils'
-import type { Folder, NoteVersion } from '../../types'
+import type { AgentModelInfo, Folder, MediaJob, NoteVersion } from '../../types'
 import { ConfirmDialog, Modal } from '../../components/ui'
 import { toast } from '../../toast'
 import { getSaveStrategy } from '../../saveStrategy'
@@ -40,10 +41,12 @@ import {
   IconExport,
   IconEye,
   IconFolder,
+  IconImage,
   IconPlus,
   IconRedo,
   IconRestore,
   IconSave,
+  IconSpeaker,
   IconTrash,
   IconUndo,
 } from '../../components/Icons'
@@ -69,6 +72,21 @@ const keepFieldFocus = (e: React.PointerEvent<HTMLButtonElement>) => e.preventDe
 
 /** How long a programmatic scroll suppresses the other pane's scroll events. */
 const SYNC_GUARD_MS = 160
+
+/** Media jobs run in Rust; poll briefly until they reach a terminal state. */
+const JOB_POLL_MS = 1200
+const JOB_POLL_LIMIT = 150
+
+async function waitForJob(id: number): Promise<MediaJob> {
+  for (let i = 0; i < JOB_POLL_LIMIT; i += 1) {
+    const job = await mediaApi.get(id)
+    if (job.status === 'succeeded' || job.status === 'failed' || job.status === 'cancelled') {
+      return job
+    }
+    await new Promise((resolve) => setTimeout(resolve, JOB_POLL_MS))
+  }
+  throw new Error('媒体作业超时，请稍后在设置中检查模型状态')
+}
 
 function hhmm(ts: number): string {
   const d = new Date(ts)
@@ -99,6 +117,21 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   const [deleteVersionConfirm, setDeleteVersionConfirm] = useState<NoteVersion | null>(null)
 
   const [folderModalOpen, setFolderModalOpen] = useState(false)
+
+  // Media dialogs: AI illustration and read-aloud.
+  const [imageOpen, setImageOpen] = useState(false)
+  const [imageModels, setImageModels] = useState<AgentModelInfo[]>([])
+  const [imageModelId, setImageModelId] = useState('')
+  const [imagePrompt, setImagePrompt] = useState('')
+  const [imageBusy, setImageBusy] = useState(false)
+  const [imageResult, setImageResult] = useState<{ url: string; alt: string } | null>(null)
+  const [ttsOpen, setTtsOpen] = useState(false)
+  const [ttsModels, setTtsModels] = useState<AgentModelInfo[]>([])
+  const [ttsModelId, setTtsModelId] = useState('')
+  const [ttsText, setTtsText] = useState('')
+  const [ttsBusy, setTtsBusy] = useState(false)
+  const [ttsUrl, setTtsUrl] = useState('')
+
   // Layout config is persisted, so the split mode / ratio survives reloads.
   const [layout, setLayout] = useState<LayoutPrefs>(() => getLayoutPrefs())
   const [previewReady, setPreviewReady] = useState(false)
@@ -619,6 +652,111 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   const diffAdd = diffRows.filter((r) => r.type === 'add').length
   const diffDel = diffRows.filter((r) => r.type === 'del').length
 
+  const openImageDialog = async () => {
+    try {
+      const settings = await chatApi.settings()
+      const models = settings.models.filter((item) => item.kind === 'image' && item.configured)
+      if (models.length === 0) {
+        toast('请先在设置 → AI 助理中添加并配置图像模型')
+        return
+      }
+      setImageModels(models)
+      setImageModelId(models[0].id)
+      setImagePrompt(title.trim() || content.trim().slice(0, 200))
+      setImageResult(null)
+      setImageOpen(true)
+    } catch (e) {
+      toast(friendlyError(e))
+    }
+  }
+
+  const generateImage = async () => {
+    const prompt = imagePrompt.trim()
+    if (!prompt || !imageModelId) {
+      toast('请填写提示词')
+      return
+    }
+    setImageBusy(true)
+    try {
+      const job = await mediaApi.submit({
+        kind: 'image',
+        modelEntry: imageModelId,
+        params: { prompt },
+      })
+      const done = await waitForJob(job.id)
+      if (done.status !== 'succeeded' || done.assetId == null) {
+        toast(done.error || '图像生成失败')
+        return
+      }
+      const path = await mediaApi.assetPath(done.assetId)
+      setImageResult({ url: convertFileSrc(path), alt: prompt })
+    } catch (e) {
+      toast(friendlyError(e))
+    } finally {
+      setImageBusy(false)
+    }
+  }
+
+  const insertGeneratedImage = () => {
+    const result = imageResult
+    if (!result) return
+    const alt = result.alt.replace(/[[\]\n]/g, ' ').slice(0, 60)
+    setContent((prev) => `${prev}${prev.trim() ? '\n\n' : ''}![${alt}](<${result.url}>)\n`)
+    setImageOpen(false)
+    setImageResult(null)
+    toast('已插入图片')
+  }
+
+  const openTtsDialog = async () => {
+    const body = content.trim()
+    if (!body) {
+      toast('当前笔记没有可朗读的内容')
+      return
+    }
+    try {
+      const settings = await chatApi.settings()
+      const models = settings.models.filter((item) => item.kind === 'tts' && item.configured)
+      if (models.length === 0) {
+        toast('请先在设置 → AI 助理中添加并配置语音模型')
+        return
+      }
+      setTtsModels(models)
+      setTtsModelId(models[0].id)
+      setTtsText(body.slice(0, 4000))
+      setTtsUrl('')
+      setTtsOpen(true)
+    } catch (e) {
+      toast(friendlyError(e))
+    }
+  }
+
+  const generateSpeech = async () => {
+    const text = ttsText.trim()
+    if (!text || !ttsModelId) {
+      toast('请填写朗读文本')
+      return
+    }
+    setTtsBusy(true)
+    try {
+      const job = await mediaApi.submit({
+        kind: 'tts',
+        modelEntry: ttsModelId,
+        params: { text },
+      })
+      const done = await waitForJob(job.id)
+      if (done.status !== 'succeeded' || done.assetId == null) {
+        toast(done.error || '语音生成失败')
+        return
+      }
+      const path = await mediaApi.assetPath(done.assetId)
+      setTtsUrl(convertFileSrc(path))
+    } catch (e) {
+      toast(friendlyError(e))
+    } finally {
+      setTtsBusy(false)
+    }
+  }
+
   const statusText =
     saveState === 'saving'
       ? '保存中…'
@@ -721,6 +859,22 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
             aria-label="历史版本"
           >
             <IconClock size={20} />
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => void openImageDialog()}
+            aria-label="AI 插图"
+          >
+            <IconImage size={20} />
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => void openTtsDialog()}
+            aria-label="朗读笔记"
+          >
+            <IconSpeaker size={20} />
           </button>
           <button
             type="button"
@@ -1035,6 +1189,124 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
           onConfirm={() => void handleDeleteVersion(deleteVersionConfirm)}
           onCancel={() => setDeleteVersionConfirm(null)}
         />
+      )}
+
+      {imageOpen && (
+        <Modal
+          title="AI 插图"
+          onClose={() => {
+            if (!imageBusy) setImageOpen(false)
+          }}
+          footer={
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button
+                type="button"
+                className="btn btn-plain"
+                disabled={imageBusy}
+                onClick={() => setImageOpen(false)}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="btn btn-plain"
+                disabled={imageBusy || !imagePrompt.trim()}
+                onClick={() => void generateImage()}
+              >
+                {imageBusy ? '生成中…' : imageResult ? '重新生成' : '生成'}
+              </button>
+              {imageResult && (
+                <button type="button" className="btn btn-primary" onClick={insertGeneratedImage}>
+                  插入图片
+                </button>
+              )}
+            </div>
+          }
+        >
+          <div className="form-field">
+            <span className="form-label">图像模型</span>
+            <select
+              className="form-input"
+              value={imageModelId}
+              onChange={(e) => setImageModelId(e.target.value)}
+            >
+              {imageModels.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="form-field">
+            <span className="form-label">提示词</span>
+            <textarea
+              className="form-input"
+              rows={4}
+              value={imagePrompt}
+              onChange={(e) => setImagePrompt(e.target.value)}
+              placeholder="描述想要的插图"
+            />
+          </div>
+          {imageResult && (
+            <img className="ai-image-preview" src={imageResult.url} alt={imageResult.alt} />
+          )}
+        </Modal>
+      )}
+
+      {ttsOpen && (
+        <Modal
+          title="朗读笔记"
+          onClose={() => {
+            if (!ttsBusy) setTtsOpen(false)
+          }}
+          footer={
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button
+                type="button"
+                className="btn btn-plain"
+                disabled={ttsBusy}
+                onClick={() => setTtsOpen(false)}
+              >
+                关闭
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={ttsBusy || !ttsText.trim() || ttsText.length > 4000}
+                onClick={() => void generateSpeech()}
+              >
+                {ttsBusy ? '合成中…' : ttsUrl ? '重新合成' : '合成语音'}
+              </button>
+            </div>
+          }
+        >
+          <div className="form-field">
+            <span className="form-label">语音模型</span>
+            <select
+              className="form-input"
+              value={ttsModelId}
+              onChange={(e) => setTtsModelId(e.target.value)}
+            >
+              {ttsModels.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="form-field">
+            <span className="form-label">朗读文本（{ttsText.length}/4000）</span>
+            <textarea
+              className="form-input"
+              rows={6}
+              maxLength={4000}
+              value={ttsText}
+              onChange={(e) => setTtsText(e.target.value)}
+            />
+            <p className="settings-note">最多 4000 字，超出请先分段。</p>
+          </div>
+          {ttsUrl && <audio className="ai-audio-player" controls autoPlay src={ttsUrl} />}
+        </Modal>
       )}
     </div>
   )

@@ -3530,3 +3530,19 @@ body.split-resizing {
 .settings-switch-row.compact {
   gap: 8px;
 }
+
+/* Note editor: generated media previews */
+.ai-image-preview {
+  display: block;
+  width: 100%;
+  max-height: 420px;
+  margin-top: 12px;
+  border-radius: var(--radius);
+  object-fit: contain;
+  background: var(--surface-2, var(--surface));
+}
+
+.ai-audio-player {
+  width: 100%;
+  margin-top: 12px;
+}
