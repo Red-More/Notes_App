@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { convertFileSrc } from '@tauri-apps/api/core'
-import { save } from '@tauri-apps/plugin-dialog'
+import { open as openDialog, save } from '@tauri-apps/plugin-dialog'
+import { readFile } from '@tauri-apps/plugin-fs'
 import { api, chatApi, mediaApi } from '../../api'
 import {
   computeKbInset,
@@ -42,6 +43,7 @@ import {
   IconEye,
   IconFolder,
   IconImage,
+  IconMic,
   IconPlus,
   IconRedo,
   IconRestore,
@@ -87,6 +89,39 @@ async function waitForJob(id: number): Promise<MediaJob> {
     await new Promise((resolve) => setTimeout(resolve, JOB_POLL_MS))
   }
   throw new Error('媒体作业超时，请稍后在设置中检查模型状态')
+}
+
+/** OpenAI accepts 25MB per transcription request. */
+const MAX_AUDIO_BYTES = 25 * 1024 * 1024
+
+function audioMime(fileName: string): string {
+  const ext = fileName.split('.').pop()?.toLowerCase() ?? ''
+  switch (ext) {
+    case 'wav':
+      return 'audio/wav'
+    case 'm4a':
+    case 'mp4':
+      return 'audio/mp4'
+    case 'ogg':
+    case 'opus':
+      return 'audio/ogg'
+    case 'webm':
+      return 'audio/webm'
+    case 'flac':
+      return 'audio/flac'
+    default:
+      return 'audio/mpeg'
+  }
+}
+
+/** Chunked conversion keeps large audio payloads from overflowing the stack. */
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ''
+  const chunk = 0x8000
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk))
+  }
+  return btoa(binary)
 }
 
 function hhmm(ts: number): string {
@@ -138,6 +173,15 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   const [videoPrompt, setVideoPrompt] = useState('')
   const [videoBusy, setVideoBusy] = useState(false)
   const [videoUrl, setVideoUrl] = useState('')
+  const [asrOpen, setAsrOpen] = useState(false)
+  const [asrModels, setAsrModels] = useState<AgentModelInfo[]>([])
+  const [asrModelId, setAsrModelId] = useState('')
+  const [asrFileName, setAsrFileName] = useState('')
+  const [asrMime, setAsrMime] = useState('audio/mpeg')
+  const [asrData, setAsrData] = useState('')
+  const [asrLanguage, setAsrLanguage] = useState('')
+  const [asrBusy, setAsrBusy] = useState(false)
+  const [asrText, setAsrText] = useState('')
 
   // Layout config is persisted, so the split mode / ratio survives reloads.
   const [layout, setLayout] = useState<LayoutPrefs>(() => getLayoutPrefs())
@@ -809,6 +853,94 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     }
   }
 
+  const openAsrDialog = async () => {
+    try {
+      const settings = await chatApi.settings()
+      const models = settings.models.filter((item) => item.kind === 'asr' && item.configured)
+      if (models.length === 0) {
+        toast('请先在设置 → AI 助理中添加并配置语音转写模型')
+        return
+      }
+      setAsrModels(models)
+      setAsrModelId(models[0].id)
+      setAsrFileName('')
+      setAsrData('')
+      setAsrLanguage('')
+      setAsrText('')
+      setAsrOpen(true)
+    } catch (e) {
+      toast(friendlyError(e))
+    }
+  }
+
+  const pickAudioFile = async () => {
+    try {
+      const picked = await openDialog({
+        multiple: false,
+        filters: [
+          { name: '音频', extensions: ['mp3', 'wav', 'm4a', 'ogg', 'opus', 'webm', 'flac'] },
+        ],
+      })
+      if (typeof picked !== 'string') return
+      const bytes = await readFile(picked)
+      if (bytes.length > MAX_AUDIO_BYTES) {
+        toast('音频超过 25MB，请先压缩或分段')
+        return
+      }
+      const name = picked.split(/[\\/]/).pop() ?? 'audio'
+      setAsrFileName(name)
+      setAsrMime(audioMime(name))
+      setAsrData(bytesToBase64(bytes))
+      setAsrText('')
+    } catch (e) {
+      toast(friendlyError(e))
+    }
+  }
+
+  const transcribeAudio = async () => {
+    if (!asrData) {
+      toast('请先选择音频文件')
+      return
+    }
+    if (!asrModelId) return
+    setAsrBusy(true)
+    try {
+      const asset = await mediaApi.storeAsset({ mime: asrMime, data: asrData })
+      const params: Record<string, unknown> = { assetId: asset.id }
+      const language = asrLanguage.trim()
+      if (language) params.language = language
+      const job = await mediaApi.submit({
+        kind: 'asr',
+        modelEntry: asrModelId,
+        params,
+      })
+      const done = await waitForJob(job.id)
+      if (done.status !== 'succeeded' || !done.result) {
+        toast(done.error || '语音转写失败')
+        return
+      }
+      const parsed = JSON.parse(done.result) as { text?: string }
+      if (!parsed.text) {
+        toast('转写结果为空')
+        return
+      }
+      setAsrText(parsed.text)
+    } catch (e) {
+      toast(friendlyError(e))
+    } finally {
+      setAsrBusy(false)
+    }
+  }
+
+  const insertTranscript = () => {
+    const text = asrText.trim()
+    if (!text) return
+    setContent((prev) => `${prev}${prev.trim() ? '\n\n' : ''}${text}\n`)
+    setAsrOpen(false)
+    setAsrText('')
+    toast('转写已插入笔记')
+  }
+
   const statusText =
     saveState === 'saving'
       ? '保存中…'
@@ -935,6 +1067,14 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
             aria-label="AI 视频"
           >
             <IconVideo size={20} />
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => void openAsrDialog()}
+            aria-label="语音转写"
+          >
+            <IconMic size={20} />
           </button>
           <button
             type="button"
@@ -1424,6 +1564,90 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
             <video className="ai-video-player" controls autoPlay src={videoUrl} />
           )}
           <p className="settings-note">视频生成通常需要数分钟，期间可关闭弹窗，作业会在后台完成。</p>
+        </Modal>
+      )}
+
+      {asrOpen && (
+        <Modal
+          title="语音转写"
+          onClose={() => {
+            if (!asrBusy) setAsrOpen(false)
+          }}
+          footer={
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button
+                type="button"
+                className="btn btn-plain"
+                disabled={asrBusy}
+                onClick={() => setAsrOpen(false)}
+              >
+                关闭
+              </button>
+              <button
+                type="button"
+                className="btn btn-plain"
+                disabled={asrBusy || !asrData}
+                onClick={() => void transcribeAudio()}
+              >
+                {asrBusy ? '转写中…' : asrText ? '重新转写' : '开始转写'}
+              </button>
+              {asrText && (
+                <button type="button" className="btn btn-primary" onClick={insertTranscript}>
+                  插入笔记
+                </button>
+              )}
+            </div>
+          }
+        >
+          <div className="form-field">
+            <span className="form-label">转写模型</span>
+            <select
+              className="form-input"
+              value={asrModelId}
+              onChange={(e) => setAsrModelId(e.target.value)}
+            >
+              {asrModels.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="form-field">
+            <span className="form-label">音频文件</span>
+            <div className="chat-key-actions">
+              <button
+                type="button"
+                className="restore-default"
+                disabled={asrBusy}
+                onClick={() => void pickAudioFile()}
+              >
+                选择音频文件
+              </button>
+              <span className="model-meta">{asrFileName || '未选择'}</span>
+            </div>
+            <p className="settings-note">支持 mp3/wav/m4a/ogg/webm/flac，单文件不超过 25MB。</p>
+          </div>
+          <div className="form-field">
+            <span className="form-label">语言（选填，如 zh / en）</span>
+            <input
+              className="form-input"
+              value={asrLanguage}
+              onChange={(e) => setAsrLanguage(e.target.value)}
+              placeholder="留空由模型自动识别"
+              autoComplete="off"
+            />
+          </div>
+          <div className="form-field">
+            <span className="form-label">转写结果（可编辑后插入）</span>
+            <textarea
+              className="form-input"
+              rows={6}
+              value={asrText}
+              onChange={(e) => setAsrText(e.target.value)}
+              placeholder="转写完成后显示在这里"
+            />
+          </div>
         </Modal>
       )}
     </div>

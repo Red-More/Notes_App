@@ -591,6 +591,9 @@ export const mediaApi = {
   cancel: (id: number) => invoke<MediaJob>('media_job_cancel', { id }),
   asset: (id: number) => invoke<MediaAsset>('media_asset_get', { id }),
   assetPath: (id: number) => invoke<string>('media_asset_path', { id }),
+  /** Persist a WebView-supplied audio payload before an ASR job. */
+  storeAsset: (input: { mime: string; data: string }) =>
+    invoke<MediaAsset>('media_asset_store', { input }),
 }
 
 /**

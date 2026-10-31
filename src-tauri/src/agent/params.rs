@@ -73,6 +73,7 @@ pub struct LlmParams {
     pub image_price: Option<f64>,
     pub video_second_price: Option<f64>,
     pub tts_kchar_price: Option<f64>,
+    pub asr_minute_price: Option<f64>,
 }
 
 impl LlmParams {
@@ -99,6 +100,7 @@ impl LlmParams {
             && self.image_price.is_none()
             && self.video_second_price.is_none()
             && self.tts_kchar_price.is_none()
+            && self.asr_minute_price.is_none()
     }
 
     /// Output budget: an explicit `max_tokens` wins over the capability hint.
@@ -234,6 +236,7 @@ pub fn validate(params: &LlmParams) -> Result<(), ToolError> {
         ("image_price", params.image_price),
         ("video_second_price", params.video_second_price),
         ("tts_kchar_price", params.tts_kchar_price),
+        ("asr_minute_price", params.asr_minute_price),
     ] {
         check_range_f64(name, price, 0.0, 1_000_000.0)?;
     }

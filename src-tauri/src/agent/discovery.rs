@@ -56,7 +56,8 @@ pub async fn fetch(
         | ApiFormat::OpenAiResponses
         | ApiFormat::OpenAiImages
         | ApiFormat::OpenAiAudio
-        | ApiFormat::OpenAiVideos => request.bearer_auth(api_key),
+        | ApiFormat::OpenAiVideos
+        | ApiFormat::OpenAiTranscriptions => request.bearer_auth(api_key),
         ApiFormat::AnthropicMessages => request
             .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01"),
@@ -143,7 +144,10 @@ pub async fn test_connection(
             "stream": false,
         }),
         // Media models have no chat ping; the UI disables testing for them.
-        ApiFormat::OpenAiImages | ApiFormat::OpenAiAudio | ApiFormat::OpenAiVideos => {
+        ApiFormat::OpenAiImages
+        | ApiFormat::OpenAiAudio
+        | ApiFormat::OpenAiVideos
+        | ApiFormat::OpenAiTranscriptions => {
             return Err(ToolError::invalid("媒体模型暂不支持连接测试"));
         }
     };
@@ -153,7 +157,8 @@ pub async fn test_connection(
         | ApiFormat::OpenAiResponses
         | ApiFormat::OpenAiImages
         | ApiFormat::OpenAiAudio
-        | ApiFormat::OpenAiVideos => request.bearer_auth(api_key),
+        | ApiFormat::OpenAiVideos
+        | ApiFormat::OpenAiTranscriptions => request.bearer_auth(api_key),
         ApiFormat::AnthropicMessages => request
             .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01"),

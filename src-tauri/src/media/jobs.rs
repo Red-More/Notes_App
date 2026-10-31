@@ -22,6 +22,7 @@ pub enum JobKind {
     Video,
     Tts,
     Classify,
+    Asr,
 }
 
 impl JobKind {
@@ -31,6 +32,7 @@ impl JobKind {
             Self::Video => "video",
             Self::Tts => "tts",
             Self::Classify => "classify",
+            Self::Asr => "asr",
         }
     }
 
@@ -40,6 +42,7 @@ impl JobKind {
             Self::Video => ModelKind::Video,
             Self::Tts => ModelKind::Tts,
             Self::Classify => ModelKind::Classify,
+            Self::Asr => ModelKind::Asr,
         }
     }
 
@@ -49,6 +52,7 @@ impl JobKind {
             "video" => Ok(Self::Video),
             "tts" => Ok(Self::Tts),
             "classify" => Ok(Self::Classify),
+            "asr" => Ok(Self::Asr),
             other => Err(ToolError::Storage {
                 message: format!("未知作业类型：{other}"),
             }),

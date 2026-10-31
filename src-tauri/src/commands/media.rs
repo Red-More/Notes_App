@@ -4,6 +4,8 @@
 
 use std::sync::atomic::Ordering;
 
+use base64::Engine;
+use serde::Deserialize;
 use tauri::{AppHandle, State};
 
 use crate::media::{assets, exec, jobs, MediaState};
@@ -76,4 +78,32 @@ pub fn media_asset_path(
     let vfs = vfs_state.0.lock().unwrap();
     let asset = assets::get(vfs.conn(), id)?;
     Ok(assets::path(&media.root, &asset).to_string_lossy().into_owned())
+}
+
+/// Import a WebView-supplied audio payload into the asset library.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetStoreInput {
+    pub mime: String,
+    /// Base64 bytes; the caller must keep the payload within the audio limit.
+    pub data: String,
+}
+
+#[tauri::command]
+pub fn media_asset_store(
+    vfs_state: State<'_, VfsState>,
+    media: State<'_, MediaState>,
+    input: AssetStoreInput,
+) -> Result<assets::Asset, ToolError> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(input.data.as_bytes())
+        .map_err(|e| ToolError::invalid(format!("音频数据不是合法 base64：{e}")))?;
+    let vfs = vfs_state.0.lock().unwrap();
+    assets::store(
+        vfs.conn(),
+        &media.root,
+        &bytes,
+        &input.mime,
+        assets::AssetMeta::default(),
+    )
 }

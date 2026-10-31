@@ -146,6 +146,7 @@ pub fn run() {
             commands::media::media_job_cancel,
             commands::media::media_asset_get,
             commands::media::media_asset_path,
+            commands::media::media_asset_store,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

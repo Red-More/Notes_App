@@ -21,6 +21,7 @@ const MAX_CLASSIFY_TEXT: usize = 8000;
 const MAX_LABELS: usize = 50;
 const MAX_TTS_CHARS: usize = 4000;
 const MAX_PROMPT_CHARS: usize = 4000;
+const MAX_ASR_BYTES: usize = 25 * 1024 * 1024;
 const VIDEO_POLL_MS: u64 = 2000;
 const VIDEO_POLL_LIMIT: usize = 300;
 const VIDEO_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -191,6 +192,7 @@ async fn execute(
         jobs::JobKind::Tts => tts(app, entry, params, job, key, cancel).await,
         jobs::JobKind::Image => image(app, entry, params, job, key, cancel).await,
         jobs::JobKind::Video => video(app, entry, params, job, key, cancel).await,
+        jobs::JobKind::Asr => asr(app, entry, params, job, key, cancel).await,
     }
 }
 
@@ -340,6 +342,123 @@ async fn image(
             ..assets::AssetMeta::default()
         },
     })
+}
+
+async fn asr(
+    app: &AppHandle,
+    entry: &ModelEntry,
+    params: &LlmParams,
+    job: &Value,
+    key: &str,
+    cancel: &AtomicBool,
+) -> Result<Outcome, String> {
+    if entry.format != ApiFormat::OpenAiTranscriptions {
+        return Err("转写仅支持 OpenAI Transcriptions 兼容协议".to_string());
+    }
+    let asset_id = job
+        .get("assetId")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "缺少 assetId".to_string())?;
+    let (asset, path) = {
+        let vfs = app.state::<VfsState>();
+        let db = vfs.0.lock().unwrap();
+        let asset = assets::get(db.conn(), asset_id).map_err(|e| e.to_string())?;
+        let path = assets::path(&app.state::<MediaState>().root, &asset);
+        (asset, path)
+    };
+    if !asset.mime.starts_with("audio/") {
+        return Err("asset 不是音频文件".to_string());
+    }
+    if asset.size > MAX_ASR_BYTES as i64 {
+        return Err("音频超过 25MB，请先压缩或分段".to_string());
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("audio.bin")
+        .to_string();
+    let bytes = std::fs::read(&path).map_err(|e| format!("读取音频失败：{e}"))?;
+    let language = job
+        .get("language")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(language) = language {
+        if language.len() > 8
+            || !language
+                .chars()
+                .all(|c| c.is_ascii_alphabetic() || c == '-')
+        {
+            return Err("language 必须是 ISO-639 代码".to_string());
+        }
+    }
+    let part = reqwest::multipart::Part::bytes(bytes)
+        .file_name(file_name)
+        .mime_str(&asset.mime)
+        .map_err(|e| format!("音频类型非法：{e}"))?;
+    let mut form = reqwest::multipart::Form::new()
+        .part("file", part)
+        .text("model", entry.model_id.clone())
+        .text("response_format", "json");
+    if let Some(language) = language {
+        form = form.text("language", language.to_string());
+    }
+    let resp = post_form(
+        app,
+        &model_store::endpoint(entry),
+        key,
+        form,
+        params.timeout(),
+    )
+    .await?;
+    if cancel.load(Ordering::SeqCst) {
+        return Err("已取消".to_string());
+    }
+    let payload = llm::read_json_response(resp).await?;
+    Ok(Outcome::Text(
+        json!({ "text": parse_asr_text(&payload)? }).to_string(),
+    ))
+}
+
+async fn post_form(
+    app: &AppHandle,
+    url: &str,
+    key: &str,
+    form: reqwest::multipart::Form,
+    timeout: Option<Duration>,
+) -> Result<reqwest::Response, String> {
+    let state = app.state::<AgentState>();
+    let Some(client) = &state.client else {
+        return Err("HTTP 客户端初始化失败，请重启应用".to_string());
+    };
+    let mut builder = client
+        .post(url)
+        .multipart(form)
+        .header("authorization", format!("Bearer {key}"));
+    if let Some(limit) = timeout {
+        builder = builder.timeout(limit);
+    }
+    let resp = builder
+        .send()
+        .await
+        .map_err(|e| format!("网络请求失败：{e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        let snippet: String = text.chars().take(300).collect();
+        return Err(format!("厂商返回 HTTP {status}：{snippet}"));
+    }
+    Ok(resp)
+}
+
+fn parse_asr_text(payload: &Value) -> Result<String, String> {
+    payload
+        .get("text")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "转写响应缺少 text".to_string())
 }
 
 async fn video(
@@ -672,6 +791,16 @@ mod tests {
         assert!(parse_size("0x0").is_err());
         assert_eq!(tts_mime("mp3"), Some("audio/mpeg"));
         assert!(tts_mime("zip").is_none());
+    }
+
+    #[test]
+    fn asr_text_is_required() {
+        assert_eq!(
+            parse_asr_text(&json!({"text": " 你好世界 "})).unwrap(),
+            "你好世界"
+        );
+        assert!(parse_asr_text(&json!({})).is_err());
+        assert!(parse_asr_text(&json!({"text": "   "})).is_err());
     }
 
     #[test]

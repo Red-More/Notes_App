@@ -19,6 +19,7 @@ const FORMAT_OPTIONS: Array<{ key: ModelApiFormat; label: string }> = [
   { key: 'openai-images', label: 'OpenAI Images' },
   { key: 'openai-audio', label: 'OpenAI Audio' },
   { key: 'openai-videos', label: 'OpenAI Videos' },
+  { key: 'openai-transcriptions', label: 'OpenAI Transcriptions' },
 ]
 
 const CHAT_FORMATS: ModelApiFormat[] = ['openai-chat', 'openai-responses', 'anthropic-messages']
@@ -32,7 +33,9 @@ function formatOptionsFor(kind: ModelKind): Array<{ key: ModelApiFormat; label: 
         ? ['openai-audio']
         : kind === 'video'
           ? ['openai-videos']
-          : CHAT_FORMATS
+          : kind === 'asr'
+            ? ['openai-transcriptions']
+            : CHAT_FORMATS
   return FORMAT_OPTIONS.filter((item) => allowed.includes(item.key))
 }
 
@@ -43,6 +46,7 @@ const KIND_OPTIONS: Array<{ key: ModelKind; label: string }> = [
   { key: 'video', label: '视频生成' },
   { key: 'tts', label: '文字转语音' },
   { key: 'classify', label: '分类模型' },
+  { key: 'asr', label: '语音转写' },
 ]
 
 const KIND_ORDER: ModelKind[] = KIND_OPTIONS.map((item) => item.key)
@@ -106,6 +110,11 @@ const URL_PRESETS: Array<{ label: string; baseUrl: string; format: ModelApiForma
     label: 'OpenAI（Videos）',
     baseUrl: 'https://api.openai.com/v1',
     format: 'openai-videos',
+  },
+  {
+    label: 'OpenAI（Transcriptions）',
+    baseUrl: 'https://api.openai.com/v1',
+    format: 'openai-transcriptions',
   },
 ]
 
@@ -182,6 +191,8 @@ function endpointHint(format: ModelApiFormat, fullUrl: boolean): string {
         return '直接使用该完整地址，不再拼接路径（示例 https://api.openai.com/v1/audio/speech）。'
       case 'openai-videos':
         return '直接使用该完整地址，不再拼接路径（示例 https://api.openai.com/v1/videos）。'
+      case 'openai-transcriptions':
+        return '直接使用该完整地址，不再拼接路径（示例 https://api.openai.com/v1/audio/transcriptions）。'
       default:
         return '直接使用该完整地址，不再拼接路径（示例 https://api.openai.com/v1/chat/completions）。'
     }
@@ -197,6 +208,8 @@ function endpointHint(format: ModelApiFormat, fullUrl: boolean): string {
       return '不要以 / 结尾；系统会拼接 /audio/speech。'
     case 'openai-videos':
       return '不要以 / 结尾；系统会拼接 /videos，并轮询任务状态。'
+    case 'openai-transcriptions':
+      return '不要以 / 结尾；系统会拼接 /audio/transcriptions（multipart 上传）。'
     default:
       return '不要以 / 结尾；系统会拼接 /chat/completions。'
   }
@@ -215,6 +228,8 @@ function endpointPlaceholder(format: ModelApiFormat, fullUrl: boolean): string {
         return 'https://api.openai.com/v1/audio/speech'
       case 'openai-videos':
         return 'https://api.openai.com/v1/videos'
+      case 'openai-transcriptions':
+        return 'https://api.openai.com/v1/audio/transcriptions'
       default:
         return 'https://api.openai.com/v1/chat/completions'
     }
@@ -436,6 +451,16 @@ function ParamsEditor(props: {
             max={1000000}
             placeholder="留空表示未配置"
             onChange={(ttsKcharPrice) => patchParams({ ttsKcharPrice })}
+          />
+        )}
+        {draft.kind === 'asr' && (
+          <NumberField
+            label="每分钟音频"
+            value={params.asrMinutePrice}
+            min={0}
+            max={1000000}
+            placeholder="留空表示未配置"
+            onChange={(asrMinutePrice) => patchParams({ asrMinutePrice })}
           />
         )}
         <p className="settings-note">价格只用于成本统计，不会写入请求体。</p>
@@ -879,7 +904,9 @@ export default function AgentSettingsSection() {
               <p className="settings-note">
                 {draft.kind === 'video'
                   ? '视频使用 OpenAI Videos 兼容协议：提交后轮询任务，完成后下载到资产库。'
-                  : '该能力已可执行：图像走 Images 协议，语音走 Audio 协议，分类走 Chat 协议。'}
+                  : draft.kind === 'asr'
+                    ? '语音转写使用 OpenAI Transcriptions 兼容协议：上传音频后返回文本。'
+                    : '该能力已可执行：图像走 Images 协议，语音走 Audio 协议，分类走 Chat 协议。'}
               </p>
             )}
           </div>

@@ -550,9 +550,13 @@ pub async fn run(
             anthropic_json(state, &key, &prepared, &cancel, emit).await
         }
         // Media entries are executed by the media worker, never the chat loop.
-        (ApiFormat::OpenAiImages | ApiFormat::OpenAiAudio | ApiFormat::OpenAiVideos, _) => {
-            Err("该模型条目不是对话协议".to_string())
-        }
+        (
+            ApiFormat::OpenAiImages
+            | ApiFormat::OpenAiAudio
+            | ApiFormat::OpenAiVideos
+            | ApiFormat::OpenAiTranscriptions,
+            _,
+        ) => Err("该模型条目不是对话协议".to_string()),
     };
 
     if let Err(message) = result {

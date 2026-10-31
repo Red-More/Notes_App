@@ -9,12 +9,13 @@
 //! v3：Agent 会话表（conversations / messages）与非密钥设置表（settings）。
 //! v4：媒体作业表（media_jobs）与媒体资产表（media_assets）。
 //! v5：媒体作业结果列（media_jobs.result）。
+//! v6：媒体作业支持 `asr` 类型（重建 CHECK 约束）。
 //! FTS5 索引在应用层与 blobs 同事务维护（无触发器），schema 版本保持不变。
 
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// 当前 life.db schema 版本。
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// 虚拟文件系统的根路径，与 `vfs::cap_gate::ROOT` 保持一致。
 const ROOT: &str = "/life";
@@ -270,6 +271,39 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
         if !table_has_column(&tx, "media_jobs", "result")? {
             tx.execute_batch("ALTER TABLE media_jobs ADD COLUMN result TEXT;")?;
         }
+        tx.pragma_update(None, "user_version", 5)?;
+        tx.commit()?;
+        version = 5;
+    }
+
+    if version < 6 {
+        let tx = conn.transaction()?;
+        // SQLite cannot alter a CHECK constraint: rebuild the jobs table so
+        // speech-to-text jobs (`asr`) are accepted alongside the media kinds.
+        tx.execute_batch(
+            "CREATE TABLE media_jobs_v6 (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind        TEXT NOT NULL CHECK (kind IN ('image', 'video', 'tts', 'classify', 'asr')),
+                model_entry TEXT NOT NULL,
+                params      TEXT NOT NULL DEFAULT '{}',
+                status      TEXT NOT NULL DEFAULT 'pending'
+                            CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
+                progress    INTEGER NOT NULL DEFAULT 0,
+                asset_id    INTEGER,
+                error       TEXT,
+                result      TEXT,
+                created_at  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL
+            );
+            INSERT INTO media_jobs_v6
+                (id, kind, model_entry, params, status, progress, asset_id, error, result, created_at, updated_at)
+            SELECT id, kind, model_entry, params, status, progress, asset_id, error, result, created_at, updated_at
+            FROM media_jobs;
+            DROP TABLE media_jobs;
+            ALTER TABLE media_jobs_v6 RENAME TO media_jobs;
+            CREATE INDEX IF NOT EXISTS idx_media_jobs_status ON media_jobs(status, id);
+            CREATE INDEX IF NOT EXISTS idx_media_jobs_model ON media_jobs(model_entry);",
+        )?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         version = SCHEMA_VERSION;

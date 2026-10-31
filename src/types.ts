@@ -285,9 +285,10 @@ export type ModelApiFormat =
   | 'openai-images'
   | 'openai-audio'
   | 'openai-videos'
+  | 'openai-transcriptions'
 
 /** Capability a model entry is configured for; only `chat` runs today. */
-export type ModelKind = 'chat' | 'image' | 'video' | 'tts' | 'classify'
+export type ModelKind = 'chat' | 'image' | 'video' | 'tts' | 'classify' | 'asr'
 
 /** One user-added model; never contains the API key itself. */
 export interface AgentModelInfo {
@@ -309,6 +310,7 @@ export interface AgentModelInfo {
   imagePrice?: number
   videoSecondPrice?: number
   ttsKcharPrice?: number
+  asrMinutePrice?: number
   configured: boolean
 }
 
@@ -343,6 +345,7 @@ export interface LlmParams {
   imagePrice?: number
   videoSecondPrice?: number
   ttsKcharPrice?: number
+  asrMinutePrice?: number
 }
 
 export interface ConnectionTestResult {
@@ -352,7 +355,7 @@ export interface ConnectionTestResult {
 }
 
 /** Background media job; decoupled from a chat run. */
-export type MediaJobKind = 'image' | 'video' | 'tts' | 'classify'
+export type MediaJobKind = 'image' | 'video' | 'tts' | 'classify' | 'asr'
 export type MediaJobStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
 
 export interface MediaJob {

@@ -31,7 +31,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # 技能包导入：WebView 上传的 zip/.skill 以 base64 传入 Rust。
 base64 = "0.22"
 # Agent LLM 代理：唯一网络出口，SSE 流式转发；rustls 便于 Android 交叉编译。
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "multipart"] }
 futures-util = "0.3"
 # Provider base URL validation: HTTPS-only, public host, no credentials.
 url = "2"

@@ -49,6 +49,9 @@ pub enum ApiFormat {
     /// `POST <baseUrl>/videos` followed by polling and `/videos/{id}/content`
     #[serde(rename = "openai-videos")]
     OpenAiVideos,
+    /// `POST <baseUrl>/audio/transcriptions`
+    #[serde(rename = "openai-transcriptions")]
+    OpenAiTranscriptions,
 }
 
 impl ApiFormat {
@@ -59,7 +62,10 @@ impl ApiFormat {
             Self::OpenAiResponses => "openai-responses",
             Self::AnthropicMessages => "anthropic-messages",
             // Media entries never flow through pi-agent; these values are unused.
-            Self::OpenAiImages | Self::OpenAiAudio | Self::OpenAiVideos => "openai-completions",
+            Self::OpenAiImages
+            | Self::OpenAiAudio
+            | Self::OpenAiVideos
+            | Self::OpenAiTranscriptions => "openai-completions",
         }
     }
 
@@ -82,6 +88,7 @@ impl ApiFormat {
             Self::OpenAiImages => "/images/generations",
             Self::OpenAiAudio => "/audio/speech",
             Self::OpenAiVideos => "/videos",
+            Self::OpenAiTranscriptions => "/audio/transcriptions",
         }
     }
 
@@ -105,6 +112,7 @@ pub enum ModelKind {
     Video,
     Tts,
     Classify,
+    Asr,
 }
 
 impl ModelKind {
@@ -171,6 +179,7 @@ pub struct ModelView {
     pub image_price: Option<f64>,
     pub video_second_price: Option<f64>,
     pub tts_kchar_price: Option<f64>,
+    pub asr_minute_price: Option<f64>,
     pub configured: bool,
 }
 
@@ -233,6 +242,7 @@ pub fn view(conn: &Connection, entry: ModelEntry, configured: bool) -> ModelView
         image_price: params.image_price,
         video_second_price: params.video_second_price,
         tts_kchar_price: params.tts_kchar_price,
+        asr_minute_price: params.asr_minute_price,
         configured,
     }
 }
@@ -442,6 +452,9 @@ fn validate_format_for_kind(kind: ModelKind, format: ApiFormat) -> Result<(), To
         }
         ModelKind::Video if format != ApiFormat::OpenAiVideos => {
             Err(ToolError::invalid("视频模型必须使用 OpenAI Videos 协议"))
+        }
+        ModelKind::Asr if format != ApiFormat::OpenAiTranscriptions => {
+            Err(ToolError::invalid("转写模型必须使用 OpenAI Transcriptions 协议"))
         }
         _ => Ok(()),
     }

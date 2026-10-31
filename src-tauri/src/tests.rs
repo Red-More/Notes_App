@@ -516,7 +516,7 @@ fn schema_creates_agent_and_media_tables() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 5, "media result column requires schema v5");
+    assert_eq!(version, 6, "ASR jobs require schema v6");
     for table in [
         "conversations",
         "messages",
@@ -829,6 +829,35 @@ fn media_jobs_persist_cancel_and_recover() {
 }
 
 #[test]
+fn asr_jobs_use_transcription_models() {
+    let vfs = test_vfs();
+    let asr = model_store::save(
+        vfs.conn(),
+        ModelInput {
+            id: String::new(),
+            label: "转写模型".into(),
+            format: ApiFormat::OpenAiTranscriptions,
+            base_url: "https://api.example.com/v1".into(),
+            model_id: "whisper-demo".into(),
+            full_url: false,
+            kind: ModelKind::Asr,
+        },
+    )
+    .unwrap();
+    let job = jobs::submit(
+        vfs.conn(),
+        jobs::NewJob {
+            kind: jobs::JobKind::Asr,
+            model_entry: asr.id,
+            params: serde_json::json!({"assetId": 1}),
+        },
+    )
+    .unwrap();
+    assert_eq!(job.kind, jobs::JobKind::Asr);
+    assert_eq!(job.status, jobs::JobStatus::Pending);
+}
+
+#[test]
 fn media_assets_dedupe_by_content_hash() {
     let vfs = test_vfs();
     let dir = std::env::temp_dir().join(format!("notes-media-{}", std::process::id()));
@@ -962,6 +991,11 @@ fn model_endpoints_cover_all_formats() {
             ApiFormat::OpenAiVideos,
             "https://api.example.com/v1",
             "/videos",
+        ),
+        (
+            ApiFormat::OpenAiTranscriptions,
+            "https://api.example.com/v1",
+            "/audio/transcriptions",
         ),
     ] {
         let entry = ModelEntry {
@@ -1268,6 +1302,7 @@ fn llm_params_roundtrip_and_validation() {
         image_price: None,
         video_second_price: None,
         tts_kchar_price: None,
+        asr_minute_price: None,
     };
     params::save(vfs.conn(), "custom_1", &valid).unwrap();
     let loaded = params::get(vfs.conn(), "custom_1");
