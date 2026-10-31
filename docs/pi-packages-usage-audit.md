@@ -15,8 +15,9 @@
 | pi-agent-core 使用面 | 只使用 `Agent` 类、`StreamFn`、`AgentTool`、`AgentMessage`、`AgentEvent` 五个符号 |
 | pi-ai 使用面 | 只使用 3 个运行时值（`Type`、`createAssistantMessageEventStream`、`parseStreamingJson`）+ 7 个类型 |
 | 传输层 | 官方 `streamProxy` 完全未使用，由 Rust `agent_stream` + 自研 `StreamFn` 等价替换 |
-| 功能覆盖 | 只覆盖「文本对话 + 工具调用 + 流式事件 + 会话落库」最小闭环 |
-| 主要缺口 | 思考流、图片输入、用量/成本、缓存/会话亲和、重试、遥测、OAuth、模型目录、图像生成、分类、跨 Provider 交接、约束采样 |
+| 功能覆盖 | 现状只覆盖「文本对话 + 工具调用 + 流式事件 + 会话落库」；规划扩展到多模型能力矩阵与图像/视频/语音媒体管线 |
+| 主要缺口 | 思考流、图片输入、用量/成本、缓存/会话亲和、重试、遥测、OAuth、模型目录、图像生成、分类、跨 Provider 交接、约束采样、媒体作业与资产库 |
+| 扩展边界 | 多 LLM 已具备（任意 model id + 三种协议）；本轮增量是能力矩阵分流与媒体产出，不引入 pi-ai 的 Provider/Auth 体系 |
 | 打包合规 | 只从两个包的根入口导入，未触碰 `providers/all`、`api/*` 等子路径，符合项目既定打包边界 |
 
 ---
@@ -263,6 +264,8 @@
 
 ## 4. 官方功能对照与未接入清单
 
+本表口径为**当前代码现状**；本轮规划的扩展项见 5.4 与第 6 节，不改变这里的现状判定。
+
 状态定义：
 
 - **已接入**：项目有明确调用点，且行为可用
@@ -364,24 +367,26 @@
 | 工具高级字段 | `prepareArguments`、`outputSchema`、`structuredContent`、`replay`、`usage`、`terminate`、`onUpdate` | 未接入 | 只用 `name/label/description/parameters/execute/executionMode` |
 | 工具进度流 | `onUpdate()` | 未接入 | 工具卡片只在 start/end 更新 |
 | 工具错误约定 | 抛出异常由 Agent 转 `isError` | 已接入 | 项目主动返回 `isError: true` 结果；官方 `AgentToolResult` 同样支持该形状 |
-| MCP 集成 | `@earendil-works/pi-mcp` | 未安装/未接入 | 项目明确不做插件执行 |
-| Codemode 集成 | `@earendil-works/pi-codemode` | 未安装/未接入 | 项目明确不做代码执行 |
+| MCP 集成 | `@earendil-works/pi-mcp` | 未安装/未接入 | 不安装；需要时只做 Rust 远程 MCP（见 4.3） |
+| Codemode 集成 | `@earendil-works/pi-codemode` | 未安装/未接入 | 保持排除，不执行模型生成的代码 |
 
-### 4.3 项目明确不做（不列为缺陷）
+### 4.3 项目边界（含扩展后的取舍）
 
-以下能力与 `docs/refactoring-sqlite-vfs-pi-agent.md` 的边界一致，属于主动排除：
+以下能力与 `docs/refactoring-sqlite-vfs-pi-agent.md` 的边界一致；「本轮结论」列区分永久排除与扩展后新增范围。
 
-| 能力 | 排除原因 |
-|---|---|
-| Shell/命令执行 | 安全边界：模型无 shell |
-| 真实文件系统访问 | 只走 SQLite 虚拟 FS |
-| Web 搜索/网页抓取 | 明确不做 |
-| 后台任务/notebook | 明确不做 |
-| 多人协作/云同步 | 明确不做 |
-| 插件/扩展执行 | 技能只注入 prompt，不执行代码 |
-| MCP 服务器接入 | 未安装 `pi-mcp` |
-| Codemode 脚本执行 | 未安装 `pi-codemode` |
-| 厂商 SDK 直连 | 网络请求全部留在 Rust |
+| 能力 | 排除原因 | 本轮结论 |
+|---|---|---|
+| Shell/命令执行 | 安全边界：模型无 shell | 永久排除 |
+| 真实文件系统访问 | 只走 SQLite 虚拟 FS | 永久排除 |
+| Web 搜索/网页抓取 | 明确不做 | 永久排除 |
+| 模型自主后台任务 / notebook | `Agent` 无 task 层能力 | 永久排除 |
+| 媒体作业队列（图像/视频/TTS） | 与 Agent run 生命周期解耦 | 新增规划，见 6.4.2 |
+| 多人协作/云同步 | 明确不做 | 永久排除 |
+| 插件/扩展执行 | 技能只注入 prompt，不执行代码 | 永久排除 |
+| stdio / 本地进程型 MCP | 需要 spawn 进程，破坏边界 | 永久排除 |
+| 远程 HTTP/SSE MCP | 可由 Rust 持白名单直连 | 后置规划，非本轮必做 |
+| Codemode 脚本执行 | 需要执行模型生成的代码 | 永久排除 |
+| 厂商 SDK 直连 | 网络请求全部留在 Rust | 排除；仅允许 Rust 内 REST 实现 |
 
 ### 4.4 关于「异步 / 后台任务」的澄清
 
@@ -392,14 +397,15 @@
 | Provider 延迟响应（deferred） | 有抽象 | `SimpleStreamOptions.deferred` 请求 Provider 返回 `DeferredHandle`；`AssistantMessage.stopReason='deferred'`；之后用 `Models.streamDeferred()/fetchDeferred()/cancelDeferred()` 轮询 | 未接入；Rust 代理没有对应协议 |
 | deferred 的实际可用性 | 受限 | 当前 1.4.0 只有 faux 测试 Provider 实现 `fetchDeferred`/`cancelDeferred`；内置真实 Provider 适配器未实现 | 对现有三种真实协议不可用 |
 | Agent 是否传递 deferred | 否 | `AgentOptions` 没有 `deferred` 字段，`createLoopConfig()` 不传该选项 | 即使底层 `StreamFn` 支持，也无法经 `Agent` 开启 |
+| App 级媒体作业队列 | 官方无 | 无现成抽象；需要任务表、轮询、取消与重启恢复 | **规划中**：视频生成必需，图像与长 TTS 复用同一套 |
 
-结论：`pi-agent-core` 没有「模型后台执行 task」这一层能力；`pi-ai` 只有 Provider 级的 deferred-response 抽象，而且当前版本对真实 Provider 基本不可用。若产品要允许后台执行，需要在应用层新增任务队列/持久化，或在 Rust 代理层接入厂商的异步/background 接口，而不是依赖这两个包的现成能力。
+结论：`pi-agent-core` 没有「模型后台执行 task」这一层能力；`pi-ai` 只有 Provider 级的 deferred-response 抽象，且当前版本对真实 Provider 基本不可用。扩展后的做法是：**不使用 pi-ai 的 deferred**，在 Rust 侧自建作业队列（表 + 提交/取消/查询 + 重启恢复），由厂商异步接口驱动；「模型自主排队后台任务」仍不做。
 
 ---
 
 ## 5. 未完成功能点汇总（按接入优先级）
 
-### P0：影响当前对话质量或正确性
+### 5.1 P0：影响当前对话质量或正确性
 
 | 功能点 | 当前落点 | 缺口 |
 |---|---|---|
@@ -410,48 +416,66 @@
 | 错误分类与重试 | 自研 `error` 事件 | 无 `utils/retry`、无 `maxRetryDelayMs`、无错误类型分层 |
 | 工具参数展示 | 工具卡片只在 start/end 更新 | 未消费 `toolcall_delta`，看不到参数流式生成 |
 
-### P1：官方能力可直接增强体验
+### 5.2 P1：官方能力可直接增强体验
 
-| 功能点 | 当前落点 | 缺口 |
+| 功能点 | 当前落点 | 缺口 | 本轮结论 |
+|---|---|---|---|
+| 图片输入 | `supportsImages` 写入 `model.input` | UI 无入口；Rust 丢弃图片；历史不保存图片 | 实现 |
+| 缓存/会话亲和 | 无 | 未传 `sessionId`/`cacheRetention`；Rust 无缓存头 | 实现 |
+| Payload/原始事件调试 | 无 | 未接 `onPayload`/`onResponse`/`onProviderStreamEvent` | 仅开发开关 |
+| 工具后处理 | 无 | 未接 `afterToolCall`，无法统一审计/改写结果 | 实现（媒体工具审计依赖） |
+| 轮次收尾控制 | 无 | 未接 `finishTurn`，无法按 stopReason 精细结束 | 实现 |
+| 请求前上下文重放 | 无 | 未接 `prepareRequest`，长会话只能靠 Rust 裁剪 | 与 `transformContext` 合并实现 |
+| 遥测 | 无 | 未接 `pi-telemetry`，无耗时/token/成本指标 | 不实现 |
+| 队列式交互 | 无 | 未接 `steer()`/`followUp()`，运行中不能补充指令 | 实现 |
+
+### 5.3 P2：体系级能力
+
+| 功能点 | 当前落点 | 缺口 | 本轮结论 |
+|---|---|---|---|
+| Provider/Models 体系 | 手工 `Model` | 未接 `createModels()`、Provider 工厂、模型目录 | 不实现；改自建能力矩阵 |
+| OAuth/凭证存储 | Rust SecretStore | 未接 pi-ai `CredentialStore`/`login()`/`logout()` | 不实现 |
+| 多协议覆盖 | 3 种协议 | 未接 Google、Mistral、Bedrock、Azure、Codex、OpenRouter 等 | 只按能力补齐媒体协议 |
+| 约束采样 | 无 | 未声明 `constrainedSampling` | 不接字段；用协议原生结构化输出 |
+| 图像生成/分类 | 无 | 未接 `generateImages()`/`classify()` | 实现，走 Rust 媒体管线 |
+| 延迟响应 | 无 | 未接 deferred 流 | 不使用 pi-ai deferred；自建作业队列 |
+| 跨 Provider 交接 | 手工重放 | 未接官方交接逻辑，思考无法保留 | 不实现 |
+| Faux Provider | 无 | 单测未使用官方测试 Provider | 不实现 |
+| 兼容层 | 无 | 未接 `pi-ai/compat` | 不实现 |
+
+### 5.4 扩展范围新增功能点
+
+| 功能点 | 内容 | 优先级 |
 |---|---|---|
-| 图片输入 | `supportsImages` 写入 `model.input` | UI 无入口；Rust 丢弃图片；历史不保存图片 |
-| 缓存/会话亲和 | 无 | 未传 `sessionId`/`cacheRetention`；Rust 无缓存头 |
-| Payload/原始事件调试 | 无 | 未接 `onPayload`/`onResponse`/`onProviderStreamEvent` |
-| 工具后处理 | 无 | 未接 `afterToolCall`，无法统一审计/改写结果 |
-| 轮次收尾控制 | 无 | 未接 `finishTurn`，无法按 stopReason 精细结束 |
-| 请求前上下文重放 | 无 | 未接 `prepareRequest`，长会话只能靠 Rust 裁剪 |
-| 遥测 | 无 | 未接 `pi-telemetry`，无耗时/token/成本指标 |
-| 队列式交互 | 无 | 未接 `steer()`/`followUp()`，运行中不能补充指令 |
-
-### P2：体系级能力
-
-| 功能点 | 当前落点 | 缺口 |
-|---|---|---|
-| Provider/Models 体系 | 手工 `Model` | 未接 `createModels()`、Provider 工厂、模型目录 |
-| OAuth/凭证存储 | Rust SecretStore | 未接 pi-ai `CredentialStore`/`login()`/`logout()` |
-| 多协议覆盖 | 3 种协议 | 未接 Google、Mistral、Bedrock、Azure、Codex、OpenRouter 等 |
-| 约束采样 | 无 | 未声明 `constrainedSampling` |
-| 图像生成/分类 | 无 | 未接 `generateImages()`/`classify()` |
-| 延迟响应 | 无 | 未接 deferred 流 |
-| 跨 Provider 交接 | 手工重放 | 未接官方交接逻辑，思考无法保留 |
-| Faux Provider | 无 | 单测未使用官方测试 Provider |
-| 兼容层 | 无 | 未接 `pi-ai/compat` |
+| 模型能力矩阵 | `kind`（chat/image/video/tts/classify）、模态、上下文、价格、结构化输出与工具支持 | P0 |
+| 媒体作业子系统 | `jobs` 表 + 提交/查询/取消 + Channel 进度 + 重启恢复 | P0（视频必需） |
+| 资产库 | 磁盘 `media/{sha256}` + SQLite 元数据引用 + 哈希去重 | P0 |
+| 成本账本扩展 | token / 张 / 秒 / 千字符统一记账 | P0 |
+| TTS | Rust 音频协议 + 资产入库 + 播放 | P1 |
+| 分类 | 非流式 + JSON Schema 结构化输出 | P1 |
+| 图像生成 | Rust 图像协议 + 资产入库 | P1 |
+| 视频生成 | 复用作业队列，轮询/取消/恢复 | P2 |
+| 远程 MCP | 仅 HTTP/SSE + 白名单 | P2（可选） |
 
 ---
 
-## 6. 引入建议
+## 6. 引入建议与扩展范围
 
-建议只引入 **3 个低耦合能力**，其余按产品目标再开。`pi-ai` 的 Provider/Models/Auth 体系不建议引入，会和现有 Rust 代理的安全边界冲突。
+本章结论已按扩展目标更新：产品不再只有单一 chat 模型，需要支持多 LLM 能力矩阵、文生图、视频生成与文字转语音。**6.1、6.2 全部采纳**；6.3 只保留真正越界或无效的项。
 
-### 6.1 强烈建议
+`pi-ai` 的 Provider/Models/Auth 体系仍然不引入：它会把 URL、密钥与网络请求搬回 WebView，与现有 Rust 代理的安全边界冲突。媒体能力改由 Rust 侧的「协议适配 + 作业队列 + 资产库」实现，`pi-ai` 继续只承担 Agent 状态机、事件协议与类型系统。
+
+### 6.1 强烈建议（已采纳）
 
 | 优先级 | 建议引入 | 理由 | 落点 |
 |---|---|---|---|
 | 强烈建议 | `toolcall_delta` 工具参数流式展示 | Rust 和 [protocol.ts](../src/agent/protocol.ts) 已经在发这个事件，前端只是没消费；纯前端改动，能提前显示 `path` 等参数 | [ChatPage.tsx](../src/pages/chat/ChatPage.tsx) 的 `message_update` |
-| 强烈建议 | `Usage` 全链路持久化与展示 | 现在 Rust 已统计 token，但 [runtime.ts](../src/agent/runtime.ts) 历史还原时归零，UI 也不展示；至少展示 input/output/total | 消息表加字段 + 气泡/工具卡展示；成本需要额外模型定价，建议先不做 |
+| 强烈建议 | `Usage` 全链路持久化与展示 | 现在 Rust 已统计 token，但 [runtime.ts](../src/agent/runtime.ts) 历史还原时归零，UI 也不展示；至少展示 input/output/total | 消息表加字段 + 气泡/工具卡展示；成本由 6.4.1 的 `pricing` 驱动，随能力矩阵一起落地 |
 | 强烈建议 | `estimateContextTokens` + `Agent.transformContext` | 当前 Rust 只按 200 条消息裁剪，长消息仍可能爆上下文；用 token 预算裁剪到 `contextWindow` 的 70–80%，Rust 的 200 条保留为兜底 | `createAgent()` 增加 `transformContext` |
 
-### 6.2 按需引入
+以上三项全部纳入本轮实现。
+
+### 6.2 按需引入（已全部采纳，按序落地）
 
 | 能力 | 什么时候值得引入 | 代价 |
 |---|---|---|
@@ -462,13 +486,103 @@
 | `continue()` | 想修「重试会重复插入 user 消息」 | 需要处理已取消的 assistant 消息作为上下文 |
 | `StringEnum` / `prepareArguments` | 弱模型经常给错枚举值或参数形状 | 只改工具 schema/兼容层，收益有限 |
 
-### 6.3 明确不建议
+以上六项全部纳入实现：`thinking_*` 全链路落地（默认折叠展示），图片输入与 `sessionId`/`cacheRetention` 在媒体管线打通后落地。
 
-- `createModels()` / `Provider` / `getAuth()` / OAuth / 内置模型目录：会把 URL、密钥、网络请求搬回 WebView，违背当前「Key 不进 JS、请求只走 Rust」的红线，也会破坏现有打包边界。
-- `pi-telemetry`：项目定位是隐私优先，不应引入。
-- 图像生成、分类、MCP、Codemode、deferred/后台任务：超出当前产品边界。
-- `constrainedSampling`：6 个简单 `fs_*` 工具收益低，且需要 Rust 透传 `strict`。
-- 生产环境接 `onPayload` / `onProviderStreamEvent`：只适合开发调试，不应默认开启。
+### 6.3 明确不建议（扩展后仍不采纳）
+
+| 项 | 不采纳原因 | 替代方案 |
+|---|---|---|
+| `createModels()` / `Provider` / `getAuth()` / OAuth / 内置模型目录 | 会把 URL、密钥、网络请求搬回 WebView，违背「Key 不进 JS、请求只走 Rust」红线，并破坏打包边界 | 自建 Rust 能力矩阵（6.4.1），密钥继续留在 `SecretStore` |
+| `pi-telemetry` | 项目定位隐私优先 | 不做；成本统计走本地账本 |
+| Codemode（`@earendil-works/pi-codemode`） | 需执行模型生成的代码，等于新增一个沙箱运行时（JS runtime、资源限制、逃逸面），与 SQLite 虚拟 FS 的边界相反 | 用「批量复合工具」（一次读多个路径）替代，不执行代码 |
+| stdio / 本地进程型 MCP | 需 spawn 进程，破坏「无 shell、无插件执行」边界 | 需要时只做远程 HTTP/SSE + Rust 白名单，后置 |
+| `pi-ai` 的 `deferred` API | 1.4.0 仅 faux Provider 实现，`AgentOptions` 也不透传 `deferred` | 自建 Rust 作业子系统（6.4.2） |
+| `constrainedSampling` 字段本体 | 现有 `SimpleStreamOptions` 子集不透传该字段，接入等于死字段；6 个 `fs_*` 工具收益低 | 分类/抽取改用协议原生 `response_format` / JSON Schema（等价能力） |
+| 图像生成/分类「走 pi-ai Provider API」 | 同为 Provider/Auth 体系问题，会把请求搬回 WebView | 在 Rust 内实现 REST 协议，产物进资产库 |
+| 生产环境默认开启 `onPayload` / `onProviderStreamEvent` | 只适合开发调试，含敏感载荷 | 保留为显式开发开关 |
+
+### 6.4 扩展能力架构（规划）
+
+#### 6.4.1 模型能力矩阵
+
+`model_store.rs` 的条目目前只有 chat 语义，扩展为按能力分流的最小描述：
+
+| 字段 | 用途 |
+|---|---|
+| `kind` | `chat` / `image` / `video` / `tts` / `classify` |
+| `modalities` | 输入/输出支持（text、image、audio） |
+| `context_window` / `max_output` | 复用现有能力提示 |
+| `pricing` | token / 张 / 秒 / 千字符单价，供成本账本 |
+| `supports` | 工具、结构化输出、思考、缓存 |
+
+不引入 pi-ai `createModels()`；能力矩阵只是 `life.db` 的结构扩展与 UI 分组依据。
+
+#### 6.4.2 媒体作业子系统（Rust）
+
+| 组成 | 职责 |
+|---|---|
+| `jobs` 表 | `id/kind/model_entry_id/params/status/progress/asset_id/error/created_at/updated_at` |
+| Tauri 命令 | `job_submit`、`job_get`、`job_list`、`job_cancel` |
+| Channel 事件 | 状态变更、进度、完成/失败，复用现有 Tauri Channel |
+| 执行器 | tokio 任务；异步厂商按固定间隔轮询；429/超时退避重试 |
+| 恢复 | 启动时扫描 `pending`/`running` 作业，重新接管或标记失败 |
+| 取消 | `AtomicBool` + 远端 cancel 接口（厂商支持时） |
+
+约束：作业与 `Agent` run 生命周期完全解耦；一次 run 结束不终止作业，作业失败也不回写对话气泡。
+
+#### 6.4.3 资产库
+
+| 项 | 设计 |
+|---|---|
+| 存储位置 | 磁盘 `appdata/media/{sha256}.{ext}`；SQLite 只存元数据与引用 |
+| 元数据 | `assets(id, sha256, mime, size, width/height, duration, source_job_id, created_at)` |
+| 去重 | 内容哈希去重，同图多次生成只留一份 |
+| 生命周期 | 笔记删除不立即删资产，由定期 GC 或引用计数回收 |
+| 传输 | 返回本地路径/asset URL，不用 base64 走 IPC |
+| 临时 URL | 厂商签名 URL 立即下载落地，并校验 mime 与大小 |
+
+不把视频/音频塞进笔记库 SQLite：会显著放大 WAL 与备份体积。
+
+#### 6.4.4 成本账本
+
+| 单位 | 来源 |
+|---|---|
+| token（in/out） | chat 响应的 `Usage` |
+| 张 | 图像生成成功数 |
+| 秒 | 视频时长 |
+| 千字符 | TTS 输入长度 |
+
+同一张账覆盖全部 `kind`，UI 按会话/按天聚合；历史消息还原时保留 usage，不再统一归零。
+
+#### 6.4.5 Agent 暴露策略
+
+| 阶段 | 做法 |
+|---|---|
+| 一期 | 媒体生成只由 UI 显式触发，不进模型工具集 |
+| 二期 | 若确需模型自主触发，再包成 `AgentTool`，并加「单轮最多 N 次媒体生成」配额，与 `MAX_WRITES_PER_RUN` 同思路 |
+| 始终 | 媒体工具结果只返回资产引用与摘要，不返回二进制 |
+
+#### 6.4.6 按能力补齐的协议
+
+| 能力 | Rust 需实现的协议（纯 REST，密钥留在 `SecretStore`） | 响应形态 |
+|---|---|---|
+| 图像 | OpenAI Images、DashScope 万相、火山 Seedream | 部分同步、部分异步轮询 |
+| 视频 | 火山 Seedance、DashScope、可灵类异步接口 | 全部异步作业 |
+| TTS | OpenAI Audio、DashScope CosyVoice、ElevenLabs | 同步或流式字节 |
+| 分类 | 复用 chat 协议 + `response_format` | 同步非流式 |
+
+现有三种 chat 协议不动；媒体协议按需增量，不铺开 pi-ai 的 30+ Provider。
+
+### 6.5 落地顺序
+
+1. 能力矩阵（`kind`/`capabilities`/价格）→ 验证：UI 能按能力分组选模型
+2. 资产库 + 作业骨架 → 验证：提交假作业，能落库、能取消、重启能恢复
+3. 分类 + TTS → 验证：一次非流式分类与一段音频入库，成本账正确
+4. 图像生成 + 图片输入 → 验证：三协议图片透传与产物展示
+5. 视频生成 → 验证：长任务进度、取消、重启恢复
+6. 远程 MCP / 结构化输出按需 → 验证：白名单拒绝非清单地址
+
+先做第 3 步的理由：分类与 TTS 用最小代价验证「非 chat 能力 + 资产 + 成本」三件基础设施；图像与视频只是复用它们，反过来先上视频会同时踩作业恢复、大文件存储、高成本三个坑。
 
 ---
 
@@ -488,8 +602,19 @@
 | `src-tauri/src/agent/model_store.rs` | 模型条目与协议映射 |
 | `src-tauri/src/agent/mod.rs` | 工具白名单、HTTP 客户端、Agent 状态 |
 
+规划新增（尚未创建，命名暂定）：
+
+| 模块 | 作用 |
+|---|---|
+| `src-tauri/src/media/mod.rs` | 媒体协议适配与模块入口 |
+| `src-tauri/src/media/jobs.rs` | 作业表、提交/取消/查询、启动恢复 |
+| `src-tauri/src/media/assets.rs` | 资产哈希、落盘、引用与 GC |
+| `src-tauri/src/media/providers/` | 图像/视频/TTS 各厂商 REST 适配 |
+
 ---
 
 ## 8. 一句话总结
 
-当前实现把两个包当作「Agent 状态机 + 事件协议 + 类型系统」使用：`pi-agent-core` 提供对话/工具循环，`pi-ai` 提供 `Type`、事件流工厂与流式 JSON 解析；所有模型目录、鉴权、网络、传输、思考、图片、用量、遥测能力都被 Rust 代理和自研封装替代或裁剪。若要保持最小依赖，这是合理的；若只做增量改进，优先落地第 6.1 节的三项（`toolcall_delta`、`Usage`、token 预算裁剪），thinking、图片、缓存等按目标模型与产品目标再开。
+当前实现把两个包当作「Agent 状态机 + 事件协议 + 类型系统」使用：`pi-agent-core` 提供对话/工具循环，`pi-ai` 提供 `Type`、事件流工厂与流式 JSON 解析。扩展后这一定位不变：多 LLM 由 Rust 能力矩阵分流，图像/视频/TTS 由 Rust「媒体协议 + 作业队列 + 资产库」产出，`pi-ai` 的 Provider/Auth/deferred/constrainedSampling 均不引入。
+
+本轮落地顺序：6.1 三项 → 能力矩阵与作业/资产骨架 → 分类与 TTS → 图像生成与图片输入 → 视频 → 远程 MCP。Codemode、stdio MCP、Provider 体系、遥测保持排除。
