@@ -8,6 +8,7 @@
 #![allow(dead_code)]
 
 pub mod assets;
+pub mod exec;
 pub mod jobs;
 
 use std::collections::HashMap;

@@ -13,6 +13,9 @@ import type {
   Folder,
   FolderStats,
   LlmParams,
+  MediaAsset,
+  MediaJob,
+  MediaJobKind,
   ModelApiFormat,
   ModelKind,
   NewChatMessage,
@@ -575,6 +578,19 @@ export const chatApi = {
   paramsSet: (modelEntryId: string, params: LlmParams) =>
     invoke<void>('agent_params_set', { modelEntryId, params }),
   cancel: (requestId: string) => invoke<void>('agent_cancel', { requestId }),
+}
+
+/**
+ * 媒体作业 API：提交后排入 Rust 队列，结果落在 job 或 asset 上。
+ */
+export const mediaApi = {
+  submit: (input: { kind: MediaJobKind; modelEntry: string; params?: Record<string, unknown> }) =>
+    invoke<MediaJob>('media_job_submit', { input }),
+  list: (limit?: number) => invoke<MediaJob[]>('media_job_list', { limit }),
+  get: (id: number) => invoke<MediaJob>('media_job_get', { id }),
+  cancel: (id: number) => invoke<MediaJob>('media_job_cancel', { id }),
+  asset: (id: number) => invoke<MediaAsset>('media_asset_get', { id }),
+  assetPath: (id: number) => invoke<string>('media_asset_path', { id }),
 }
 
 /**

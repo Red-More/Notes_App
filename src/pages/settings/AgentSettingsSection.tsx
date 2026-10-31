@@ -16,7 +16,22 @@ const FORMAT_OPTIONS: Array<{ key: ModelApiFormat; label: string }> = [
   { key: 'openai-chat', label: 'OpenAI Chat Completions' },
   { key: 'openai-responses', label: 'OpenAI Responses API' },
   { key: 'anthropic-messages', label: 'Anthropic Messages' },
+  { key: 'openai-images', label: 'OpenAI Images' },
+  { key: 'openai-audio', label: 'OpenAI Audio' },
 ]
+
+const CHAT_FORMATS: ModelApiFormat[] = ['openai-chat', 'openai-responses', 'anthropic-messages']
+
+/** Only formats the selected capability can actually execute today. */
+function formatOptionsFor(kind: ModelKind): Array<{ key: ModelApiFormat; label: string }> {
+  const allowed =
+    kind === 'image'
+      ? ['openai-images']
+      : kind === 'tts'
+        ? ['openai-audio']
+        : CHAT_FORMATS
+  return FORMAT_OPTIONS.filter((item) => allowed.includes(item.key))
+}
 
 /** Capability groups shown in the model list; only chat runs today. */
 const KIND_OPTIONS: Array<{ key: ModelKind; label: string }> = [
@@ -73,6 +88,16 @@ const URL_PRESETS: Array<{ label: string; baseUrl: string; format: ModelApiForma
     label: 'Anthropic',
     baseUrl: 'https://api.anthropic.com',
     format: 'anthropic-messages',
+  },
+  {
+    label: 'OpenAI（Images）',
+    baseUrl: 'https://api.openai.com/v1',
+    format: 'openai-images',
+  },
+  {
+    label: 'OpenAI（Audio）',
+    baseUrl: 'https://api.openai.com/v1',
+    format: 'openai-audio',
   },
 ]
 
@@ -143,6 +168,10 @@ function endpointHint(format: ModelApiFormat, fullUrl: boolean): string {
         return '直接使用该完整地址，不再拼接路径；请确保地址包含 /v1/responses。'
       case 'anthropic-messages':
         return '直接使用该完整地址，不再拼接路径（示例 https://api.anthropic.com/v1/messages）。'
+      case 'openai-images':
+        return '直接使用该完整地址，不再拼接路径（示例 https://api.openai.com/v1/images/generations）。'
+      case 'openai-audio':
+        return '直接使用该完整地址，不再拼接路径（示例 https://api.openai.com/v1/audio/speech）。'
       default:
         return '直接使用该完整地址，不再拼接路径（示例 https://api.openai.com/v1/chat/completions）。'
     }
@@ -152,6 +181,10 @@ function endpointHint(format: ModelApiFormat, fullUrl: boolean): string {
       return '不要以 / 结尾；系统会拼接 /responses。'
     case 'anthropic-messages':
       return '不要以 / 结尾；系统会拼接 /v1/messages。'
+    case 'openai-images':
+      return '不要以 / 结尾；系统会拼接 /images/generations。'
+    case 'openai-audio':
+      return '不要以 / 结尾；系统会拼接 /audio/speech。'
     default:
       return '不要以 / 结尾；系统会拼接 /chat/completions。'
   }
@@ -164,6 +197,10 @@ function endpointPlaceholder(format: ModelApiFormat, fullUrl: boolean): string {
         return 'https://api.openai.com/v1/responses'
       case 'anthropic-messages':
         return 'https://api.anthropic.com/v1/messages'
+      case 'openai-images':
+        return 'https://api.openai.com/v1/images/generations'
+      case 'openai-audio':
+        return 'https://api.openai.com/v1/audio/speech'
       default:
         return 'https://api.openai.com/v1/chat/completions'
     }
@@ -706,7 +743,11 @@ export default function AgentSettingsSection() {
                     <div className="model-title">
                       {entry.label}
                       {active && <span className="model-badge">使用中</span>}
-                      {kind !== 'chat' && <span className="model-badge">待接入</span>}
+                      {kind !== 'chat' && (
+                        <span className="model-badge">
+                          {kind === 'video' ? '待接入' : '可用'}
+                        </span>
+                      )}
                     </div>
                     <div className="model-meta">
                       {entry.modelId} · {formatLabel(entry.format)}
@@ -795,7 +836,7 @@ export default function AgentSettingsSection() {
               value={draft.format}
               onChange={(e) => patchDraft({ format: e.target.value as ModelApiFormat })}
             >
-              {FORMAT_OPTIONS.map((item) => (
+              {formatOptionsFor(draft.kind).map((item) => (
                 <option key={item.key} value={item.key}>
                   {item.label}
                 </option>
@@ -808,7 +849,15 @@ export default function AgentSettingsSection() {
             <select
               className="form-input"
               value={draft.kind}
-              onChange={(e) => patchDraft({ kind: e.target.value as ModelKind })}
+              onChange={(e) => {
+                const kind = e.target.value as ModelKind
+                patchDraft({
+                  kind,
+                  format: formatOptionsFor(kind)[0].key,
+                  models: [],
+                  modelsError: '',
+                })
+              }}
             >
               {KIND_OPTIONS.map((item) => (
                 <option key={item.key} value={item.key}>
@@ -818,7 +867,9 @@ export default function AgentSettingsSection() {
             </select>
             {draft.kind !== 'chat' && (
               <p className="settings-note">
-                媒体与分类能力将在对应管线接入后启用；当前只有对话模型可以设为「使用中」。
+                {draft.kind === 'video'
+                  ? '视频执行器尚未接入，可先保存配置。'
+                  : '该能力已可执行：图像走 Images 协议，语音走 Audio 协议，分类走 Chat 协议。'}
               </p>
             )}
           </div>

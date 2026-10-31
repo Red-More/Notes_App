@@ -278,7 +278,12 @@ export interface NewChatMessage {
 }
 
 /** Wire protocol used by one user-defined model entry. */
-export type ModelApiFormat = 'openai-chat' | 'openai-responses' | 'anthropic-messages'
+export type ModelApiFormat =
+  | 'openai-chat'
+  | 'openai-responses'
+  | 'anthropic-messages'
+  | 'openai-images'
+  | 'openai-audio'
 
 /** Capability a model entry is configured for; only `chat` runs today. */
 export type ModelKind = 'chat' | 'image' | 'video' | 'tts' | 'classify'
@@ -343,4 +348,35 @@ export interface ConnectionTestResult {
   latencyMs: number
   status: number
   model: string
+}
+
+/** Background media job; decoupled from a chat run. */
+export type MediaJobKind = 'image' | 'video' | 'tts' | 'classify'
+export type MediaJobStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+
+export interface MediaJob {
+  id: number
+  kind: MediaJobKind
+  modelEntry: string
+  status: MediaJobStatus
+  progress: number
+  assetId?: number | null
+  error?: string | null
+  /** JSON answer for classification jobs. */
+  result?: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+/** Stored media file; the binary lives under app data, not in SQLite. */
+export interface MediaAsset {
+  id: number
+  sha256: string
+  mime: string
+  size: number
+  width?: number | null
+  height?: number | null
+  durationMs?: number | null
+  sourceJob?: number | null
+  createdAt: string
 }

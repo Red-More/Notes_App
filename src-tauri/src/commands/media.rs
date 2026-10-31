@@ -4,21 +4,29 @@
 
 use std::sync::atomic::Ordering;
 
-use tauri::State;
+use tauri::{AppHandle, State};
 
-use crate::media::{assets, jobs, MediaState};
+use crate::media::{assets, exec, jobs, MediaState};
 use crate::vfs::error::ToolError;
 use crate::vfs::VfsState;
 
 #[tauri::command]
 pub fn media_job_submit(
+    app: AppHandle,
     vfs_state: State<'_, VfsState>,
     media: State<'_, MediaState>,
     input: jobs::NewJob,
 ) -> Result<jobs::Job, ToolError> {
-    let vfs = vfs_state.0.lock().unwrap();
-    let job = jobs::submit(vfs.conn(), input)?;
+    let job = {
+        let vfs = vfs_state.0.lock().unwrap();
+        jobs::submit(vfs.conn(), input)?
+    };
     media.register_cancel(job.id);
+    // Run outside this command so the UI gets the queue id immediately.
+    let job_id = job.id;
+    tauri::async_runtime::spawn(async move {
+        exec::run(app, job_id).await;
+    });
     Ok(job)
 }
 

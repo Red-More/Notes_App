@@ -549,6 +549,10 @@ pub async fn run(
         (ApiFormat::AnthropicMessages, false) => {
             anthropic_json(state, &key, &prepared, &cancel, emit).await
         }
+        // Media entries are executed by the media worker, never the chat loop.
+        (ApiFormat::OpenAiImages | ApiFormat::OpenAiAudio, _) => {
+            Err("该模型条目不是对话协议".to_string())
+        }
     };
 
     if let Err(message) = result {
@@ -569,7 +573,7 @@ pub async fn run(
 // HTTP / SSE 基础设施
 // ---------------------------------------------------------------------------
 
-async fn send_json(
+pub(crate) async fn send_json(
     state: &AgentState,
     url: &str,
     headers: &[(&str, String)],
@@ -1698,7 +1702,7 @@ fn emit_raw_tool_block(emit: Emit<'_>, index: usize, id: String, name: String, a
     });
 }
 
-async fn read_json_response(resp: reqwest::Response) -> Result<Value, String> {
+pub(crate) async fn read_json_response(resp: reqwest::Response) -> Result<Value, String> {
     resp.json::<Value>()
         .await
         .map_err(|e| format!("响应不是合法 JSON：{e}"))

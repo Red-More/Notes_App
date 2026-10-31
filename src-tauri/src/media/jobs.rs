@@ -105,6 +105,8 @@ pub struct Job {
     pub progress: u32,
     pub asset_id: Option<i64>,
     pub error: Option<String>,
+    /// JSON answer for classification jobs; `None` for binary outputs.
+    pub result: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -127,11 +129,12 @@ struct RawJob {
     progress: i64,
     asset_id: Option<i64>,
     error: Option<String>,
+    result: Option<String>,
     created_at: String,
     updated_at: String,
 }
 
-const SELECT_JOB: &str = "SELECT id, kind, model_entry, status, progress, asset_id, error, \
+const SELECT_JOB: &str = "SELECT id, kind, model_entry, status, progress, asset_id, error, result, \
                           created_at, updated_at FROM media_jobs";
 
 pub fn submit(conn: &Connection, input: NewJob) -> Result<Job, ToolError> {
@@ -223,6 +226,7 @@ pub fn finish(
     id: i64,
     status: JobStatus,
     asset_id: Option<i64>,
+    result: Option<&str>,
     error: Option<&str>,
 ) -> Result<Job, ToolError> {
     let job = get(conn, id)?;
@@ -236,10 +240,10 @@ pub fn finish(
         "UPDATE media_jobs
          SET status = ?2,
              progress = CASE WHEN ?2 = 'succeeded' THEN 100 ELSE progress END,
-             asset_id = ?3, error = ?4,
+             asset_id = ?3, result = ?4, error = ?5,
              updated_at = datetime('now','localtime')
          WHERE id = ?1",
-        params![id, status.as_str(), asset_id, error],
+        params![id, status.as_str(), asset_id, result, error],
     )?;
     get(conn, id)
 }
@@ -271,6 +275,21 @@ pub fn recover(conn: &Connection) -> Result<usize, ToolError> {
     Ok(changed)
 }
 
+/// Raw job params for the executor; never exposed in job listings.
+pub fn params(conn: &Connection, id: i64) -> Result<Value, ToolError> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT params FROM media_jobs WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let raw = raw.ok_or_else(|| ToolError::invalid(format!("未找到作业：{id}")))?;
+    serde_json::from_str(&raw).map_err(|e| ToolError::Storage {
+        message: format!("作业参数解析失败：{e}"),
+    })
+}
+
 fn row_to_raw(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawJob> {
     Ok(RawJob {
         id: row.get(0)?,
@@ -280,8 +299,9 @@ fn row_to_raw(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawJob> {
         progress: row.get(4)?,
         asset_id: row.get(5)?,
         error: row.get(6)?,
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
+        result: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
     })
 }
 
@@ -294,6 +314,7 @@ fn job_from_raw(raw: RawJob) -> Result<Job, ToolError> {
         progress: u32::try_from(raw.progress).unwrap_or(0),
         asset_id: raw.asset_id,
         error: raw.error,
+        result: raw.result,
         created_at: raw.created_at,
         updated_at: raw.updated_at,
     })

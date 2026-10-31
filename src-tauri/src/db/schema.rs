@@ -8,12 +8,13 @@
 //! v2：软删时间、置顶位、版本台账、交叉索引、路径 ACL 预留表。
 //! v3：Agent 会话表（conversations / messages）与非密钥设置表（settings）。
 //! v4：媒体作业表（media_jobs）与媒体资产表（media_assets）。
+//! v5：媒体作业结果列（media_jobs.result）。
 //! FTS5 索引在应用层与 blobs 同事务维护（无触发器），schema 版本保持不变。
 
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// 当前 life.db schema 版本。
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// 虚拟文件系统的根路径，与 `vfs::cap_gate::ROOT` 保持一致。
 const ROOT: &str = "/life";
@@ -258,6 +259,17 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     if version < 4 {
         let tx = conn.transaction()?;
         tx.execute_batch(V4_TABLES)?;
+        tx.pragma_update(None, "user_version", 4)?;
+        tx.commit()?;
+        version = 4;
+    }
+
+    if version < 5 {
+        let tx = conn.transaction()?;
+        // Classification jobs keep their JSON answer in `result`.
+        if !table_has_column(&tx, "media_jobs", "result")? {
+            tx.execute_batch("ALTER TABLE media_jobs ADD COLUMN result TEXT;")?;
+        }
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         version = SCHEMA_VERSION;

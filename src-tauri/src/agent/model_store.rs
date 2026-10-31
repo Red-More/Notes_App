@@ -40,6 +40,12 @@ pub enum ApiFormat {
     /// `POST <baseUrl>/messages`
     #[serde(rename = "anthropic-messages")]
     AnthropicMessages,
+    /// `POST <baseUrl>/images/generations`
+    #[serde(rename = "openai-images")]
+    OpenAiImages,
+    /// `POST <baseUrl>/audio/speech`
+    #[serde(rename = "openai-audio")]
+    OpenAiAudio,
 }
 
 impl ApiFormat {
@@ -49,7 +55,17 @@ impl ApiFormat {
             Self::OpenAiChat => "openai-completions",
             Self::OpenAiResponses => "openai-responses",
             Self::AnthropicMessages => "anthropic-messages",
+            // Media entries never flow through pi-agent; these values are unused.
+            Self::OpenAiImages | Self::OpenAiAudio => "openai-completions",
         }
+    }
+
+    /// Whether this format belongs to the chat/agent protocol family.
+    pub fn is_chat(self) -> bool {
+        matches!(
+            self,
+            Self::OpenAiChat | Self::OpenAiResponses | Self::AnthropicMessages
+        )
     }
 
     /// Path appended to a Base URL when Full URL mode is off.
@@ -60,14 +76,16 @@ impl ApiFormat {
             // Anthropic's canonical base URL ends at the host, so the version
             // prefix belongs to the appended path.
             Self::AnthropicMessages => "/v1/messages",
+            Self::OpenAiImages => "/images/generations",
+            Self::OpenAiAudio => "/audio/speech",
         }
     }
 
     /// Path used to discover model ids from the endpoint.
     pub fn models_path(self) -> &'static str {
         match self {
-            Self::OpenAiChat | Self::OpenAiResponses => "/models",
             Self::AnthropicMessages => "/v1/models",
+            _ => "/models",
         }
     }
 }
@@ -263,6 +281,7 @@ pub fn save(conn: &Connection, input: ModelInput) -> Result<ModelEntry, ToolErro
         )
     };
     let model_id = validate_model_id(&input.model_id)?;
+    validate_format_for_kind(input.kind, input.format)?;
     let base_url = normalize_anthropic_base(
         validate_base_url(&input.base_url)?,
         input.format,
@@ -404,6 +423,22 @@ fn validate_label(raw: &str) -> Result<String, ToolError> {
         return Err(ToolError::invalid("显示名称包含控制字符"));
     }
     Ok(label.to_string())
+}
+
+fn validate_format_for_kind(kind: ModelKind, format: ApiFormat) -> Result<(), ToolError> {
+    match kind {
+        ModelKind::Chat | ModelKind::Classify if !format.is_chat() => {
+            Err(ToolError::invalid("对话与分类模型必须使用对话协议"))
+        }
+        ModelKind::Image if format != ApiFormat::OpenAiImages => {
+            Err(ToolError::invalid("图像模型必须使用 OpenAI Images 协议"))
+        }
+        ModelKind::Tts if format != ApiFormat::OpenAiAudio => {
+            Err(ToolError::invalid("语音模型必须使用 OpenAI Audio 协议"))
+        }
+        // Video providers are not wired yet; keep the entry permissive.
+        _ => Ok(()),
+    }
 }
 
 fn validate_model_id(raw: &str) -> Result<String, ToolError> {

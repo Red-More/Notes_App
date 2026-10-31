@@ -516,7 +516,7 @@ fn schema_creates_agent_and_media_tables() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 4, "media tables require schema v4");
+    assert_eq!(version, 5, "media result column requires schema v5");
     for table in [
         "conversations",
         "messages",
@@ -692,7 +692,7 @@ fn model_kind_gates_chat_activation() {
         ModelInput {
             id: String::new(),
             label: "图像模型".into(),
-            format: ApiFormat::OpenAiChat,
+            format: ApiFormat::OpenAiImages,
             base_url: "https://api.example.com/v1".into(),
             model_id: "image-demo".into(),
             full_url: false,
@@ -724,7 +724,7 @@ fn model_kind_gates_chat_activation() {
         ModelInput {
             id: chat.id.clone(),
             label: "对话模型".into(),
-            format: ApiFormat::OpenAiChat,
+            format: ApiFormat::OpenAiImages,
             base_url: "https://api.example.com/v1".into(),
             model_id: "chat-demo".into(),
             full_url: false,
@@ -746,7 +746,7 @@ fn media_jobs_persist_cancel_and_recover() {
         ModelInput {
             id: String::new(),
             label: "图像模型".into(),
-            format: ApiFormat::OpenAiChat,
+            format: ApiFormat::OpenAiImages,
             base_url: "https://api.example.com/v1".into(),
             model_id: "image-demo".into(),
             full_url: false,
@@ -819,6 +819,7 @@ fn media_jobs_persist_cancel_and_recover() {
         jobs::JobStatus::Succeeded,
         None,
         None,
+        None,
     )
     .unwrap();
     assert_eq!(done.status, jobs::JobStatus::Succeeded);
@@ -881,6 +882,20 @@ fn model_registry_validates_base_url_and_labels() {
         assert!(result.is_err(), "{base_url} must be rejected");
     }
 
+    assert!(model_store::save(
+        vfs.conn(),
+        ModelInput {
+            id: String::new(),
+            label: "错配协议".into(),
+            format: ApiFormat::OpenAiChat,
+            base_url: "https://api.example.com/v1".into(),
+            model_id: "image-demo".into(),
+            full_url: false,
+            kind: ModelKind::Image,
+        }
+    )
+    .is_err());
+
     let no_model = model_store::save(
         vfs.conn(),
         ModelInput {
@@ -916,7 +931,7 @@ fn model_registry_validates_base_url_and_labels() {
 }
 
 #[test]
-fn model_endpoints_cover_three_formats() {
+fn model_endpoints_cover_all_formats() {
     for (format, base_url, suffix) in [
         (
             ApiFormat::OpenAiChat,
@@ -932,6 +947,16 @@ fn model_endpoints_cover_three_formats() {
             ApiFormat::AnthropicMessages,
             "https://api.example.com",
             "/v1/messages",
+        ),
+        (
+            ApiFormat::OpenAiImages,
+            "https://api.example.com/v1",
+            "/images/generations",
+        ),
+        (
+            ApiFormat::OpenAiAudio,
+            "https://api.example.com/v1",
+            "/audio/speech",
         ),
     ] {
         let entry = ModelEntry {
