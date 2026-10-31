@@ -49,6 +49,7 @@ import {
   IconSpeaker,
   IconTrash,
   IconUndo,
+  IconVideo,
 } from '../../components/Icons'
 
 // The preview carries markdown-it, KaTeX and highlight.js; load it only when
@@ -75,7 +76,7 @@ const SYNC_GUARD_MS = 160
 
 /** Media jobs run in Rust; poll briefly until they reach a terminal state. */
 const JOB_POLL_MS = 1200
-const JOB_POLL_LIMIT = 150
+const JOB_POLL_LIMIT = 600
 
 async function waitForJob(id: number): Promise<MediaJob> {
   for (let i = 0; i < JOB_POLL_LIMIT; i += 1) {
@@ -131,6 +132,12 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   const [ttsText, setTtsText] = useState('')
   const [ttsBusy, setTtsBusy] = useState(false)
   const [ttsUrl, setTtsUrl] = useState('')
+  const [videoOpen, setVideoOpen] = useState(false)
+  const [videoModels, setVideoModels] = useState<AgentModelInfo[]>([])
+  const [videoModelId, setVideoModelId] = useState('')
+  const [videoPrompt, setVideoPrompt] = useState('')
+  const [videoBusy, setVideoBusy] = useState(false)
+  const [videoUrl, setVideoUrl] = useState('')
 
   // Layout config is persisted, so the split mode / ratio survives reloads.
   const [layout, setLayout] = useState<LayoutPrefs>(() => getLayoutPrefs())
@@ -757,6 +764,51 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     }
   }
 
+  const openVideoDialog = async () => {
+    try {
+      const settings = await chatApi.settings()
+      const models = settings.models.filter((item) => item.kind === 'video' && item.configured)
+      if (models.length === 0) {
+        toast('请先在设置 → AI 助理中添加并配置视频模型')
+        return
+      }
+      setVideoModels(models)
+      setVideoModelId(models[0].id)
+      setVideoPrompt(title.trim() || content.trim().slice(0, 200))
+      setVideoUrl('')
+      setVideoOpen(true)
+    } catch (e) {
+      toast(friendlyError(e))
+    }
+  }
+
+  const generateVideo = async () => {
+    const prompt = videoPrompt.trim()
+    if (!prompt || !videoModelId) {
+      toast('请填写提示词')
+      return
+    }
+    setVideoBusy(true)
+    try {
+      const job = await mediaApi.submit({
+        kind: 'video',
+        modelEntry: videoModelId,
+        params: { prompt },
+      })
+      const done = await waitForJob(job.id)
+      if (done.status !== 'succeeded' || done.assetId == null) {
+        toast(done.error || '视频生成失败')
+        return
+      }
+      const path = await mediaApi.assetPath(done.assetId)
+      setVideoUrl(convertFileSrc(path))
+    } catch (e) {
+      toast(friendlyError(e))
+    } finally {
+      setVideoBusy(false)
+    }
+  }
+
   const statusText =
     saveState === 'saving'
       ? '保存中…'
@@ -875,6 +927,14 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
             aria-label="朗读笔记"
           >
             <IconSpeaker size={20} />
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => void openVideoDialog()}
+            aria-label="AI 视频"
+          >
+            <IconVideo size={20} />
           </button>
           <button
             type="button"
@@ -1306,6 +1366,64 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
             <p className="settings-note">最多 4000 字，超出请先分段。</p>
           </div>
           {ttsUrl && <audio className="ai-audio-player" controls autoPlay src={ttsUrl} />}
+        </Modal>
+      )}
+
+      {videoOpen && (
+        <Modal
+          title="AI 视频"
+          onClose={() => {
+            if (!videoBusy) setVideoOpen(false)
+          }}
+          footer={
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button
+                type="button"
+                className="btn btn-plain"
+                disabled={videoBusy}
+                onClick={() => setVideoOpen(false)}
+              >
+                关闭
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={videoBusy || !videoPrompt.trim()}
+                onClick={() => void generateVideo()}
+              >
+                {videoBusy ? '生成中…' : videoUrl ? '重新生成' : '生成视频'}
+              </button>
+            </div>
+          }
+        >
+          <div className="form-field">
+            <span className="form-label">视频模型</span>
+            <select
+              className="form-input"
+              value={videoModelId}
+              onChange={(e) => setVideoModelId(e.target.value)}
+            >
+              {videoModels.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="form-field">
+            <span className="form-label">提示词</span>
+            <textarea
+              className="form-input"
+              rows={4}
+              value={videoPrompt}
+              onChange={(e) => setVideoPrompt(e.target.value)}
+              placeholder="描述想要的视频画面"
+            />
+          </div>
+          {videoUrl && (
+            <video className="ai-video-player" controls autoPlay src={videoUrl} />
+          )}
+          <p className="settings-note">视频生成通常需要数分钟，期间可关闭弹窗，作业会在后台完成。</p>
         </Modal>
       )}
     </div>

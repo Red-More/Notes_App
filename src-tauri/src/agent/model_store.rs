@@ -46,6 +46,9 @@ pub enum ApiFormat {
     /// `POST <baseUrl>/audio/speech`
     #[serde(rename = "openai-audio")]
     OpenAiAudio,
+    /// `POST <baseUrl>/videos` followed by polling and `/videos/{id}/content`
+    #[serde(rename = "openai-videos")]
+    OpenAiVideos,
 }
 
 impl ApiFormat {
@@ -56,7 +59,7 @@ impl ApiFormat {
             Self::OpenAiResponses => "openai-responses",
             Self::AnthropicMessages => "anthropic-messages",
             // Media entries never flow through pi-agent; these values are unused.
-            Self::OpenAiImages | Self::OpenAiAudio => "openai-completions",
+            Self::OpenAiImages | Self::OpenAiAudio | Self::OpenAiVideos => "openai-completions",
         }
     }
 
@@ -78,6 +81,7 @@ impl ApiFormat {
             Self::AnthropicMessages => "/v1/messages",
             Self::OpenAiImages => "/images/generations",
             Self::OpenAiAudio => "/audio/speech",
+            Self::OpenAiVideos => "/videos",
         }
     }
 
@@ -436,7 +440,9 @@ fn validate_format_for_kind(kind: ModelKind, format: ApiFormat) -> Result<(), To
         ModelKind::Tts if format != ApiFormat::OpenAiAudio => {
             Err(ToolError::invalid("语音模型必须使用 OpenAI Audio 协议"))
         }
-        // Video providers are not wired yet; keep the entry permissive.
+        ModelKind::Video if format != ApiFormat::OpenAiVideos => {
+            Err(ToolError::invalid("视频模型必须使用 OpenAI Videos 协议"))
+        }
         _ => Ok(()),
     }
 }

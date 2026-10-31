@@ -4,6 +4,7 @@
 //! 的标记传递，重启时未完成的 running 作业由 `jobs::recover` 统一失败。
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use base64::Engine;
 use serde_json::{json, Value};
@@ -20,6 +21,9 @@ const MAX_CLASSIFY_TEXT: usize = 8000;
 const MAX_LABELS: usize = 50;
 const MAX_TTS_CHARS: usize = 4000;
 const MAX_PROMPT_CHARS: usize = 4000;
+const VIDEO_POLL_MS: u64 = 2000;
+const VIDEO_POLL_LIMIT: usize = 300;
+const VIDEO_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 enum Outcome {
     Text(String),
@@ -186,7 +190,7 @@ async fn execute(
         jobs::JobKind::Classify => classify(app, entry, params, job, key, cancel).await,
         jobs::JobKind::Tts => tts(app, entry, params, job, key, cancel).await,
         jobs::JobKind::Image => image(app, entry, params, job, key, cancel).await,
-        jobs::JobKind::Video => Err("视频执行器尚未接入".to_string()),
+        jobs::JobKind::Video => video(app, entry, params, job, key, cancel).await,
     }
 }
 
@@ -336,6 +340,172 @@ async fn image(
             ..assets::AssetMeta::default()
         },
     })
+}
+
+async fn video(
+    app: &AppHandle,
+    entry: &ModelEntry,
+    params: &LlmParams,
+    job: &Value,
+    key: &str,
+    cancel: &AtomicBool,
+) -> Result<Outcome, String> {
+    if entry.format != ApiFormat::OpenAiVideos {
+        return Err("视频仅支持 OpenAI Videos 兼容协议".to_string());
+    }
+    let prompt = required_text(job, "prompt", MAX_PROMPT_CHARS)?;
+    let mut body = json!({
+        "model": entry.model_id.clone(),
+        "prompt": prompt
+    });
+    if let Some(seconds) = job.get("seconds").and_then(Value::as_u64) {
+        if !(1..=60).contains(&seconds) {
+            return Err("seconds 必须在 1–60 之间".to_string());
+        }
+        body["seconds"] = json!(seconds);
+    }
+    let submit_url = model_store::endpoint(entry);
+    let payload = post_json(app, entry, params, key, &body, cancel).await?;
+    let task_id =
+        video_task_id(&payload).ok_or_else(|| "视频提交响应缺少任务 id".to_string())?;
+    let poll_url = format!("{}/{}", submit_url.trim_end_matches('/'), task_id);
+
+    for _ in 0..VIDEO_POLL_LIMIT {
+        if cancel.load(Ordering::SeqCst) {
+            return Err("已取消".to_string());
+        }
+        tokio::time::sleep(Duration::from_millis(VIDEO_POLL_MS)).await;
+        if cancel.load(Ordering::SeqCst) {
+            return Err("已取消".to_string());
+        }
+        let status = get_json(app, &poll_url, Some(key)).await?;
+        if let Some(message) = video_error(&status) {
+            return Err(message);
+        }
+        let state = video_status(&status);
+        if matches!(state.as_str(), "completed" | "succeeded" | "success" | "done") {
+            if let Some(url) = video_url(&status) {
+                // Signed media URLs are foreign hosts: never forward the API key.
+                let bytes = get_bytes(app, &url, None).await?;
+                return Ok(Outcome::Asset {
+                    bytes,
+                    mime: "video/mp4",
+                    meta: assets::AssetMeta::default(),
+                });
+            }
+            let content_url = format!("{poll_url}/content");
+            let bytes = get_bytes(app, &content_url, Some(key)).await?;
+            return Ok(Outcome::Asset {
+                bytes,
+                mime: "video/mp4",
+                meta: assets::AssetMeta::default(),
+            });
+        }
+        if matches!(
+            state.as_str(),
+            "failed" | "error" | "cancelled" | "canceled"
+        ) {
+            return Err(format!("视频作业状态：{state}"));
+        }
+    }
+    Err("视频生成超时，请稍后重试".to_string())
+}
+
+async fn get_json(app: &AppHandle, url: &str, key: Option<&str>) -> Result<Value, String> {
+    let resp = get(app, url, key).await?;
+    llm::read_json_response(resp).await
+}
+
+async fn get_bytes(app: &AppHandle, url: &str, key: Option<&str>) -> Result<Vec<u8>, String> {
+    let resp = get(app, url, key).await?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("读取媒体响应失败：{e}"))?;
+    if bytes.is_empty() {
+        return Err("厂商返回了空媒体内容".to_string());
+    }
+    Ok(bytes.to_vec())
+}
+
+async fn get(
+    app: &AppHandle,
+    url: &str,
+    key: Option<&str>,
+) -> Result<reqwest::Response, String> {
+    let state = app.state::<AgentState>();
+    let Some(client) = &state.client else {
+        return Err("HTTP 客户端初始化失败，请重启应用".to_string());
+    };
+    let mut builder = client.get(url).timeout(VIDEO_REQUEST_TIMEOUT);
+    if let Some(key) = key {
+        builder = builder.header("authorization", format!("Bearer {key}"));
+    }
+    let resp = builder
+        .send()
+        .await
+        .map_err(|e| format!("网络请求失败：{e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        let snippet: String = text.chars().take(300).collect();
+        return Err(format!("厂商返回 HTTP {status}：{snippet}"));
+    }
+    Ok(resp)
+}
+
+fn video_task_id(payload: &Value) -> Option<String> {
+    payload
+        .get("id")
+        .or_else(|| payload.get("task_id"))
+        .or_else(|| payload.get("data").and_then(|data| data.get("id")))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn video_status(payload: &Value) -> String {
+    payload
+        .get("status")
+        .or_else(|| payload.get("task_status"))
+        .or_else(|| {
+            payload
+                .get("output")
+                .and_then(|output| output.get("status"))
+        })
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+fn video_url(payload: &Value) -> Option<String> {
+    payload
+        .get("url")
+        .or_else(|| payload.get("video_url"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            payload
+                .get("output")
+                .and_then(|output| output.get("url"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            payload
+                .get("data")
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("url"))
+                .and_then(Value::as_str)
+        })
+        .map(str::to_string)
+}
+
+fn video_error(payload: &Value) -> Option<String> {
+    let error = payload.get("error")?;
+    error
+        .get("message")
+        .or(Some(error))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 async fn post_json(
@@ -502,5 +672,27 @@ mod tests {
         assert!(parse_size("0x0").is_err());
         assert_eq!(tts_mime("mp3"), Some("audio/mpeg"));
         assert!(tts_mime("zip").is_none());
+    }
+
+    #[test]
+    fn video_payload_helpers_cover_known_shapes() {
+        let submit = json!({"id": "video_1", "status": "queued"});
+        assert_eq!(video_task_id(&submit).as_deref(), Some("video_1"));
+        let poll = json!({"status": "completed", "url": "https://cdn.example/v.mp4"});
+        assert_eq!(video_status(&poll), "completed");
+        assert_eq!(
+            video_url(&poll).as_deref(),
+            Some("https://cdn.example/v.mp4")
+        );
+        let nested = json!({"output": {"status": "in_progress", "url": "https://cdn.example/w.mp4"}});
+        assert_eq!(video_status(&nested), "in_progress");
+        assert_eq!(
+            video_url(&nested).as_deref(),
+            Some("https://cdn.example/w.mp4")
+        );
+        let failed = json!({"status": "failed", "error": {"message": "content policy"}});
+        assert_eq!(video_error(&failed).as_deref(), Some("content policy"));
+        let task = json!({"data": {"id": "task_9"}});
+        assert_eq!(video_task_id(&task).as_deref(), Some("task_9"));
     }
 }

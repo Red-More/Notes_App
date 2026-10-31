@@ -38,6 +38,8 @@ url = "2"
 # 媒体资产：内容哈希去重与十六进制文件名。
 sha2 = "0.10"
 hex = "0.4"
+# 视频作业轮询需要异步 sleep。
+tokio = { version = "1", features = ["time"] }
 
 # M2-4b：Android Keystore。凭据密文写 SharedPreferences，加密密钥由 Keystore 生成且不可导出。
 # 仅 Android 目标编译；其 ndk-context 依赖已由 Tauri 的 tao 运行时初始化。

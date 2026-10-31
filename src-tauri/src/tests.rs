@@ -958,6 +958,11 @@ fn model_endpoints_cover_all_formats() {
             "https://api.example.com/v1",
             "/audio/speech",
         ),
+        (
+            ApiFormat::OpenAiVideos,
+            "https://api.example.com/v1",
+            "/videos",
+        ),
     ] {
         let entry = ModelEntry {
             id: "custom_1".into(),

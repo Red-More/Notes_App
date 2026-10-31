@@ -284,6 +284,7 @@ export type ModelApiFormat =
   | 'anthropic-messages'
   | 'openai-images'
   | 'openai-audio'
+  | 'openai-videos'
 
 /** Capability a model entry is configured for; only `chat` runs today. */
 export type ModelKind = 'chat' | 'image' | 'video' | 'tts' | 'classify'

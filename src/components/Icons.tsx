@@ -262,3 +262,10 @@ export const IconSpeaker = (p: IconProps) => (
     <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
   </svg>
 )
+
+export const IconVideo = (p: IconProps) => (
+  <svg {...base(p)}>
+    <rect x="2" y="6" width="14" height="12" rx="2" />
+    <path d="m16 10 6-3v10l-6-3" />
+  </svg>
+)

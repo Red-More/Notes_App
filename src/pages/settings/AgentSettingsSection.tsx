@@ -18,6 +18,7 @@ const FORMAT_OPTIONS: Array<{ key: ModelApiFormat; label: string }> = [
   { key: 'anthropic-messages', label: 'Anthropic Messages' },
   { key: 'openai-images', label: 'OpenAI Images' },
   { key: 'openai-audio', label: 'OpenAI Audio' },
+  { key: 'openai-videos', label: 'OpenAI Videos' },
 ]
 
 const CHAT_FORMATS: ModelApiFormat[] = ['openai-chat', 'openai-responses', 'anthropic-messages']
@@ -29,7 +30,9 @@ function formatOptionsFor(kind: ModelKind): Array<{ key: ModelApiFormat; label: 
       ? ['openai-images']
       : kind === 'tts'
         ? ['openai-audio']
-        : CHAT_FORMATS
+        : kind === 'video'
+          ? ['openai-videos']
+          : CHAT_FORMATS
   return FORMAT_OPTIONS.filter((item) => allowed.includes(item.key))
 }
 
@@ -98,6 +101,11 @@ const URL_PRESETS: Array<{ label: string; baseUrl: string; format: ModelApiForma
     label: 'OpenAI（Audio）',
     baseUrl: 'https://api.openai.com/v1',
     format: 'openai-audio',
+  },
+  {
+    label: 'OpenAI（Videos）',
+    baseUrl: 'https://api.openai.com/v1',
+    format: 'openai-videos',
   },
 ]
 
@@ -172,6 +180,8 @@ function endpointHint(format: ModelApiFormat, fullUrl: boolean): string {
         return '直接使用该完整地址，不再拼接路径（示例 https://api.openai.com/v1/images/generations）。'
       case 'openai-audio':
         return '直接使用该完整地址，不再拼接路径（示例 https://api.openai.com/v1/audio/speech）。'
+      case 'openai-videos':
+        return '直接使用该完整地址，不再拼接路径（示例 https://api.openai.com/v1/videos）。'
       default:
         return '直接使用该完整地址，不再拼接路径（示例 https://api.openai.com/v1/chat/completions）。'
     }
@@ -185,6 +195,8 @@ function endpointHint(format: ModelApiFormat, fullUrl: boolean): string {
       return '不要以 / 结尾；系统会拼接 /images/generations。'
     case 'openai-audio':
       return '不要以 / 结尾；系统会拼接 /audio/speech。'
+    case 'openai-videos':
+      return '不要以 / 结尾；系统会拼接 /videos，并轮询任务状态。'
     default:
       return '不要以 / 结尾；系统会拼接 /chat/completions。'
   }
@@ -201,6 +213,8 @@ function endpointPlaceholder(format: ModelApiFormat, fullUrl: boolean): string {
         return 'https://api.openai.com/v1/images/generations'
       case 'openai-audio':
         return 'https://api.openai.com/v1/audio/speech'
+      case 'openai-videos':
+        return 'https://api.openai.com/v1/videos'
       default:
         return 'https://api.openai.com/v1/chat/completions'
     }
@@ -743,11 +757,7 @@ export default function AgentSettingsSection() {
                     <div className="model-title">
                       {entry.label}
                       {active && <span className="model-badge">使用中</span>}
-                      {kind !== 'chat' && (
-                        <span className="model-badge">
-                          {kind === 'video' ? '待接入' : '可用'}
-                        </span>
-                      )}
+                      {kind !== 'chat' && <span className="model-badge">可用</span>}
                     </div>
                     <div className="model-meta">
                       {entry.modelId} · {formatLabel(entry.format)}
@@ -868,7 +878,7 @@ export default function AgentSettingsSection() {
             {draft.kind !== 'chat' && (
               <p className="settings-note">
                 {draft.kind === 'video'
-                  ? '视频执行器尚未接入，可先保存配置。'
+                  ? '视频使用 OpenAI Videos 兼容协议：提交后轮询任务，完成后下载到资产库。'
                   : '该能力已可执行：图像走 Images 协议，语音走 Audio 协议，分类走 Chat 协议。'}
               </p>
             )}
