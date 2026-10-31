@@ -4,11 +4,12 @@
 //! 不使用 `dangerouslySetInnerHTML`，模型输出不经过任何 HTML 解析。
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { chatApi } from '../../api'
+import { chatApi, skillApi } from '../../api'
 import { createAgent, extractAssistant, profileFromSettings, toAgentMessages } from '../../agent/runtime'
 import type { AgentProfile } from '../../agent/runtime'
+import { buildSkillsIndex } from '../../agent/skills'
 import type { AgentEvent } from '@earendil-works/pi-agent-core'
-import type { AgentSettings, ChatConversation, ChatMessageRecord } from '../../types'
+import type { AgentSettings, ChatConversation, ChatMessageRecord, SkillSummary } from '../../types'
 import { friendlyError } from '../../utils'
 import { toast } from '../../toast'
 import { Modal } from '../../components/ui'
@@ -106,6 +107,7 @@ export default function ChatPage({ isActive }: Props) {
   const agentRef = useRef<ReturnType<typeof createAgent> | null>(null)
   const unsubscribeRef = useRef<(() => void) | null>(null)
   const conversationRef = useRef<ChatConversation | null>(null)
+  const skillsRef = useRef<SkillSummary[]>([])
   const streamingIdRef = useRef<string | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const bootRef = useRef(false)
@@ -272,7 +274,12 @@ export default function ChatPage({ isActive }: Props) {
           return
         }
         const activeProfile = await withCapabilities(baseProfile)
-        const agent = createAgent(activeProfile, toAgentMessages(records, activeProfile))
+        const agent = createAgent(
+          activeProfile,
+          toAgentMessages(records, activeProfile),
+          buildSkillsIndex(skillsRef.current),
+          skillsRef.current,
+        )
         unsubscribeRef.current = agent.subscribe((event) => {
           handleEvent(event)
         })
@@ -289,9 +296,14 @@ export default function ChatPage({ isActive }: Props) {
 
   const bootstrap = useCallback(async () => {
     try {
-      const [nextSettings, list] = await Promise.all([chatApi.settings(), chatApi.list()])
+      const [nextSettings, list, skills] = await Promise.all([
+        chatApi.settings(),
+        chatApi.list(),
+        skillApi.list(),
+      ])
       setSettings(nextSettings)
       settingsRef.current = nextSettings
+      skillsRef.current = skills
       setConversations(list)
       let target = list[0]
       if (!target) {
@@ -326,10 +338,11 @@ export default function ChatPage({ isActive }: Props) {
     let disposed = false
     void (async () => {
       try {
-        const next = await chatApi.settings()
+        const [next, skills] = await Promise.all([chatApi.settings(), skillApi.list()])
         if (disposed) return
         setSettings(next)
         settingsRef.current = next
+        skillsRef.current = skills
         // Rebuild on every activation so per-model capability edits are applied.
         const conv = conversationRef.current
         if (!conv) return
@@ -383,6 +396,7 @@ export default function ChatPage({ isActive }: Props) {
           messages: [{ role: 'user', content: text }],
         }),
       )
+      // 技能正文由模型通过 load_skill 主动加载；用户消息不携带技能内容。
       await agent.prompt(text)
     } catch (e) {
       setItems((prev) => [

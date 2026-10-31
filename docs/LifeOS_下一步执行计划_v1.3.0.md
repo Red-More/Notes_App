@@ -586,4 +586,92 @@ cargo test
 
 ---
 
+## 13. M3 实施记录（2026-10-31）
+
+> §13 为执行记录，不改变 v1.3.0 的任务与验收标准。
+
+### 13.1 任务完成情况
+
+| ID | 状态 | 交付物 / 证据 |
+|---|---|---|
+| M3-1 | ✅ 完成 | `skills.rs::parse_skill` 解析 YAML frontmatter（`name/description/triggers/scope/version`），缺 `name` 或 `description` 视为非法并跳过，不影响启动 |
+| M3-2 | ✅ 完成 | 启动扫描 `/life/.agents/skills/*/SKILL.md`，初始 Prompt 只注入摘要；新增只读元工具 `load_skill(id)`，命中后按需读取正文 |
+| M3-3 | ✅ 完成 | 6 个随包技能（`assets/skills/*.md`，`include_str!`）：daily-review / contact-manager / study-planner / trip-planner / weekly-review / note-taking；首次启动写入一次，删除后不复活 |
+| M3-4 | ✅ 完成 | 设置页技能管理：列表、启停（`settings.skills.disabled`）、预览、编辑、新建、卸载、技能包导入；写 `.agents` 只走专用 Rust command |
+| M3-5 | ✅ 完成 | 真机：模型调用 `load_skill(daily-review)` 读取正文，`fs_edit` 在日记末尾追加 `## 复盘`（rev=2），`fs_write` 新建 `todos/2026-11-01.md`（rev=1）；缺失内容标注“未记录”，无编造 |
+| M3-6 | ✅ 完成 | 恶意技能测试：伪造“注册 bash 工具 / 读取密钥”的 SKILL.md 不新增工具、不执行、不越权；`.agents` 读也被拒绝 |
+
+### 13.2 技能生效机制（与 AgentSkills.io 对齐）
+
+- **目录约定**：每个技能一个目录 `/life/.agents/skills/<id>/SKILL.md`；正文是文本，不注册工具、不执行代码。
+- **触发词兼容两种 YAML 写法**：内联数组 `triggers: ["a", "b"]`（UI 保存时使用）与块状列表 `triggers:` + `- a`（模型与外部技能包常用）。`meta::parse_document` 只解析单行值，块状列表由 `skills::triggers_from` 从原始 frontmatter 补齐，真机验证时发现的兼容缺口已修复。
+- **渐进式披露**：初始 Prompt 只含 `name / id / description / triggers` 摘要，正文体积不进上下文；模型判断命中后调用 `load_skill` 读取。
+- **元工具**：Agent 工具面为 5 个文件工具（`fs_read/fs_write/fs_edit/fs_glob/fs_grep`）+ 1 个只读 `load_skill`，共 6 个。原计划“5 工具”的表述在此修订为 6。
+- **触发词职责**：`triggers` 只作为提示摘要，不参与前端关键词自动注入；是否命中由模型自行判断（ChatPage 已移除自动拼技能上下文）。
+- **字段来源**：`description` 决定模型是否愿意进一步加载；`scope` 目前只存不路由（`chat` 为默认）；`version` 为文档版本，不参与加载逻辑。
+
+### 13.3 方案 B：`/life/agent/` 模型工作区
+
+| 路径 | 谁能写 | 是否自动加载 |
+|---|---|---|
+| `/life/.agents/skills/<id>/SKILL.md` | 仅专用命令 / 用户 UI | 是（摘要进 Prompt） |
+| `/life/agent/skills-drafts/<id>/SKILL.md` | 模型（`fs_write/fs_edit`）+ 用户 | 否，仅设置页“模型草稿”可见 |
+| `/life/agent/rules/*.md` | 模型 + 用户 | 否（本期仅建目录，预留） |
+
+- `.agents` 继续硬保护：`cap_gate::ensure_writable` 拦写、`ensure_model_readable` 拦模型读，Prompt 规则为第二道防线。
+- 草稿 → 技能：用户在设置页预览后点「载入」，`skill_draft_promote` 通过 `save` 写入 `.agents/skills`；草稿保留，不自动迁移。
+- 草稿丢弃：`skill_draft_delete` 物理删除草稿文件及其目录，同时清理 FTS 行。
+- 启动时 `ensure_workspace` 幂等创建 `/life/agent`、`skills-drafts`、`rules`（含恢复软删目录）。
+
+### 13.4 触发词分隔符校验
+
+- 分隔符：`,` `，` `、` `\n`；trim、折叠内部空白、去空。
+- 归一化：忽略大小写去重；单项 ≤40 字符；最多 10 个。
+- 提示：空允许但给 warning（仍可靠 `description` 路由）；含分隔符、控制字符、超长、超量给 error 并阻断保存。
+- 前后端同一套规则：`skills.rs::normalize_triggers` 与 `src/agent/skills.ts::parseTriggerInput`，单测覆盖。
+
+### 13.5 技能包导入
+
+- 入口：设置页拖拽/文件选择 `.zip` / `.skill` → base64 → `skill_import`（Rust）。
+- 限制：包 ≤2MB、单个 `SKILL.md` ≤128KB；仅接受 zip **根级** `SKILL.md`，frontmatter 必须含 `name` 与 `description`。
+- 结果：解析后直接安装到 `.agents/skills/<id>`，无需二次确认；非法包返回可行动的 `ToolError`。
+
+### 13.6 新增与修改的代码
+
+| 层 | 文件 |
+|---|---|
+| 技能核心 | `src-tauri/src/skills.rs`（解析/扫描/CRUD/触发词/导入/草稿/工作区） |
+| 命令与启动 | `src-tauri/src/commands/skill.rs`（`skill_*` + `skill_draft_*` + `skill_import`）、`lib.rs` |
+| VFS 边界 | `src-tauri/src/vfs/cap_gate.rs`（`ensure_model_readable`）、`vfs/mod.rs`（可信写入口、glob/grep） |
+| 检索 | `src-tauri/src/vfs/fts.rs`、`db/schema.rs` |
+| 内置资源 | `src-tauri/assets/skills/*.md`（6 份）、`Cargo.toml`（`base64`） |
+| Agent | `src/agent/skills.ts`、`tools.ts`、`runtime.ts`、`prompt.ts` |
+| 前端契约 | `src/api.ts`、`src/types.ts` |
+| 前端 UI | `src/pages/settings/SkillsSection.tsx`（列表/预览/编辑/导入/草稿）、`src/pages/chat/ChatPage.tsx`、`src/index.css` |
+| 测试 | `src-tauri/src/tests.rs`（技能 CRUD、触发词、导入、越权、恶意技能）、`src/agent/skills.test.ts` |
+
+### 13.7 验证结果
+
+| 项 | 结果 |
+|---|---|
+| `pnpm lint` | 0 warnings / 0 errors |
+| `pnpm test` | 12 文件 / 130 用例通过 |
+| `pnpm build` | 成功；`ChatPage` 176.94KB min / 51.5KB gzip |
+| `cargo fmt --check` | 通过 |
+| `cargo clippy --all-targets -- -D warnings` | 通过 |
+| `cargo test` | 42 passed（+`skill_block_list_triggers_are_parsed`） |
+
+### 13.8 已知偏差与后续
+
+| 项 | 现状 | 后续 |
+|---|---|---|
+| 真机回归 | 导入 7 个技能 → 草稿载入 8 个 → 丢弃草稿 → `## 复盘` 与明日待办均通过 | 设备保留测试数据：`灵感速记`、`Quick Capture`、`todos/2026-11-01.md` |
+| 触发词块状列表 | 真机发现块状 `triggers` 不解析，已修复并加单测 | — |
+| `scope` | 仅存储，不参与路由 | 若需要“全局/对话内”作用域，M4 再设计 |
+| `rules/*.md` | 仅建目录，不注入 Prompt | 视需求在 M4/M5 增加规则加载与审核 |
+| 内置技能恢复 | 卸载后不自动复活 | 如需“恢复默认技能”，另加显式命令 |
+| 草稿版本 | 载入后草稿保留且不跟踪源版本 | 如需同步编辑，后续增加“草稿已载入”标记 |
+
+---
+
 — LifeOS · LIF-2026-PLAN-001 v1.3.0 · Agent 优先执行基线 —

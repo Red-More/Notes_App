@@ -4,7 +4,7 @@
 //! - LLM 请求只从 Rust 发起；WebView 通过自研 `streamFn` 走 `agent_stream` 桥接。
 //! - `agent_stream` 只接受模型条目 id，不接受任意 URL / base_url / api_key。
 //! - API Key 存在 Keystore（Android）或 0600 私有文件（桌面），不进 SQLite、不进 JS、不进日志。
-//! - 会话与消息落 `life.db`；模型可见的工具永远只有 5 个 `fs_*`。
+//! - 会话与消息落 `life.db`；模型可见工具为 5 个 `fs_*` + 1 个技能元工具 `load_skill`。
 
 pub mod conversations;
 pub mod discovery;
@@ -19,7 +19,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// 模型可见的工具白名单，Rust 侧二次校验。
-pub const TOOL_ALLOWLIST: [&str; 5] = ["fs_read", "fs_write", "fs_edit", "fs_glob", "fs_grep"];
+/// 5 个 `fs_*` 之外只额外允许技能元工具 `load_skill`（不触达真实文件系统）。
+pub const TOOL_ALLOWLIST: [&str; 6] = [
+    "fs_read",
+    "fs_write",
+    "fs_edit",
+    "fs_glob",
+    "fs_grep",
+    "load_skill",
+];
 
 /// Tauri 管理的 Agent 状态：HTTP 客户端、密钥文件、取消标记。
 pub struct AgentState {

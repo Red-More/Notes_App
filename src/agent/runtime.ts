@@ -9,7 +9,7 @@ import type { AssistantMessage, Model, ToolCall, Usage } from '@earendil-works/p
 import { buildSystemPrompt } from './prompt'
 import { nativeStreamFn } from './stream'
 import { createTools } from './tools'
-import type { ChatMessageRecord, AgentSettings, ModelApiFormat } from '../types'
+import type { ChatMessageRecord, AgentSettings, ModelApiFormat, SkillSummary } from '../types'
 import { parseDbTime } from '../utils'
 
 const DEFAULT_TOOL_ROUNDS = 500
@@ -156,13 +156,14 @@ export function createAgent(
   profile: AgentProfile,
   history: AgentMessage[],
   skillsIndex = '',
+  skills: SkillSummary[] = [],
 ): Agent {
   return new Agent({
     initialState: {
       systemPrompt: buildSystemPrompt(skillsIndex),
       model: createAppModel(profile),
       thinkingLevel: 'off',
-      tools: createTools(),
+      tools: createTools(skills),
       messages: history,
     },
     streamFn: nativeStreamFn,

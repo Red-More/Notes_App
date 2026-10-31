@@ -1,12 +1,14 @@
-//! 模型可见的全部工具：只有 5 个 `fs_*`。
+//! 模型可见的工具：5 个 `fs_*` + 1 个技能元工具 `load_skill`。
 //!
 //! 这里不做任何路径或配额判断——真正的边界在 Rust 的 CapGate。
-//! 前端只额外挡住 `/life/.agents` 的读取，避免技能正文被模型直接翻出来。
+//! 前端只额外挡住 `/life/.agents` 的读取，避免技能正文被 fs_* 直接翻出来；
+//! `load_skill` 只能按已启用技能的名称/id 读取正文，不暴露任意路径。
 
 import type { AgentTool } from '@earendil-works/pi-agent-core'
 import { Type } from '@earendil-works/pi-ai'
-import { api } from '../api'
+import { api, skillApi } from '../api'
 import type {
+  SkillSummary,
   VfsGlobEntry,
   VfsGrepResponse,
   VfsReadResult,
@@ -122,8 +124,8 @@ function renderWrite(receipt: VfsWriteReceipt): string {
   return `已新建 ${receipt.path}（rev=${receipt.rev}，${receipt.bytes} 字节）`
 }
 
-/** 5 个工具，与 `src-tauri/src/commands/fs.rs` 一一对应，不多不少。 */
-export function createTools(): AgentTool[] {
+/** 5 个 fs_* 与 `commands/fs.rs` 一一对应；`load_skill` 只读已启用技能。 */
+export function createTools(skills: SkillSummary[] = []): AgentTool[] {
   const read: AgentTool = {
     name: 'fs_read',
     label: '读取文档',
@@ -289,5 +291,36 @@ export function createTools(): AgentTool[] {
     },
   }
 
-  return [read, write, edit, glob, grep]
+  const loadSkill: AgentTool = {
+    name: 'load_skill',
+    label: '加载技能',
+    description:
+      '按需读取一个已启用技能的完整指令。参数 name 使用技能索引中的 id 或名称；命中技能触发词后应先调用它，再按正文步骤执行。',
+    parameters: Type.Object({
+      name: Type.String({ description: '技能索引中的 id 或名称，例如 daily-review' }),
+    }),
+    execute: async (_toolCallId, params) => {
+      const input = params as { name: string }
+      const wanted = input.name.trim()
+      const target = skills.find(
+        (skill) => skill.enabled && (skill.id === wanted || skill.name === wanted),
+      )
+      if (!target) {
+        return toolFailure(
+          `未找到已启用的技能「${wanted}」；请只使用系统提示【技能索引】里的 id 或名称`,
+        )
+      }
+      const outcome = await runTool(() => skillApi.read(target.id))
+      if (!outcome.ok) return toolFailure(outcome.text)
+      const detail = outcome.value
+      return {
+        content: [{ type: 'text', text: `技能：${detail.name}\n\n${detail.body}` }],
+        details: detail,
+      }
+    },
+    // 只读元数据：允许与其它读工具并行，不占用写配额。
+    executionMode: 'parallel',
+  }
+
+  return [read, write, edit, glob, grep, loadSkill]
 }

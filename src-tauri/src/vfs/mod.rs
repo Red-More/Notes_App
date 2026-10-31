@@ -69,6 +69,7 @@ impl VirtualFs {
     /// 读文件或列目录。
     pub fn read(&self, req: ReadRequest) -> Result<ReadResult, ToolError> {
         let path = cap_gate::normalize_path(&req.path)?;
+        cap_gate::ensure_model_readable(&path)?;
         acl::ensure_allowed(&path, acl::AclPermission::Read)?;
         let row: Option<(i64, String, i64)> = self
             .conn
@@ -127,9 +128,25 @@ impl VirtualFs {
 
     /// 新建文档。已存在即 Conflict（修改走 edit），父目录按需补齐。
     pub fn write(&mut self, req: WriteRequest) -> Result<WriteReceipt, ToolError> {
+        self.write_inner(req, true)
+    }
+
+    /// 技能安装专用写入口：仍走同一套事务/版本维护，但允许写 `.agents`。
+    /// 调用方（`skills` 模块）负责把目标路径限制在技能目录内。
+    pub(crate) fn write_skill(&mut self, req: WriteRequest) -> Result<WriteReceipt, ToolError> {
+        self.write_inner(req, false)
+    }
+
+    fn write_inner(
+        &mut self,
+        req: WriteRequest,
+        enforce_agents: bool,
+    ) -> Result<WriteReceipt, ToolError> {
         let path = cap_gate::normalize_path(&req.path)?;
         let path = with_md_extension(path);
-        cap_gate::ensure_writable(&path)?;
+        if enforce_agents {
+            cap_gate::ensure_writable(&path)?;
+        }
         acl::ensure_allowed(&path, acl::AclPermission::Write)?;
 
         let raw = req.content;
@@ -208,8 +225,23 @@ impl VirtualFs {
 
     /// 字符串替换式编辑，追加新 rev；expect_rev 是乐观锁。
     pub fn edit(&mut self, req: EditRequest) -> Result<EditReceipt, ToolError> {
+        self.edit_inner(req, true)
+    }
+
+    /// 技能更新专用编辑入口：允许写 `.agents`，其余校验不变。
+    pub(crate) fn edit_skill(&mut self, req: EditRequest) -> Result<EditReceipt, ToolError> {
+        self.edit_inner(req, false)
+    }
+
+    fn edit_inner(
+        &mut self,
+        req: EditRequest,
+        enforce_agents: bool,
+    ) -> Result<EditReceipt, ToolError> {
         let path = cap_gate::normalize_path(&req.path)?;
-        cap_gate::ensure_writable(&path)?;
+        if enforce_agents {
+            cap_gate::ensure_writable(&path)?;
+        }
         acl::ensure_allowed(&path, acl::AclPermission::Write)?;
         if req.old_string.is_empty() {
             return Err(ToolError::invalid("old_string 不能为空"));

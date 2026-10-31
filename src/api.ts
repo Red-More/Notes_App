@@ -18,6 +18,9 @@ import type {
   Note,
   NoteVersion,
   Schedule,
+  SkillDetail,
+  SkillInput,
+  SkillSummary,
   Todo,
   VfsEditReceipt,
   VfsGlobEntry,
@@ -524,4 +527,22 @@ export const chatApi = {
   paramsSet: (modelEntryId: string, params: LlmParams) =>
     invoke<void>('agent_params_set', { modelEntryId, params }),
   cancel: (requestId: string) => invoke<void>('agent_cancel', { requestId }),
+}
+
+/**
+ * 技能管理 API（M3）。技能的读写只通过专用命令，模型工具无法触达 `.agents`。
+ */
+export const skillApi = {
+  list: () => invoke<SkillSummary[]>('skill_list'),
+  read: (id: string) => invoke<SkillDetail>('skill_read', { id }),
+  save: (input: SkillInput) => invoke<SkillSummary>('skill_save', { input }),
+  setEnabled: (id: string, enabled: boolean) =>
+    invoke<void>('skill_set_enabled', { id, enabled }),
+  remove: (id: string) => invoke<void>('skill_delete', { id }),
+  importPackage: (input: { filename: string; data: string }) =>
+    invoke<SkillSummary>('skill_import', { input }),
+  draftList: () => invoke<SkillSummary[]>('skill_draft_list'),
+  draftRead: (id: string) => invoke<SkillDetail>('skill_draft_read', { id }),
+  draftPromote: (id: string) => invoke<SkillSummary>('skill_draft_promote', { id }),
+  draftRemove: (id: string) => invoke<void>('skill_draft_delete', { id }),
 }

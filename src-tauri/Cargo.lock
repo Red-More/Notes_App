@@ -87,6 +87,7 @@ name = "app"
 version = "0.1.0"
 dependencies = [
  "android-native-keyring-store",
+ "base64 0.22.1",
  "futures-util",
  "keyring-core",
  "log",

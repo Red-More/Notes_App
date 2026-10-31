@@ -209,6 +209,36 @@ export interface DocRef {
   updatedAt: string
 }
 
+// ---- Skills (M3, skill_*) ----
+
+/** 技能摘要；初始 prompt 只注入这些字段，不含正文。 */
+export interface SkillSummary {
+  id: string
+  name: string
+  description: string
+  triggers: string[]
+  scope: string
+  version: string
+  enabled: boolean
+  builtin: boolean
+}
+
+/** 触发后按需读取的完整技能。 */
+export interface SkillDetail extends SkillSummary {
+  body: string
+}
+
+/** 新建/更新技能的入参。 */
+export interface SkillInput {
+  id?: string
+  name: string
+  description: string
+  triggers: string[]
+  scope?: string
+  version?: string
+  body: string
+}
+
 // ---- Agent（chat_* / agent_*） ----
 
 export type ChatRole = 'user' | 'assistant' | 'tool'

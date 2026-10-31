@@ -1952,6 +1952,144 @@ body.split-resizing {
   color: var(--text-3);
 }
 
+/* ---- Settings: skills (M3) ---- */
+.skill-import {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  margin: 8px 0 4px;
+  padding: 16px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  background: var(--surface-2);
+  text-align: center;
+  cursor: pointer;
+}
+
+.skill-import.busy {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.skill-import-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.skill-import-desc {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+.skill-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 2px;
+  border-top: 1px solid var(--border);
+}
+
+.skill-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+  padding: 0;
+  border: none;
+  background: none;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.skill-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+/* Compact inline action for draft rows (载入 / 丢弃). */
+.skill-actions .restore-default {
+  padding: 6px 8px;
+  font-size: 13px;
+}
+
+.skill-preview-body {
+  max-height: 55vh;
+  overflow-y: auto;
+  padding: 4px 2px 12px;
+}
+
+.skill-trigger-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.skill-trigger-chip {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-weak);
+  color: var(--accent-deep);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.skill-trigger-issue {
+  margin: 6px 2px 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+.skill-trigger-issue.warning {
+  color: var(--accent-deep);
+}
+
+.skill-trigger-issue.error {
+  color: var(--danger);
+}
+
+.skill-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 15px;
+  color: var(--text);
+}
+
+.skill-tag {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent-weak);
+  color: var(--accent-deep);
+}
+
+.skill-desc {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-2);
+}
+
+.skill-triggers {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.skill-body-input {
+  min-height: 160px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
 /* ---- Settings: Mermaid enhancement switch ---- */
 .settings-switch-row {
   display: flex;

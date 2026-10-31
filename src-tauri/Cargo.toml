@@ -28,6 +28,8 @@ tauri-plugin-notification = "2.6.0"
 tauri-plugin-opener = "2"
 rusqlite = { version = "0.37", features = ["bundled"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# 技能包导入：WebView 上传的 zip/.skill 以 base64 传入 Rust。
+base64 = "0.22"
 # Agent LLM 代理：唯一网络出口，SSE 流式转发；rustls 便于 Android 交叉编译。
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 futures-util = "0.3"

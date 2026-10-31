@@ -1,6 +1,6 @@
 //! CapGate：VirtualFs 的路径与参数守门层。
 //!
-//! 所有 5 个工具入口都会先走这里：把用户/模型给的路径规范化为 `/life/...`，
+//! 所有带路径的文件工具入口都会先走这里：把用户/模型给的路径规范化为 `/life/...`，
 //! 拒绝 `..`、绝对路径越界、控制字符与超长路径；写入时额外拒绝只读区
 //! `/life/.agents/`。真正的数据库操作永远只拿到规范化后的路径。
 
@@ -93,6 +93,16 @@ pub fn normalize_path(raw: &str) -> Result<String, ToolError> {
 /// 判断路径是否允许被 write/edit 修改。
 /// `.agents` 只允许用户经 UI 管理，模型工具不能写技能目录。
 pub fn ensure_writable(path: &str) -> Result<(), ToolError> {
+    if path == READ_ONLY_PREFIX || path.starts_with("/life/.agents/") {
+        return Err(ToolError::ReadOnlyArea {
+            path: path.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// `.agents` 对模型的文件工具完全不可见：技能正文只能由 `load_skill` 专用命令读取。
+pub fn ensure_model_readable(path: &str) -> Result<(), ToolError> {
     if path == READ_ONLY_PREFIX || path.starts_with("/life/.agents/") {
         return Err(ToolError::ReadOnlyArea {
             path: path.to_string(),

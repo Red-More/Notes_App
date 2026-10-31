@@ -2,6 +2,7 @@ mod agent;
 mod commands;
 mod db;
 mod docs;
+mod skills;
 #[cfg(test)]
 mod tests;
 mod vfs;
@@ -39,7 +40,16 @@ pub fn run() {
                 Ok(_) => {}
                 Err(e) => log::warn!("search index stats failed: {e}"),
             }
-            app.manage(VfsState(Mutex::new(VirtualFs::new(conn))));
+            // 首次启动写入 6 个内置技能；已种过则不再补，避免卸载后复活。
+            let mut vault = VirtualFs::new(conn);
+            if let Err(e) = skills::seed_builtins(&mut vault) {
+                eprintln!("life.db skill seed failed: {e}");
+            }
+            // Agent 工作区：模型可读写，但草稿不会自动加载。
+            if let Err(e) = skills::ensure_workspace(&vault) {
+                eprintln!("life.db agent workspace failed: {e}");
+            }
+            app.manage(VfsState(Mutex::new(vault)));
             // Agent 侧状态：HTTP 客户端、私有密钥文件、取消标记。
             let secret_path = app.path().app_data_dir()?.join("agent-secrets.json");
             app.manage(agent::AgentState::new(secret_path));
@@ -95,6 +105,16 @@ pub fn run() {
             commands::export::export_folder,
             commands::index::index_query,
             commands::index::search_reindex,
+            commands::skill::skill_list,
+            commands::skill::skill_read,
+            commands::skill::skill_save,
+            commands::skill::skill_set_enabled,
+            commands::skill::skill_delete,
+            commands::skill::skill_import,
+            commands::skill::skill_draft_list,
+            commands::skill::skill_draft_read,
+            commands::skill::skill_draft_promote,
+            commands::skill::skill_draft_delete,
             commands::agent::chat_list,
             commands::agent::chat_create,
             commands::agent::chat_rename,

@@ -31,6 +31,7 @@ import {
 import { toast } from '../../toast'
 import { api } from '../../api'
 import AgentSettingsSection from './AgentSettingsSection'
+import SkillsSection from './SkillsSection'
 import {
   getMermaidEnhance,
   setMermaidEnhance,
@@ -243,6 +244,8 @@ export default function SettingsPage({ onBack }: Props) {
         </div>
 
         <AgentSettingsSection />
+
+        <SkillsSection />
 
         <div className="settings-section-title">检索索引</div>
         <div className="form-field">
