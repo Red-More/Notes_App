@@ -70,6 +70,10 @@ cd src-tauri; cargo fmt --check; cargo clippy --all-targets -- -D warnings; carg
 - 模型只能看到虚拟路径 `/life/...`，真实文件系统与 `life.db` 均不可见
 - `.agents` 目录对 `fs_write / fs_edit` 只读
 
+## 技能系统（AgentSkills）
+
+技能是可编辑的 `SKILL.md` 文档：系统提示只注入摘要，命中后由模型通过 `load_skill` 按需加载。`SKILL.md` 字段、触发词规则、技能包导入、模型草稿审核与安全边界见 [技能系统使用文档](docs/LifeOS_技能系统使用文档.md)。
+
 ## 目录结构
 
 ```text
