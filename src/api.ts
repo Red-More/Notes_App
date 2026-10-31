@@ -133,17 +133,49 @@ function docToNote(doc: Doc): Note {
   }
 }
 
+/** Derive completion from Markdown checkboxes when an Agent edited the body. */
+function checkboxCompleted(content: string): boolean | null {
+  let found = false
+  let allDone = true
+  for (const line of content.split('\n')) {
+    const trimmed = line.trimStart()
+    if (!trimmed.startsWith('- [')) continue
+    const mark = trimmed[3]
+    if (trimmed[4] !== ']') continue
+    if (mark !== ' ' && mark !== 'x' && mark !== 'X') continue
+    found = true
+    if (mark === ' ') allDone = false
+  }
+  return found ? allDone : null
+}
+
 function docToTodo(doc: Doc): Todo {
+  // Frontmatter wins (UI toggle); otherwise fall back to body checkboxes
+  // so Agent edits and UI ticks stay consistent.
+  const explicit = doc.fields.completed
+  const completed =
+    typeof explicit === 'boolean' ? explicit : (checkboxCompleted(doc.content) ?? false)
   return {
     id: doc.id,
     title: doc.title,
     category: str(doc.fields.category) || '默认',
-    isCompleted: bool(doc.fields.completed) ? 1 : 0,
+    isCompleted: completed ? 1 : 0,
     dueDate: nullableStr(doc.fields.dueDate),
     reminder: bool(doc.fields.reminder) ? 1 : 0,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
   }
+}
+
+/** Restore the revision before the current head; returns the refreshed doc. */
+async function restorePreviousRevision(docId: number) {
+  const doc = await docApi.get(docId)
+  const versions = await docApi.listVersions(docId, true)
+  const previous = versions
+    .filter((version) => version.versionNumber < doc.rev)
+    .sort((a, b) => b.versionNumber - a.versionNumber)[0]
+  if (!previous) throw new Error('没有可恢复的历史版本')
+  return docApi.restoreVersion(previous.id)
 }
 
 function docToSchedule(doc: Doc): Schedule {
@@ -305,6 +337,20 @@ export const api = {
   restoreVersion: async (versionId: number) => docToNote(await docApi.restoreVersion(versionId)),
   createVersion: async (noteId: number) => docToNoteVersion(await docApi.createVersion(noteId)),
   deleteVersion: (versionId: number) => docApi.deleteVersion(versionId),
+
+  /** Restore the revision before the current head for a known document id. */
+  restorePreviousRevision,
+
+  /**
+   * Restore the revision before the current head for any document path.
+   * Used by chat tool cards to undo an Agent write/edit.
+   */
+  restorePreviousDocRevision: async (path: string) => {
+    const docs = await docApi.list({ limit: 2000 })
+    const doc = docs.find((item) => item.path === path)
+    if (!doc) throw new Error(`未找到文档：${path}`)
+    return restorePreviousRevision(doc.id)
+  },
 
   // ---- Folders ----
   listFolders: () => docApi.listFolders(),

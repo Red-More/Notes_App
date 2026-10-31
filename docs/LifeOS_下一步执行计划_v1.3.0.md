@@ -674,4 +674,114 @@ cargo test
 
 ---
 
+## 14. M4 实施记录（2026-10-31）
+
+> §14 为执行记录，不改变 v1.3.0 的任务与验收标准。
+
+### 14.1 任务完成情况
+
+| ID | 状态 | 交付物 / 证据 |
+|---|---|---|
+| M4-1 | ✅ 完成 | 工具卡片默认折叠（参数/结果 84px 截断，展开后 45vh 内滚动）；错误红色状态；失败/取消气泡提供「重试」，重发上一条用户消息；真机验证重试恢复 |
+| M4-2 | ✅ 完成 | 工具卡从参数或结果文本解析 `/life/...md`，点「打开文档」弹出只读预览（`fs_read` + `renderMarkdownPreview`，html:false）；真机验证 `todos/2026-10-31.md` |
+| M4-3 | ✅ 完成 | 新增通用 `VersionHistoryModal`（`includeAuto=true`，全部 rev），待办/日程/联系人编辑弹窗均可进入并恢复；笔记版本面板新增「恢复上一版」；对话内 `fs_write/fs_edit` 卡片提供「撤销」，按路径恢复上一 rev，恢复只追加不覆盖 |
+| M4-4 | ✅ 完成 | `meta.status` 在 frontmatter 缺失时由正文 checkbox 推断；`docToTodo` 同样回退解析正文；frontmatter `completed` 优先。真机验证 Agent 勾选后 status 变 `done`，撤销后回到 `open` |
+| M4-5 | ✅ 完成 | 失败/取消气泡落库（assistant + `is_error`），重放历史时跳过错误 assistant；网络异常横幅；失败后重试；输入框草稿仅在发送成功时清空。真机验证：取消气泡冷启动后仍在；飞行模式发送失败给出「网络异常」横幅与重试，联网后重试成功并清除横幅 |
+| M4-6 | ⚠️ 部分完成 | 冷启动真机实测 **1032ms / 1017ms**（debug APK，`am start -W` COLD）；工具/检索沿用 M1 内存库 P95（grep 3ms、索引 2ms、列表 2.7ms）。列表首屏与 IPC 层延迟未单独埋点，列入 M6 复测 |
+
+### 14.2 关键实现说明
+
+- **工具卡撤销**：`api.restorePreviousDocRevision(path)` 先按路径找到文档，再取 `rev < head` 的最大版本执行 `version_restore`，因此撤销不会删除历史；新建文件只有 rev1 时提示“没有可恢复的历史版本”。
+- **版本面板的“当前”判定**：用 `docApi.get(docId).rev` 与版本号比较，当前 rev 禁止再次恢复。
+- **待办状态双向一致**：Agent 只改 Markdown checkbox 时，`meta::upsert` 从正文推导 `open/done`；UI 勾选写 `completed` 字段，frontmatter 优先。两者都在同一写事务内更新 FTS/index，无需重建。
+- **失败态落库**：`ChatPage` 在 `message_end` 失败/取消时以 `isError=true` 追加 assistant 消息；`toAgentMessages` 跳过这类消息，避免“已取消”进入模型上下文。
+- **离线提示**：WebView 的 `navigator.onLine` 在飞行模式下仍可能为 true，因此额外在失败文本中识别 network/timeout，命中后显示红色“网络异常”横幅；成功一轮或 `online` 事件会清除。
+- **重试语义**：重试把上一条用户消息重新发送为新的用户轮次，不修改历史；流式进行中重复点击会被 `streaming` 守卫拦截。
+
+### 14.3 新增与修改的代码
+
+| 层 | 文件 |
+|---|---|
+| 对话 UI | `src/pages/chat/ChatPage.tsx`（工具卡折叠/打开/撤销/重试、离线横幅、文档预览、失败落库） |
+| 通用组件 | `src/components/VersionHistoryModal.tsx`（新增） |
+| 文档详情 | `src/pages/todos/TodoPage.tsx`、`pages/schedules/SchedulePage.tsx`、`pages/contacts/ContactPage.tsx`、`pages/notes/NoteEditorPage.tsx` |
+| 前端契约 | `src/api.ts`（`restorePreviousRevision` / `restorePreviousDocRevision`、checkbox 回退） |
+| Agent | `src/agent/runtime.ts`（重放时跳过错误 assistant） |
+| 后端 | `src-tauri/src/vfs/meta.rs`（`status_from_checkboxes`） |
+| 测试 | `src-tauri/src/tests.rs`（`todo_checkbox_edits_keep_meta_status_in_sync`） |
+| 样式 | `src/index.css`（工具卡动作、重试行、离线状态） |
+
+### 14.4 验证结果
+
+| 项 | 结果 |
+|---|---|
+| `pnpm lint` | 0 warnings / 0 errors |
+| `pnpm test` | 12 文件 / 130 用例通过 |
+| `pnpm build` | 成功；`ChatPage` 181.41KB min / **53.26KB gzip**（≤60KB） |
+| `cargo fmt --check` | 通过 |
+| `cargo clippy --all-targets -- -D warnings` | 通过 |
+| `cargo test` | 43 passed |
+
+### 14.5 已知偏差与后续
+
+| 项 | 现状 | 后续 |
+|---|---|---|
+| 工具卡撤销范围 | 仅对能解析出 `/life/...md` 的 `fs_write/fs_edit` 卡片；新建 rev1 无法撤销 | 如需“删除新建文件”，另加显式命令 |
+| 日记详情 | 无独立详情页，版本入口通过对话预览 + 撤销 | 若新增日记页，复用 `VersionHistoryModal` |
+| 离线判定 | 以失败文本识别为主，`navigator.onLine` 在 WebView 飞行模式下不可靠 | M6 可评估原生连通性检查 |
+| 失败重试 | 重试追加新的用户轮次，历史中保留原失败记录 | 如需“覆盖式重试”，需会话层去重 |
+| 性能 | 冷启动已实测；列表首屏与工具 IPC 未埋点 | M6-4 发布性能报告补齐 |
+| 版本列表噪声 | `includeAuto=true` 会列出每次自动保存 rev | 如过长可加“仅手工版本”过滤开关 |
+
+---
+
+## 15. Agent 对话交互增强（Trae 风格，2026-10-31）
+
+> 在 M4 的对话卡片基础上，补齐执行轨迹、锚点导航、回复工具栏与变更 Diff 面板。
+
+### 15.1 交付内容
+
+| 模块 | 实现 |
+|---|---|
+| 执行轨迹（Trace Timeline） | 工具调用改为时间线节点：按工具渲染语义图标与色块（读取/写入/编辑/查找/搜索/技能，另预留 think/subagent）；节点头部展示动作、耗时、状态与展开/收起；正文与文件路径作为可点击链接，详情默认折叠，展开后限高 45vh 内滚动 |
+| 左侧锚点（Anchors） | 对话流左侧固定竖线；每次用户输入生成圆点锚点，点击 `scrollIntoView` 平滑定位；滚动离开底部时右侧出现「↓ 回到底部」悬浮按钮 |
+| 回复工具栏（Action Toolbar） | 每条 AI 回复底部提供 复制 / 重试 / 分支 / 变更 N；右侧环形上下文占用率。重试重发上一条用户消息；分支按该回复对应的用户轮次截断并创建新会话；变更按钮按本轮 `fs_write/fs_edit` 路径打开 Diff |
+| 变更面板（Diff Viewer） | 统计总增删行；文件列表手风琴展开行内 diff（复用 `diffLines`）；单文件「撤销」与「全部撤销」，撤销通过 `version_restore` 追加新 rev；新建文件标注“无历史版本，无法撤销” |
+
+### 15.2 关键实现
+
+- **耗时**：`tool_execution_start` 记录 `performance.now()`，`tool_execution_end` 计算差值；仅本次会话可见，历史消息不显示耗时。
+- **锚点**：每行用 `ref` 写入 `Map<itemId, HTMLElement>`，圆点点击后 `scrollIntoView({behavior:'smooth'})`，不依赖额外测量。
+- **分支**：读取当前会话记录，定位该回复对应的最后一条 user 记录，截断后写入新会话；不复制失败/取消气泡。
+- **Diff**：按路径找到文档，取 `includeAuto=true` 的版本，head 与上一 rev 的正文交给 `diffLines`；撤销复用 `restorePreviousDocRevision`。
+- **上下文占用**：按“字符数/3”估算 token 后对比模型 `contextWindow`，仅作粗略提示，不接入真实 tokenizer。
+
+### 15.3 代码
+
+| 层 | 文件 |
+|---|---|
+| 对话页 | `src/pages/chat/ChatPage.tsx`（Trace 节点、锚点、工具栏、分支、Diff 入口、回到底部） |
+| 组件 | `src/components/DiffViewerModal.tsx`（新增） |
+| 样式 | `src/index.css`（`chat-row/chat-rail/chat-anchor/chat-actions/chat-trace-*/diff-file`） |
+| 复用 | `src/utils.ts::diffLines`、`src/pages/notes/NoteEditorPage.tsx` 的 diff 行样式 |
+
+### 15.4 验证
+
+- 真机：左轨锚点与用户气泡对齐；`读取/编辑` 节点显示图标、文件链接与状态；工具栏显示 复制/重试/分支/变更/占用率（示例对话 1%）。
+- 点「变更 1」打开面板：`+2/-2`、文件路径、行内红色旧行与绿色新行；「全部撤销」后统计归零并标记“已撤销”。
+- 点「分支」创建新会话，只保留到该回复对应的用户轮次（真机确认新会话仅含该用户消息）。
+- 点锚点/回到底部按钮滚动行为正常。
+
+### 15.5 已知偏差
+
+| 项 | 现状 | 后续 |
+|---|---|---|
+| Think / Subagent 节点 | 仅预留图标映射，当前 Agent 没有对应事件 | 接入推理或子智能体后再启用 |
+| 上下文占用 | 字符估算，不是真实 token 计数 | 若代理返回 usage，可改为真实值 |
+| 分支模型 | 新会话沿用当前激活模型 | 如需沿用原会话模型，需扩展 `chat_create` 参数 |
+| 单文件撤销 | 仅支持有历史 rev 的修改文件 | 新建文件可在 M5 增加“删除文件”命令 |
+| Diff 范围 | 只看本轮 `fs_write/fs_edit` 的路径 | 若工具面扩展，需同步映射 |
+
+---
+
 — LifeOS · LIF-2026-PLAN-001 v1.3.0 · Agent 优先执行基线 —

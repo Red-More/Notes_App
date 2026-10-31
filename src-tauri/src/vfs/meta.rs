@@ -165,7 +165,16 @@ pub fn upsert(conn: &Connection, inode: i64, path: &str, content: &str) -> rusql
         .title
         .clone()
         .unwrap_or_else(|| infer_title(path, &parts.body));
-    let status = status_from_fields(&parts.fields);
+    // Todo files may store completion as Markdown checkboxes (Agent edits) or
+    // as a `completed` field (UI toggle). Frontmatter wins; otherwise derive
+    // the status from the body so `meta.status` stays in sync either way.
+    let status = status_from_fields(&parts.fields).or_else(|| {
+        if kind == "todo" {
+            status_from_checkboxes(&parts.body)
+        } else {
+            None
+        }
+    });
     let due = field_string(&parts.fields, "dueDate").or_else(|| field_string(&parts.fields, "due"));
     let extra = serde_json::to_string(&parts.fields).unwrap_or_else(|_| "{}".to_string());
 
@@ -255,6 +264,35 @@ fn status_from_fields(fields: &BTreeMap<String, Value>) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// 从 Markdown checkbox 推断待办状态：`- [x]` 视为完成，`- [ ]` 视为未完成。
+/// 全部勾选返回 `done`，存在未勾选返回 `open`，没有 checkbox 返回 `None`。
+fn status_from_checkboxes(body: &str) -> Option<String> {
+    let mut found = false;
+    let mut all_done = true;
+    for line in body.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("- [") else {
+            continue;
+        };
+        let mut chars = rest.chars();
+        let checked = match chars.next() {
+            Some(' ') => false,
+            Some('x') | Some('X') => true,
+            _ => continue,
+        };
+        if chars.next() != Some(']') {
+            continue;
+        }
+        found = true;
+        if !checked {
+            all_done = false;
+        }
+    }
+    if !found {
+        return None;
+    }
+    Some(if all_done { "done" } else { "open" }.to_string())
 }
 
 /// 标题优先取正文第一个 Markdown 标题，否则退回文件名（不含扩展名）。

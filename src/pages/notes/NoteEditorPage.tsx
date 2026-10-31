@@ -457,6 +457,26 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     }
   }
 
+  const handleRestorePrevious = async () => {
+    if (noteIdRef.current == null) return
+    try {
+      const note = await api.restorePreviousRevision(noteIdRef.current)
+      setTitle(note.title)
+      setContent(note.content)
+      setCurrentFolderId(note.folderId)
+      setCreatedAt(note.createdAt)
+      setUpdatedAt(note.updatedAt)
+      lastSavedRef.current = { title: note.title, content: note.content }
+      setDirty(false)
+      setSaveState('clean')
+      toast('已恢复上一版')
+      await refreshVersions()
+    } catch (e) {
+      console.error(e)
+      toast(friendlyError(e))
+    }
+  }
+
   const handleCreateVersion = async () => {
     if (noteIdRef.current == null) {
       toast('请先输入内容以创建笔记')
@@ -896,14 +916,24 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
           title="历史版本"
           onClose={() => setVersionsOpen(false)}
           headerAction={
-            <button
-              type="button"
-              className="icon-btn accent"
-              onClick={() => void handleCreateVersion()}
-              aria-label="新建版本"
-            >
-              <IconPlus size={20} />
-            </button>
+            <>
+              <button
+                type="button"
+                className="icon-btn accent"
+                onClick={() => void handleRestorePrevious()}
+                aria-label="恢复上一版"
+              >
+                <IconRestore size={20} />
+              </button>
+              <button
+                type="button"
+                className="icon-btn accent"
+                onClick={() => void handleCreateVersion()}
+                aria-label="新建版本"
+              >
+                <IconPlus size={20} />
+              </button>
+            </>
           }
         >
           {versions.length === 0 && <div className="empty-state">暂无版本</div>}

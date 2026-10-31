@@ -2821,6 +2821,10 @@ body.split-resizing {
   color: var(--text-2);
 }
 
+.chat-status.offline {
+  color: var(--danger);
+}
+
 .chat-page .page-scroll.chat-scroll {
   padding: 6px 14px 10px;
 }
@@ -2858,6 +2862,27 @@ body.split-resizing {
   border-color: rgba(240, 68, 56, 0.35);
   color: var(--danger);
   box-shadow: none;
+}
+
+/* Retry row for failed or cancelled assistant turns. */
+.chat-bubble-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+.chat-retry {
+  padding: 5px 14px;
+  border: 1px solid rgba(240, 68, 56, 0.4);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--danger);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.chat-retry:active {
+  background: rgba(240, 68, 56, 0.12);
 }
 
 .chat-tool {
@@ -2903,7 +2928,18 @@ body.split-resizing {
   margin-top: 5px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  max-height: 160px;
+}
+
+/* Long payloads collapse by default; 展开 removes the clamp. */
+.chat-tool:not(.expanded) .chat-tool-args,
+.chat-tool:not(.expanded) .chat-tool-result {
+  max-height: 84px;
+  overflow: hidden;
+}
+
+.chat-tool.expanded .chat-tool-args,
+.chat-tool.expanded .chat-tool-result {
+  max-height: 45vh;
   overflow-y: auto;
 }
 
@@ -2913,6 +2949,296 @@ body.split-resizing {
 
 .chat-tool-result {
   color: var(--text);
+}
+
+.chat-tool-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.chat-tool-action {
+  padding: 2px 0;
+  color: var(--accent-deep);
+  font-size: 12.5px;
+}
+
+.chat-tool-action:active {
+  opacity: 0.6;
+}
+
+/* ---- Message rows, left anchors and reply toolbar ---- */
+.chat-row {
+  display: flex;
+  align-items: stretch;
+}
+
+.chat-rail {
+  position: relative;
+  width: 16px;
+  flex: none;
+}
+
+.chat-rail::before {
+  content: '';
+  position: absolute;
+  left: 7px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border);
+}
+
+.chat-anchor {
+  position: absolute;
+  left: 2px;
+  top: 16px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--surface);
+  box-shadow: 0 0 0 1px var(--accent-border);
+  z-index: 1;
+}
+
+.chat-row-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin: 2px 0 10px;
+}
+
+.chat-action {
+  padding: 4px 8px;
+  border-radius: 8px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.chat-action:active {
+  background: var(--surface-2);
+}
+
+.chat-action:disabled {
+  opacity: 0.35;
+}
+
+.chat-context-ring {
+  width: 34px;
+  height: 34px;
+  margin-left: auto;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  flex: none;
+}
+
+.chat-context-ring::before {
+  content: '';
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--surface);
+}
+
+.chat-context-ring span {
+  position: relative;
+  font-size: 9.5px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-scroll-bottom {
+  position: absolute;
+  right: 18px;
+  bottom: calc(var(--tabbar-height) + var(--nav-clearance) + 62px);
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-2);
+  box-shadow: var(--shadow);
+  font-size: 18px;
+  line-height: 1;
+  z-index: 2;
+}
+
+/* ---- Agent trace nodes ---- */
+.chat-trace-node {
+  position: relative;
+  display: flex;
+  gap: 10px;
+  margin: 2px 0 6px;
+  padding-left: 2px;
+}
+
+.chat-trace-node::before {
+  content: '';
+  position: absolute;
+  left: 13px;
+  top: 26px;
+  bottom: -10px;
+  width: 1px;
+  background: var(--border);
+}
+
+.chat-trace-icon {
+  position: relative;
+  z-index: 1;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-2);
+  color: var(--text-2);
+}
+
+.chat-trace-icon.read {
+  color: #2f6fed;
+  background: rgba(47, 111, 237, 0.1);
+}
+
+.chat-trace-icon.write {
+  color: #0b7a48;
+  background: rgba(18, 183, 106, 0.12);
+}
+
+.chat-trace-icon.edit {
+  color: #b25a00;
+  background: rgba(255, 154, 61, 0.14);
+}
+
+.chat-trace-icon.search {
+  color: #6b4fd8;
+  background: rgba(107, 79, 216, 0.12);
+}
+
+.chat-trace-icon.skill {
+  color: #b4238f;
+  background: rgba(180, 35, 143, 0.12);
+}
+
+.chat-trace-main {
+  flex: 1;
+  min-width: 0;
+  padding: 1px 0 6px;
+}
+
+.chat-trace-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat-trace-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.chat-trace-duration {
+  font-size: 11px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-trace-state {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.chat-trace-node.error .chat-trace-state {
+  color: var(--danger);
+}
+
+.chat-trace-toggle {
+  padding: 2px 4px;
+  font-size: 11px;
+  color: var(--accent-deep);
+}
+
+.chat-trace-summary {
+  margin-top: 3px;
+  font-size: 12px;
+}
+
+.chat-file-link {
+  padding: 0;
+  color: var(--accent-deep);
+  font-size: 12px;
+  text-align: left;
+  word-break: break-all;
+}
+
+.chat-trace-preview {
+  color: var(--text-3);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chat-trace-detail {
+  margin-top: 6px;
+  padding-left: 8px;
+  border-left: 2px solid var(--border);
+  max-height: 45vh;
+  overflow-y: auto;
+}
+
+/* ---- Diff viewer ---- */
+.diff-file {
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+
+.diff-file-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.diff-file-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 2px 0;
+}
+
+.diff-file-stats {
+  display: flex;
+  gap: 6px;
+  flex: none;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.diff-file .diff-body {
+  margin-top: 8px;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+/* Enlarge the inline rollback hit area on file rows and version rows. */
+.diff-file-head .restore-default,
+.version-actions .restore-default {
+  padding: 6px 10px;
+  font-size: 13px;
 }
 
 .chat-composer {

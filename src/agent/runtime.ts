@@ -136,6 +136,8 @@ export function toAgentMessages(
     if (record.role === 'user') {
       messages.push({ role: 'user', content: record.content, timestamp })
     } else if (record.role === 'assistant') {
+      // Failure/cancel bubbles are UI state, not model context.
+      if (record.isError) continue
       messages.push(toAssistantMessage(record, profile))
     } else {
       messages.push({

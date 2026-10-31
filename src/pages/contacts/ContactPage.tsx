@@ -4,6 +4,7 @@ import { useCollapsibleHeader, useDebouncedSearch, useElasticOverscroll } from '
 import { friendlyError } from '../../utils'
 import type { Contact } from '../../types'
 import { ConfirmDialog, Modal } from '../../components/ui'
+import VersionHistoryModal from '../../components/VersionHistoryModal'
 import { toast } from '../../toast'
 import { IconUsers } from '../../components/Icons'
 import PageHeader from '../../components/PageHeader'
@@ -39,6 +40,7 @@ export default function ContactPage({ isActive }: { isActive: boolean }) {
   const [editing, setEditing] = useState<Contact | null>(null)
   const [form, setForm] = useState<ContactForm>(EMPTY_FORM)
   const [deleteConfirm, setDeleteConfirm] = useState<Contact | null>(null)
+  const [versionsDoc, setVersionsDoc] = useState<Contact | null>(null)
   const [loading, setLoading] = useState(true)
 
   // Scroll-linked collapsing header (large title + search bar).
@@ -242,6 +244,19 @@ export default function ContactPage({ isActive }: { isActive: boolean }) {
                   删除
                 </button>
               )}
+              {editing && (
+                <button
+                  type="button"
+                  className="btn btn-plain"
+                  style={{ flex: '0 0 96px' }}
+                  onClick={() => {
+                    setVersionsDoc(editing)
+                    setEditOpen(false)
+                  }}
+                >
+                  历史版本
+                </button>
+              )}
               <button type="button" className="btn btn-primary" onClick={() => void handleSave()}>
                 {editing ? '保存' : '创建'}
               </button>
@@ -320,6 +335,15 @@ export default function ContactPage({ isActive }: { isActive: boolean }) {
             />
           </div>
         </Modal>
+      )}
+
+      {versionsDoc && (
+        <VersionHistoryModal
+          docId={versionsDoc.id}
+          title={versionsDoc.name}
+          onClose={() => setVersionsDoc(null)}
+          onRestored={() => void load()}
+        />
       )}
     </div>
   )

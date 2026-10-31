@@ -1342,6 +1342,56 @@ fn grep_type_filter_uses_meta_kind() {
 }
 
 #[test]
+fn todo_checkbox_edits_keep_meta_status_in_sync() {
+    let mut vfs = test_vfs();
+    let receipt = write_file(&mut vfs, "todos/demo", "- [ ] 买牛奶", WriteSource::User);
+    let status = |vfs: &VirtualFs| -> Option<String> {
+        vfs.conn()
+            .query_row(
+                "SELECT status FROM meta WHERE inode = (
+                     SELECT inode FROM inodes WHERE path = '/life/todos/demo.md'
+                 )",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .expect("meta row should exist")
+    };
+    assert_eq!(status(&vfs).as_deref(), Some("open"));
+
+    edit_file(
+        &mut vfs,
+        &receipt.path,
+        "- [ ] 买牛奶",
+        "- [x] 买牛奶",
+        Some(1),
+        WriteSource::Agent,
+    )
+    .expect("agent checkbox edit should succeed");
+    assert_eq!(status(&vfs).as_deref(), Some("done"));
+
+    // Frontmatter wins over the body when the UI toggles a todo.
+    let toggled = write_file(&mut vfs, "todos/ui-toggle", "- [ ] 洗碗", WriteSource::User);
+    let inode = inode_of(&vfs, &toggled.path);
+    vfs.conn()
+        .execute(
+            "UPDATE meta SET status = 'open' WHERE inode = ?1",
+            params![inode],
+        )
+        .unwrap();
+    docs::save(
+        &mut vfs,
+        inode,
+        None,
+        None,
+        Some(fields(&[("completed", Value::Bool(true))])),
+        None,
+        None,
+    )
+    .expect("UI toggle should save completed field");
+    assert_eq!(status(&vfs).as_deref(), Some("done"));
+}
+
+#[test]
 fn grep_falls_back_to_like_and_self_heals() {
     let mut vfs = test_vfs();
     let doc = docs::create(&mut vfs, "note", "索引自愈", "独有词 鲸落", None, None).unwrap();

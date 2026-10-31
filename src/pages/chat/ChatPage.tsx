@@ -4,7 +4,7 @@
 //! 不使用 `dangerouslySetInnerHTML`，模型输出不经过任何 HTML 解析。
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { chatApi, skillApi } from '../../api'
+import { api, chatApi, skillApi } from '../../api'
 import { createAgent, extractAssistant, profileFromSettings, toAgentMessages } from '../../agent/runtime'
 import type { AgentProfile } from '../../agent/runtime'
 import { buildSkillsIndex } from '../../agent/skills'
@@ -15,7 +15,20 @@ import { toast } from '../../toast'
 import { Modal } from '../../components/ui'
 import PageHeader from '../../components/PageHeader'
 import EmptyState from '../../components/EmptyState'
-import { IconChat, IconEdit, IconPlus, IconSend, IconStop, IconTrash } from '../../components/Icons'
+import {
+  IconChat,
+  IconEdit,
+  IconEye,
+  IconInfo,
+  IconNote,
+  IconPlus,
+  IconSearch,
+  IconSend,
+  IconStop,
+  IconTrash,
+  IconUsers,
+} from '../../components/Icons'
+import DiffViewerModal from '../../components/DiffViewerModal'
 
 interface Props {
   isActive: boolean
@@ -36,9 +49,16 @@ interface ToolCard {
   args: string
   status: 'running' | 'done' | 'error'
   text: string
+  /** Wall-clock duration, only available for calls made in this session. */
+  durationMs?: number
 }
 
 type Item = Bubble | ToolCard
+
+interface DocPreview {
+  path: string
+  html: string
+}
 
 function messageKey(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`
@@ -51,7 +71,12 @@ function recordsToItems(records: ChatMessageRecord[]): Item[] {
       items.push({ id: `m-${record.id}`, kind: 'user', text: record.content })
     } else if (record.role === 'assistant') {
       if (record.content.trim() === '') continue
-      items.push({ id: `m-${record.id}`, kind: 'assistant', text: record.content })
+      items.push({
+        id: `m-${record.id}`,
+        kind: 'assistant',
+        text: record.content,
+        isError: record.isError,
+      })
     } else {
       items.push({
         id: `m-${record.id}`,
@@ -70,6 +95,159 @@ function toolResultText(result: unknown): string {
   const value = result as { content?: Array<{ text?: string }> } | null
   if (!value?.content) return ''
   return value.content.map((block) => block.text ?? '').join('\n')
+}
+
+/** Remove the YAML frontmatter so previews match what the editor renders. */
+function stripFrontmatter(text: string): string {
+  const normalized = text.replace(/\r\n/g, '\n')
+  if (!normalized.startsWith('---\n')) return text
+  const close = normalized.indexOf('\n---', 4)
+  if (close < 0) return text
+  const start = normalized.indexOf('\n', close + 4)
+  return start < 0 ? '' : normalized.slice(start + 1)
+}
+
+/** Find the document path touched by a tool card (args first, then result text). */
+function documentPath(card: ToolCard): string | null {
+  try {
+    const args = JSON.parse(card.args || '{}') as { path?: unknown }
+    if (
+      typeof args.path === 'string' &&
+      args.path.startsWith('/life/') &&
+      args.path.endsWith('.md')
+    ) {
+      return args.path
+    }
+  } catch {
+    // Persisted cards have no args; fall back to the result text.
+  }
+  const match = card.text.match(/\/life\/[^\s，。；、"'<>（(）)]+\.md/)
+  return match ? match[0] : null
+}
+
+const NETWORK_ERROR = /timeout|超时|timed out|network|网络|fetch|conn/i
+
+/** True when the error text looks like connectivity loss rather than a server reply. */
+function networkFailure(detail: string): boolean {
+  return NETWORK_ERROR.test(detail)
+}
+
+/** Paths changed by the tools between the previous user turn and this reply. */
+function turnChanges(items: Item[], assistantIndex: number): string[] {
+  const paths: string[] = []
+  for (let i = assistantIndex - 1; i >= 0; i -= 1) {
+    const item = items[i]
+    if (item.kind === 'user') break
+    if (item.kind !== 'tool') continue
+    if (item.status !== 'done') continue
+    if (!['fs_write', 'fs_edit'].includes(item.toolName)) continue
+    const path = documentPath(item)
+    if (path && !paths.includes(path)) paths.unshift(path)
+  }
+  return paths
+}
+
+/** Human-readable failure text that distinguishes offline from other errors. */
+function failureText(error: unknown, online: boolean): string {
+  if (!online) return '当前处于离线模式，消息未发送；联网后点「重试」。'
+  const detail = friendlyError(error)
+  if (networkFailure(detail)) {
+    return `网络异常：${detail}`
+  }
+  return `发送失败：${detail}`
+}
+
+const TOOL_META: Record<
+  string,
+  { label: string; tone: string; Icon: typeof IconNote }
+> = {
+  fs_read: { label: '读取', tone: 'read', Icon: IconEye },
+  fs_write: { label: '写入', tone: 'write', Icon: IconNote },
+  fs_edit: { label: '编辑', tone: 'edit', Icon: IconEdit },
+  fs_glob: { label: '查找', tone: 'search', Icon: IconSearch },
+  fs_grep: { label: '搜索', tone: 'search', Icon: IconSearch },
+  load_skill: { label: '技能', tone: 'skill', Icon: IconInfo },
+  think: { label: '思考', tone: 'think', Icon: IconInfo },
+  subagent: { label: '子智能体', tone: 'agent', Icon: IconUsers },
+}
+
+function formatDuration(ms: number): string {
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`
+}
+
+interface ToolCardViewProps {
+  card: ToolCard
+  expanded: boolean
+  onToggle: (id: string) => void
+  onOpen: (path: string) => void
+  onUndo: (path: string) => void
+}
+
+/** One Agent trace node: semantic icon, summary header and collapsible detail. */
+function ToolCardView({ card, expanded, onToggle, onOpen, onUndo }: ToolCardViewProps) {
+  const path = documentPath(card)
+  const meta = TOOL_META[card.toolName] ?? {
+    label: card.toolName,
+    tone: 'other',
+    Icon: IconInfo,
+  }
+  const Icon = meta.Icon
+  const canUndo =
+    card.status === 'done' && path !== null && ['fs_write', 'fs_edit'].includes(card.toolName)
+  const collapsible = card.args.length > 120 || card.text.length > 200
+  const state = card.status === 'running' ? '执行中…' : card.status === 'error' ? '失败' : '完成'
+  return (
+    <div className={`chat-trace-node ${meta.tone} ${card.status}`}>
+      <div className={`chat-trace-icon ${meta.tone}`}>
+        <Icon size={14} />
+      </div>
+      <div className="chat-trace-main">
+        <div className="chat-trace-head">
+          <span className="chat-trace-label">{meta.label}</span>
+          {card.durationMs !== undefined && (
+            <span className="chat-trace-duration">{formatDuration(card.durationMs)}</span>
+          )}
+          <span className="chat-trace-state">{state}</span>
+          {collapsible && (
+            <button
+              type="button"
+              className="chat-trace-toggle"
+              aria-expanded={expanded}
+              onClick={() => onToggle(card.id)}
+            >
+              {expanded ? '收起' : '展开'}
+            </button>
+          )}
+        </div>
+        {(path || card.text) && (
+          <div className="chat-trace-summary">
+            {path ? (
+              <button type="button" className="chat-file-link" onClick={() => onOpen(path)}>
+                {path}
+              </button>
+            ) : (
+              <span className="chat-trace-preview">{card.text.split('\n')[0]}</span>
+            )}
+          </div>
+        )}
+        {expanded && (
+          <div className="chat-trace-detail">
+            {card.args && card.args !== '{}' && (
+              <div className="chat-tool-args">{card.args}</div>
+            )}
+            {card.text && <div className="chat-tool-result">{card.text}</div>}
+          </div>
+        )}
+        {canUndo && path && (
+          <div className="chat-tool-actions">
+            <button type="button" className="chat-tool-action" onClick={() => onUndo(path)}>
+              撤销
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
 }
 
 /** Merge persisted per-model capabilities into the pi profile. */
@@ -103,12 +281,28 @@ export default function ChatPage({ isActive }: Props) {
   const [renameId, setRenameId] = useState<number | null>(null)
   const [renameText, setRenameText] = useState('')
   const [loading, setLoading] = useState(true)
+  const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set())
+  const [docPreview, setDocPreview] = useState<DocPreview | null>(null)
+  const [online, setOnline] = useState(() => navigator.onLine)
+  // Set after a network-looking failure; WebView's online flag is unreliable.
+  const [networkIssue, setNetworkIssue] = useState(false)
+  const [contextWindow, setContextWindow] = useState(0)
+  const [scrollBottomVisible, setScrollBottomVisible] = useState(false)
+  const [diffView, setDiffView] = useState<{ paths: string[]; title: string } | null>(null)
+  // Maps an item id to its row so a timeline dot can scroll it into view.
+  const rowRefs = useRef(new Map<string, HTMLDivElement>())
 
   const agentRef = useRef<ReturnType<typeof createAgent> | null>(null)
   const unsubscribeRef = useRef<(() => void) | null>(null)
   const conversationRef = useRef<ChatConversation | null>(null)
   const skillsRef = useRef<SkillSummary[]>([])
+  // Mirror of `online` for event handlers that must not rebuild the agent.
+  const onlineRef = useRef(navigator.onLine)
+  // True once `message_end` rendered this turn, so `send` must not duplicate it.
+  const settledRef = useRef(true)
   const streamingIdRef = useRef<string | null>(null)
+  // Tool start timestamps for the trace duration badge.
+  const toolStartRef = useRef(new Map<string, number>())
   const scrollRef = useRef<HTMLDivElement>(null)
   const bootRef = useRef(false)
   // 落库串行化：assistant 消息必须先于其 toolResult 写入，否则历史无法还原。
@@ -117,6 +311,31 @@ export default function ChatPage({ isActive }: Props) {
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
+  }, [])
+
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+    setScrollBottomVisible(el.scrollHeight - el.scrollTop - el.clientHeight > 90)
+  }, [])
+
+  // Surface offline mode immediately and clear it when the network returns.
+  useEffect(() => {
+    const goOnline = () => {
+      onlineRef.current = true
+      setOnline(true)
+      setNetworkIssue(false)
+    }
+    const goOffline = () => {
+      onlineRef.current = false
+      setOnline(false)
+    }
+    window.addEventListener('online', goOnline)
+    window.addEventListener('offline', goOffline)
+    return () => {
+      window.removeEventListener('online', goOnline)
+      window.removeEventListener('offline', goOffline)
+    }
   }, [])
 
   const enqueuePersist = useCallback(<T,>(task: () => Promise<T>): Promise<T> => {
@@ -128,14 +347,14 @@ export default function ChatPage({ isActive }: Props) {
   }, [])
 
   const persistAssistant = useCallback(
-    (text: string, toolCalls: string | null) => {
+    (text: string, toolCalls: string | null, isError = false) => {
       const convId = conversationRef.current?.id
       if (!convId) return
       if (text.trim() === '' && toolCalls === null) return
       void enqueuePersist(() =>
         chatApi.append({
           conversationId: convId,
-          messages: [{ role: 'assistant', content: text, toolCalls }],
+          messages: [{ role: 'assistant', content: text, toolCalls, isError }],
         }),
       )
     },
@@ -191,7 +410,7 @@ export default function ChatPage({ isActive }: Props) {
           const shown = failed
             ? message.stopReason === 'aborted'
               ? '已取消'
-              : `回答失败：${message.errorMessage ?? '未知错误'}`
+              : `${onlineRef.current ? '' : '当前处于离线模式，'}回答失败：${message.errorMessage ?? '未知错误'}`
             : text
           setItems((prev) => {
             if (shown.trim() === '') return prev.filter((item) => item.id !== id)
@@ -202,11 +421,16 @@ export default function ChatPage({ isActive }: Props) {
             )
           })
           streamingIdRef.current = null
-          if (!failed) persistAssistant(text, toolCalls)
+          settledRef.current = true
+          if (failed) setNetworkIssue(networkFailure(message.errorMessage ?? ''))
+          else setNetworkIssue(false)
+          // Failure/cancel bubbles are persisted too, so reloads keep the last state.
+          persistAssistant(failed ? shown : text, failed ? null : toolCalls, failed)
           scrollToBottom()
           break
         }
         case 'tool_execution_start': {
+          toolStartRef.current.set(event.toolCallId, performance.now())
           setItems((prev) => [
             ...prev,
             {
@@ -223,10 +447,13 @@ export default function ChatPage({ isActive }: Props) {
         }
         case 'tool_execution_end': {
           const text = toolResultText(event.result)
+          const started = toolStartRef.current.get(event.toolCallId)
+          toolStartRef.current.delete(event.toolCallId)
+          const durationMs = started === undefined ? undefined : performance.now() - started
           setItems((prev) =>
             prev.map((item) =>
               item.id === event.toolCallId && item.kind === 'tool'
-                ? { ...item, status: event.isError ? 'error' : 'done', text }
+                ? { ...item, status: event.isError ? 'error' : 'done', text, durationMs }
                 : item,
             ),
           )
@@ -274,6 +501,7 @@ export default function ChatPage({ isActive }: Props) {
           return
         }
         const activeProfile = await withCapabilities(baseProfile)
+        setContextWindow(activeProfile.contextWindow ?? 128000)
         const agent = createAgent(
           activeProfile,
           toAgentMessages(records, activeProfile),
@@ -289,6 +517,7 @@ export default function ChatPage({ isActive }: Props) {
       } finally {
         setLoading(false)
         scrollToBottom()
+        setScrollBottomVisible(false)
       }
     },
     [disposeAgent, handleEvent, scrollToBottom],
@@ -375,42 +604,161 @@ export default function ChatPage({ isActive }: Props) {
     }
   }, [])
 
-  const send = useCallback(async () => {
-    const text = input.trim()
-    if (!text || streaming) return
-    const agent = agentRef.current
-    const conv = conversationRef.current
-    if (!agent || !conv) {
-      toast('会话尚未就绪')
-      return
-    }
-    setInput('')
-    setItems((prev) => [...prev, { id: messageKey('u'), kind: 'user', text }])
-    setStreaming(true)
-    scrollToBottom()
-    void ensureTitle(text)
+  const submitPrompt = useCallback(
+    async (text: string) => {
+      if (!text || streaming) return
+      const agent = agentRef.current
+      const conv = conversationRef.current
+      if (!agent || !conv) {
+        toast('会话尚未就绪')
+        return
+      }
+      settledRef.current = false
+      setInput('')
+      setItems((prev) => [...prev, { id: messageKey('u'), kind: 'user', text }])
+      setStreaming(true)
+      scrollToBottom()
+      void ensureTitle(text)
+      try {
+        await enqueuePersist(() =>
+          chatApi.append({
+            conversationId: conv.id,
+            messages: [{ role: 'user', content: text }],
+          }),
+        )
+        // 技能正文由模型通过 load_skill 主动加载；用户消息不携带技能内容。
+        await agent.prompt(text)
+      } catch (e) {
+        const shown = failureText(e, onlineRef.current)
+        if (!onlineRef.current || networkFailure(friendlyError(e))) setNetworkIssue(true)
+        // Only add a bubble when the stream never reached `message_end`,
+        // which already renders and persists its own failure state.
+        if (!settledRef.current) {
+          const id = messageKey('e')
+          streamingIdRef.current = null
+          settledRef.current = true
+          setItems((prev) => [...prev, { id, kind: 'assistant', text: shown, isError: true }])
+          persistAssistant(shown, null, true)
+        }
+        // Keep the typed draft so the user can retry without retyping.
+        setInput((prev) => prev || text)
+        setStreaming(false)
+      }
+    },
+    [enqueuePersist, ensureTitle, persistAssistant, scrollToBottom, streaming],
+  )
+
+  const send = useCallback(() => {
+    void submitPrompt(input.trim())
+  }, [input, submitPrompt])
+
+  const retry = useCallback(
+    (messageId: string) => {
+      const index = items.findIndex((item) => item.id === messageId)
+      for (let i = index - 1; i >= 0; i -= 1) {
+        const item = items[i]
+        if (item.kind === 'user' && item.text.trim() !== '') {
+          void submitPrompt(item.text)
+          return
+        }
+      }
+      toast('找不到上一条用户消息，无法重试')
+    },
+    [items, submitPrompt],
+  )
+
+  const toggleTool = useCallback((id: string) => {
+    setExpandedTools((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
+
+  const openDocPreview = useCallback(async (path: string) => {
+    setDocPreview({ path, html: '' })
     try {
-      await enqueuePersist(() =>
-        chatApi.append({
-          conversationId: conv.id,
-          messages: [{ role: 'user', content: text }],
-        }),
-      )
-      // 技能正文由模型通过 load_skill 主动加载；用户消息不携带技能内容。
-      await agent.prompt(text)
-    } catch (e) {
-      setItems((prev) => [
-        ...prev,
-        {
-          id: messageKey('e'),
-          kind: 'assistant',
-          text: `发送失败：${friendlyError(e)}`,
-          isError: true,
-        },
-      ])
-      setStreaming(false)
+      const result = await api.fsRead({ path, includeMeta: true })
+      if (result.kind !== 'file') throw new Error('该路径不是文件')
+      const { renderMarkdownPreview } = await import('../../editor/markdown')
+      setDocPreview({
+        path,
+        html: renderMarkdownPreview(stripFrontmatter(result.content)),
+      })
+    } catch (error) {
+      setDocPreview(null)
+      toast(friendlyError(error))
     }
-  }, [enqueuePersist, ensureTitle, input, scrollToBottom, streaming])
+  }, [])
+
+  const undoWrite = useCallback(async (path: string) => {
+    try {
+      await api.restorePreviousDocRevision(path)
+      toast('已撤销上一次修改')
+    } catch (error) {
+      toast(friendlyError(error))
+    }
+  }, [])
+
+  const copyReply = useCallback(async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      toast('已复制')
+    } catch {
+      toast('复制失败，请长按选择文本')
+    }
+  }, [])
+
+  const jumpToItem = useCallback((id: string) => {
+    rowRefs.current.get(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [])
+
+  /** Fork the conversation up to the user turn that produced this reply. */
+  const forkConversation = useCallback(
+    async (assistantText: string) => {
+      const conv = conversationRef.current
+      if (!conv) return
+      try {
+        const records = await chatApi.messages(conv.id)
+        let index = -1
+        for (let i = records.length - 1; i >= 0; i -= 1) {
+          if (records[i].role === 'assistant' && records[i].content === assistantText) {
+            index = i
+            break
+          }
+        }
+        let cutoff = records.length
+        if (index >= 0) {
+          let userIndex = index - 1
+          while (userIndex >= 0 && records[userIndex].role !== 'user') userIndex -= 1
+          cutoff = userIndex >= 0 ? userIndex + 1 : index + 1
+        }
+        const created = await chatApi.create({
+          title: `${conv.title} · 分支`.slice(0, 80),
+        })
+        if (cutoff > 0) {
+          await chatApi.append({
+            conversationId: created.id,
+            messages: records.slice(0, cutoff).map((record) => ({
+              role: record.role,
+              content: record.content,
+              toolCalls: record.toolCalls,
+              toolCallId: record.toolCallId,
+              toolName: record.toolName,
+              isError: record.isError,
+            })),
+          })
+        }
+        setConversations((prev) => [created, ...prev])
+        await openConversation(created)
+        toast('已创建对话分支')
+      } catch (error) {
+        toast(friendlyError(error))
+      }
+    },
+    [openConversation],
+  )
 
   const stop = useCallback(() => {
     const agent = agentRef.current
@@ -484,6 +832,16 @@ export default function ChatPage({ isActive }: Props) {
     : '未添加模型'
   const hasModel = settings?.activeId != null
 
+  // Rough token estimate (CJK ~1 char/token, ASCII ~3 chars/token).
+  const contextChars = items.reduce(
+    (sum, item) => sum + item.text.length + (item.kind === 'tool' ? item.args.length : 0),
+    0,
+  )
+  const contextPercent =
+    contextWindow > 0
+      ? Math.min(100, Math.round(((contextChars / 3) * 100) / contextWindow))
+      : 0
+
   return (
     <div className="page chat-page">
       <PageHeader
@@ -498,9 +856,13 @@ export default function ChatPage({ isActive }: Props) {
         ]}
       />
 
-      <div className="chat-status">{modelLabel}</div>
+      <div className={`chat-status ${online && !networkIssue ? '' : 'offline'}`}>
+        {online && !networkIssue
+          ? modelLabel
+          : `${modelLabel} · ${online ? '网络异常' : '离线模式'}，消息可能发送失败`}
+      </div>
 
-      <div className="page-scroll chat-scroll" ref={scrollRef}>
+      <div className="page-scroll chat-scroll" ref={scrollRef} onScroll={handleScroll}>
         {loading ? (
           <div className="list-loading">加载中…</div>
         ) : items.length === 0 ? (
@@ -513,35 +875,110 @@ export default function ChatPage({ isActive }: Props) {
             }
           />
         ) : (
-          items.map((item) =>
-            item.kind === 'tool' ? (
-              <div key={item.id} className={`chat-tool ${item.status}`}>
-                <div className="chat-tool-head">
-                  <span className="chat-tool-name">{item.toolName}</span>
-                  <span className="chat-tool-state">
-                    {item.status === 'running'
-                      ? '执行中…'
-                      : item.status === 'error'
-                        ? '失败'
-                        : '完成'}
-                  </span>
-                </div>
-                {item.args && item.args !== '{}' && (
-                  <div className="chat-tool-args">{item.args}</div>
-                )}
-                {item.text && <div className="chat-tool-result">{item.text}</div>}
-              </div>
-            ) : (
+          items.map((item, index) => {
+            const changes =
+              item.kind === 'assistant' && !item.streaming ? turnChanges(items, index) : []
+            return (
               <div
                 key={item.id}
-                className={`chat-bubble ${item.kind} ${item.isError ? 'error' : ''}`}
+                className={`chat-row ${item.kind}`}
+                ref={(node) => {
+                  if (node) rowRefs.current.set(item.id, node)
+                  else rowRefs.current.delete(item.id)
+                }}
               >
-                {item.text || (item.streaming ? '…' : '')}
+                <div className="chat-rail">
+                  {item.kind === 'user' && (
+                    <button
+                      type="button"
+                      className="chat-anchor"
+                      aria-label="定位到这条消息"
+                      onClick={() => jumpToItem(item.id)}
+                    />
+                  )}
+                </div>
+                <div className="chat-row-body">
+                  {item.kind === 'tool' ? (
+                    <ToolCardView
+                      card={item}
+                      expanded={expandedTools.has(item.id)}
+                      onToggle={toggleTool}
+                      onOpen={(path) => void openDocPreview(path)}
+                      onUndo={(path) => void undoWrite(path)}
+                    />
+                  ) : (
+                    <>
+                      <div
+                        className={`chat-bubble ${item.kind} ${item.isError ? 'error' : ''}`}
+                      >
+                        {item.text || (item.streaming ? '…' : '')}
+                      </div>
+                      {item.kind === 'assistant' && !item.streaming && (
+                        <div className="chat-actions">
+                          <button
+                            type="button"
+                            className="chat-action"
+                            onClick={() => void copyReply(item.text)}
+                          >
+                            复制
+                          </button>
+                          <button
+                            type="button"
+                            className="chat-action"
+                            onClick={() => retry(item.id)}
+                          >
+                            重试
+                          </button>
+                          <button
+                            type="button"
+                            className="chat-action"
+                            onClick={() => void forkConversation(item.text)}
+                          >
+                            分支
+                          </button>
+                          <button
+                            type="button"
+                            className="chat-action"
+                            disabled={changes.length === 0}
+                            onClick={() =>
+                              setDiffView({
+                                paths: changes,
+                                title: item.text.slice(0, 40) || '本次变更',
+                              })
+                            }
+                          >
+                            变更{changes.length > 0 ? ` ${changes.length}` : ''}
+                          </button>
+                          <span
+                            className="chat-context-ring"
+                            style={{
+                              background: `conic-gradient(var(--accent) ${contextPercent}%, var(--border) 0)`,
+                            }}
+                            title={`上下文占用约 ${contextPercent}%`}
+                          >
+                            <span>{contextPercent}%</span>
+                          </span>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
               </div>
-            ),
-          )
+            )
+          })
         )}
       </div>
+
+      {scrollBottomVisible && (
+        <button
+          type="button"
+          className="chat-scroll-bottom"
+          aria-label="回到底部"
+          onClick={scrollToBottom}
+        >
+          ↓
+        </button>
+      )}
 
       <div className="chat-composer">
         <textarea
@@ -574,6 +1011,36 @@ export default function ChatPage({ isActive }: Props) {
           </button>
         )}
       </div>
+
+      {docPreview && (
+        <Modal
+          title={docPreview.path}
+          onClose={() => setDocPreview(null)}
+          footer={
+            <button type="button" className="btn btn-primary" onClick={() => setDocPreview(null)}>
+              关闭
+            </button>
+          }
+        >
+          {docPreview.html ? (
+            <div
+              className="md-preview skill-preview-body"
+              // Local document rendered with the same sanitized renderer as notes.
+              dangerouslySetInnerHTML={{ __html: docPreview.html }}
+            />
+          ) : (
+            <p className="settings-note">加载中…</p>
+          )}
+        </Modal>
+      )}
+
+      {diffView && (
+        <DiffViewerModal
+          paths={diffView.paths}
+          title={diffView.title}
+          onClose={() => setDiffView(null)}
+        />
+      )}
 
       {drawerOpen && (
         <Modal
