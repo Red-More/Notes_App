@@ -26,6 +26,9 @@ pub fn init(app: &tauri::AppHandle) -> Result<Connection, Box<dyn std::error::Er
     let mut conn = Connection::open(dir.join(DB_FILE_NAME))?;
     wal::configure(&conn)?;
     schema::migrate(&mut conn)?;
+    if schema::repair_search_index(&conn)? {
+        log::info!("fts_docs rebuilt with content_rowid=rowid (derived index)");
+    }
 
     match wal::integrity_check(&conn) {
         Ok(report) if !report.ok => {

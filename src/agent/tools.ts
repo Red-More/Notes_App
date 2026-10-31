@@ -32,6 +32,68 @@ function assertReadableGlob(pattern: string, root?: string): void {
   assertReadable(effective)
 }
 
+/** Map a serialized Rust `ToolError` to actionable Chinese text for the model. */
+function toolErrorText(error: unknown): string {
+  if (error instanceof Error) return error.message
+  const err = error as {
+    code?: string
+    message?: string
+    path?: string
+    hint?: string
+    root?: string
+    got?: string
+    current?: number
+    expect?: number
+    limit?: number
+    actual?: number
+  }
+  switch (err?.code) {
+    case 'pathEscape':
+      return `路径越界：${err.got} 必须位于 ${err.root} 内`
+    case 'notFound':
+      return `目标不存在：${err.path}`
+    case 'notADirectory':
+      return `不是目录：${err.path}`
+    case 'isDirectory':
+      return `目标是目录，不能按文件编辑：${err.path}`
+    case 'alreadyExists':
+      return `目标已存在，fs_write 不能覆盖：${err.path}；追加请先 read 再用 fs_edit`
+    case 'parentMissing':
+      return `父目录不存在：${err.path}`
+    case 'readOnlyArea':
+      return `该路径属于只读区，禁止写入：${err.path}`
+    case 'conflict':
+      return `版本冲突：当前 rev=${err.current}，期望 rev=${err.expect}；请重新 read 后再编辑`
+    case 'noMatch':
+      return `old_string 未命中：${err.hint}`
+    case 'contentTooLarge':
+      return `内容过大：${err.actual} 字节，上限 ${err.limit} 字节`
+    case 'storage':
+      return `存储错误：${err.message ?? '未知'}`
+    default:
+      return err?.message ?? '工具执行失败'
+  }
+}
+
+/** Run a Tauri call; failures become readable `isError` results instead of thrown objects. */
+async function runTool<T>(
+  call: () => Promise<T>,
+): Promise<{ ok: true; value: T } | { ok: false; text: string }> {
+  try {
+    return { ok: true, value: await call() }
+  } catch (error) {
+    return { ok: false, text: toolErrorText(error) }
+  }
+}
+
+function toolFailure(text: string) {
+  return {
+    content: [{ type: 'text' as const, text }],
+    details: { error: text },
+    isError: true,
+  }
+}
+
 function renderRead(result: VfsReadResult): string {
   if (result.kind === 'dir') {
     if (result.entries.length === 0) return '（空目录）'
@@ -83,13 +145,17 @@ export function createTools(): AgentTool[] {
         includeMeta?: boolean
       }
       assertReadable(input.path)
-      const result = await api.fsRead({
-        path: input.path,
-        rev: input.rev,
-        startLine: input.startLine,
-        endLine: input.endLine,
-        includeMeta: input.includeMeta,
-      })
+      const outcome = await runTool(() =>
+        api.fsRead({
+          path: input.path,
+          rev: input.rev,
+          startLine: input.startLine,
+          endLine: input.endLine,
+          includeMeta: input.includeMeta,
+        }),
+      )
+      if (!outcome.ok) return toolFailure(outcome.text)
+      const result = outcome.value
       return { content: [{ type: 'text', text: renderRead(result) }], details: result }
     },
   }
@@ -115,12 +181,16 @@ export function createTools(): AgentTool[] {
         createParents?: boolean
         autoFrontmatter?: boolean
       }
-      const receipt = await api.fsWrite({
-        path: input.path,
-        content: input.content,
-        createParents: input.createParents ?? true,
-        autoFrontmatter: input.autoFrontmatter ?? true,
-      })
+      const outcome = await runTool(() =>
+        api.fsWrite({
+          path: input.path,
+          content: input.content,
+          createParents: input.createParents ?? true,
+          autoFrontmatter: input.autoFrontmatter ?? true,
+        }),
+      )
+      if (!outcome.ok) return toolFailure(outcome.text)
+      const receipt = outcome.value
       return { content: [{ type: 'text', text: renderWrite(receipt) }], details: receipt }
     },
   }
@@ -149,13 +219,17 @@ export function createTools(): AgentTool[] {
         expectRev?: number
       }
       assertReadable(input.path)
-      const receipt = await api.fsEdit({
-        path: input.path,
-        oldString: input.oldString,
-        newString: input.newString,
-        replaceAll: input.replaceAll,
-        expectRev: input.expectRev,
-      })
+      const outcome = await runTool(() =>
+        api.fsEdit({
+          path: input.path,
+          oldString: input.oldString,
+          newString: input.newString,
+          replaceAll: input.replaceAll,
+          expectRev: input.expectRev,
+        }),
+      )
+      if (!outcome.ok) return toolFailure(outcome.text)
+      const receipt = outcome.value
       return {
         content: [
           { type: 'text', text: `已更新 ${receipt.path}（rev=${receipt.rev}）` },
@@ -170,14 +244,18 @@ export function createTools(): AgentTool[] {
     label: '查找路径',
     description: '按路径模式查找文件或目录，最多 200 条。用于确认某类文档是否存在。',
     parameters: Type.Object({
-      pattern: Type.String({ description: 'GLOB 模式，如 /life/diary/*.md' }),
-      root: Type.Optional(Type.String({ description: '限定根目录，默认 /life' })),
+      pattern: Type.String({
+        description: 'GLOB 模式：绝对路径（如 /life/diary/*.md）或相对模式（配合 root）',
+      }),
+      root: Type.Optional(Type.String({ description: '相对模式的根目录，默认 /life' })),
       caseSensitive: Type.Optional(Type.Boolean({ description: '是否区分大小写' })),
     }),
     execute: async (_toolCallId, params) => {
       const input = params as { pattern: string; root?: string; caseSensitive?: boolean }
       assertReadableGlob(input.pattern, input.root)
-      const entries = await api.fsGlob(input)
+      const outcome = await runTool(() => api.fsGlob(input))
+      if (!outcome.ok) return toolFailure(outcome.text)
+      const entries = outcome.value
       return { content: [{ type: 'text', text: renderGlob(entries) }], details: entries }
     },
   }
@@ -189,6 +267,9 @@ export function createTools(): AgentTool[] {
     parameters: Type.Object({
       pattern: Type.String({ description: '要搜索的文字' }),
       path: Type.Optional(Type.String({ description: '限定路径或目录，默认 /life' })),
+      type: Type.Optional(
+        Type.String({ description: '限定文档类型：note/todo/event/contact/diary' }),
+      ),
       maxResults: Type.Optional(Type.Number({ description: '最多返回条数，上限 200' })),
       contextLines: Type.Optional(Type.Number({ description: '上下文行数，上限 3' })),
     }),
@@ -196,11 +277,14 @@ export function createTools(): AgentTool[] {
       const input = params as {
         pattern: string
         path?: string
+        type?: string
         maxResults?: number
         contextLines?: number
       }
       if (input.path) assertReadable(input.path)
-      const result = await api.fsGrep(input)
+      const outcome = await runTool(() => api.fsGrep(input))
+      if (!outcome.ok) return toolFailure(outcome.text)
+      const result = outcome.value
       return { content: [{ type: 'text', text: renderGrep(result) }], details: result }
     },
   }

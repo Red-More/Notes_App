@@ -138,7 +138,7 @@ export interface VfsGrepHit {
   preview: string
 }
 
-/** `fs_grep` 响应；P1 走 LIKE 回退，`fallback` 恒为 true。 */
+/** `fs_grep` 响应；`fallback=true` 表示本次由 LIKE 回退完成（FTS 未命中或不可用）。 */
 export interface VfsGrepResponse {
   total: number
   hits: VfsGrepHit[]

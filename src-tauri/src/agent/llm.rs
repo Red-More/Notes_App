@@ -535,9 +535,7 @@ pub async fn run(
         params,
     };
     let result = match (entry.format, stream) {
-        (ApiFormat::OpenAiChat, true) => {
-            openai_stream(state, &key, &prepared, &cancel, emit).await
-        }
+        (ApiFormat::OpenAiChat, true) => openai_stream(state, &key, &prepared, &cancel, emit).await,
         (ApiFormat::OpenAiChat, false) => openai_json(state, &key, &prepared, &cancel, emit).await,
         (ApiFormat::OpenAiResponses, true) => {
             responses_stream(state, &key, &prepared, &cancel, emit).await
@@ -1863,4 +1861,3 @@ async fn anthropic_json(
     });
     Ok(())
 }
-

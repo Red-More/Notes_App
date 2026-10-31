@@ -182,12 +182,60 @@ fn write_edit_read_grep_roundtrip() {
             path: Some("/life/diary".into()),
             max_results: None,
             context_lines: None,
+            doc_type: None,
         })
         .expect("grep should succeed");
     assert_eq!(grep.total, 1);
-    assert!(grep.fallback, "P1 grep must report LIKE fallback");
+    assert!(!grep.fallback, "FTS must answer the query once M1 is live");
     assert_eq!(grep.hits[0].rev, 2);
     assert_eq!(grep.hits[0].path, "/life/diary/today.md");
+}
+
+#[test]
+fn glob_accepts_absolute_and_relative_patterns() {
+    let mut vfs = test_vfs();
+    write_file(
+        &mut vfs,
+        "todos/2026-10-31",
+        "- [ ] 买牛奶",
+        WriteSource::Agent,
+    );
+
+    let absolute = vfs
+        .glob(GlobRequest {
+            pattern: "/life/todos/*.md".into(),
+            root: None,
+            case_sensitive: None,
+        })
+        .expect("absolute patterns used by the model must work");
+    assert_eq!(absolute.len(), 1);
+    assert_eq!(absolute[0].path, "/life/todos/2026-10-31.md");
+
+    let relative = vfs
+        .glob(GlobRequest {
+            pattern: "*.md".into(),
+            root: Some("/life/todos".into()),
+            case_sensitive: None,
+        })
+        .expect("relative patterns with root must keep working");
+    assert_eq!(relative.len(), 1);
+
+    assert!(
+        vfs.glob(GlobRequest {
+            pattern: "/etc/*".into(),
+            root: None,
+            case_sensitive: None,
+        })
+        .is_err(),
+        "absolute patterns outside /life must be rejected"
+    );
+    assert!(vfs
+        .glob(GlobRequest {
+            pattern: "../*.md".into(),
+            root: None,
+            case_sensitive: None,
+        })
+        .is_err());
 }
 
 #[test]
@@ -595,9 +643,7 @@ fn model_registry_starts_empty_and_persists_crud() {
     assert_eq!(edited.model_id, "demo-model-2");
     assert!(edited.full_url);
     assert_eq!(
-        model_store::resolve(vfs.conn(), &first.id)
-            .unwrap()
-            .format,
+        model_store::resolve(vfs.conn(), &first.id).unwrap().format,
         ApiFormat::AnthropicMessages
     );
 
@@ -715,10 +761,7 @@ fn model_endpoints_cover_three_formats() {
             full_url: false,
             model_id: "demo-model".into(),
         };
-        assert_eq!(
-            model_store::endpoint(&entry),
-            format!("{base_url}{suffix}")
-        );
+        assert_eq!(model_store::endpoint(&entry), format!("{base_url}{suffix}"));
         let full = ModelEntry {
             full_url: true,
             ..entry
@@ -800,7 +843,10 @@ fn legacy_provider_settings_are_cleaned_once() {
         )
         .unwrap();
     assert_eq!(legacy_count, 0, "legacy settings must be deleted");
-    assert!(!store.has("deepseek"), "legacy provider key must be deleted");
+    assert!(
+        !store.has("deepseek"),
+        "legacy provider key must be deleted"
+    );
 
     // A real model added afterwards must survive a second cleanup call.
     let entry = add_model(&vfs, "新模型", "demo-model");
@@ -1132,4 +1178,331 @@ fn params_output_capability_maps_to_max_tokens() {
     let mut responses = serde_json::Map::new();
     params.apply_openai_responses(&mut responses);
     assert_eq!(responses["max_output_tokens"], 512);
+}
+
+// ---------------------------------------------------------------------------
+// M1 检索闭环：FTS 同事务维护、中文短词、type 过滤、回退与索引自愈
+// ---------------------------------------------------------------------------
+
+fn grep_vfs(
+    vfs: &VirtualFs,
+    pattern: &str,
+    path: Option<&str>,
+    doc_type: Option<&str>,
+) -> crate::vfs::types::GrepResponse {
+    vfs.grep(GrepRequest {
+        pattern: pattern.into(),
+        path: path.map(str::to_string),
+        max_results: Some(200),
+        context_lines: None,
+        doc_type: doc_type.map(str::to_string),
+    })
+    .expect("grep should succeed")
+}
+
+fn fts_row_exists(vfs: &VirtualFs, inode: i64) -> bool {
+    let count: i64 = vfs
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM fts_docs WHERE rowid = ?1",
+            params![inode],
+            |row| row.get(0),
+        )
+        .unwrap();
+    count > 0
+}
+
+#[test]
+fn fts_follows_write_edit_delete_and_restore() {
+    let mut vfs = test_vfs();
+    let doc = docs::create(&mut vfs, "note", "检索同步", "第一版有拉面", None, None).unwrap();
+    assert_eq!(grep_vfs(&vfs, "拉面", None, None).total, 1);
+    assert!(fts_row_exists(&vfs, doc.id));
+
+    docs::save(
+        &mut vfs,
+        doc.id,
+        None,
+        Some("第二版只有寿司".into()),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(
+        grep_vfs(&vfs, "拉面", None, None).hits.is_empty(),
+        "edited content must leave the index"
+    );
+    assert_eq!(grep_vfs(&vfs, "寿司", None, None).total, 1);
+
+    docs::delete_many(&mut vfs, &[doc.id]).unwrap();
+    assert!(
+        grep_vfs(&vfs, "寿司", None, None).hits.is_empty(),
+        "trashed documents must not be searchable"
+    );
+    assert!(!fts_row_exists(&vfs, doc.id));
+
+    docs::restore_many(&mut vfs, &[doc.id]).unwrap();
+    assert_eq!(grep_vfs(&vfs, "寿司", None, None).total, 1);
+    assert!(fts_row_exists(&vfs, doc.id));
+
+    docs::delete_many(&mut vfs, &[doc.id]).unwrap();
+    docs::purge_many(&mut vfs, &[doc.id]).unwrap();
+    assert!(
+        !fts_row_exists(&vfs, doc.id),
+        "purge must drop the index row"
+    );
+}
+
+#[test]
+fn fts_rollback_leaves_no_residue() {
+    let mut vfs = test_vfs();
+    let doc = docs::create(&mut vfs, "note", "回滚测试", "提交前的内容", None, None).unwrap();
+    {
+        let tx = vfs.conn_mut().transaction().unwrap();
+        crate::vfs::fts::index_document(&tx, doc.id, "脏内容").unwrap();
+        // Dropped without commit: blob and index must both roll back.
+    }
+    assert!(grep_vfs(&vfs, "脏内容", None, None).hits.is_empty());
+    assert_eq!(grep_vfs(&vfs, "提交前的内容", None, None).total, 1);
+}
+
+#[test]
+fn fts_recalls_two_character_chinese_words() {
+    let mut vfs = test_vfs();
+    let mut cases = Vec::new();
+    for (kind, title, body, term) in [
+        ("diary", "今日饮食", "今天吃了拉面，很满足", "拉面"),
+        ("note", "学习记录", "复盘今天的日语学习", "日语"),
+        ("contact", "张三", "电话 13800000000", "张三"),
+        ("note", "项目复盘", "预算可能要砍 20%", "预算"),
+    ] {
+        let doc = docs::create(&mut vfs, kind, title, body, None, None).unwrap();
+        cases.push((term, doc.path));
+    }
+
+    for (term, path) in cases {
+        let response = grep_vfs(&vfs, term, None, None);
+        assert!(
+            !response.fallback,
+            "{term:?} must be answered by FTS, not LIKE"
+        );
+        assert!(
+            response.hits.iter().any(|hit| hit.path == path),
+            "{term:?} should recall {path}"
+        );
+    }
+
+    // 复盘 appears in the body of the second document; keep the acceptance word covered.
+    let recap = grep_vfs(&vfs, "复盘", None, None);
+    assert!(!recap.fallback, "复盘 must be answered by FTS");
+    assert!(!recap.hits.is_empty(), "复盘 should recall the study note");
+}
+
+#[test]
+fn grep_type_filter_uses_meta_kind() {
+    let mut vfs = test_vfs();
+    let note = docs::create(&mut vfs, "note", "预算笔记", "预算复盘", None, None).unwrap();
+    let todo = docs::create(
+        &mut vfs,
+        "todo",
+        "预算待办",
+        "",
+        None,
+        Some(fields(&[("completed", Value::Bool(false))])),
+    )
+    .unwrap();
+
+    let all = grep_vfs(&vfs, "预算", None, None);
+    assert!(all.hits.iter().any(|hit| hit.path == note.path));
+    assert!(all.hits.iter().any(|hit| hit.path == todo.path));
+
+    let notes = grep_vfs(&vfs, "预算", None, Some("note"));
+    assert!(notes.hits.iter().all(|hit| hit.path == note.path));
+    assert!(notes.hits.iter().any(|hit| hit.path == note.path));
+
+    let todos = grep_vfs(&vfs, "预算", None, Some("todo"));
+    assert!(todos.hits.iter().all(|hit| hit.path == todo.path));
+    assert!(todos.hits.iter().any(|hit| hit.path == todo.path));
+
+    let contacts = grep_vfs(&vfs, "预算", None, Some("contact"));
+    assert!(contacts.hits.is_empty());
+}
+
+#[test]
+fn grep_falls_back_to_like_and_self_heals() {
+    let mut vfs = test_vfs();
+    let doc = docs::create(&mut vfs, "note", "索引自愈", "独有词 鲸落", None, None).unwrap();
+
+    // Simulate a missing index row: grep must still find it through LIKE.
+    vfs.conn()
+        .execute("DELETE FROM fts_docs WHERE rowid = ?1", params![doc.id])
+        .unwrap();
+    let stale = grep_vfs(&vfs, "鲸落", None, None);
+    assert_eq!(stale.total, 1);
+    assert!(stale.fallback, "missing index rows must report fallback");
+
+    // Startup repair restores the row; the next query goes through FTS.
+    crate::vfs::fts::rebuild_missing(vfs.conn()).unwrap();
+    let healed = grep_vfs(&vfs, "鲸落", None, None);
+    assert!(!healed.fallback, "repaired index must serve FTS hits");
+}
+
+#[test]
+fn empty_trash_drops_stale_index_rows() {
+    let mut vfs = test_vfs();
+    let first = docs::create(&mut vfs, "note", "回收站甲", "甲", None, None).unwrap();
+    let second = docs::create(&mut vfs, "note", "回收站乙", "乙", None, None).unwrap();
+    docs::delete_many(&mut vfs, &[first.id, second.id]).unwrap();
+
+    // Simulate rows left behind by a pre-M1 database.
+    vfs.conn()
+        .execute(
+            "INSERT INTO fts_docs (rowid, title, content) VALUES (?1, '', '甲')",
+            params![first.id],
+        )
+        .unwrap();
+    docs::empty_trash(&mut vfs).unwrap();
+
+    let rows: i64 = vfs
+        .conn()
+        .query_row("SELECT COUNT(*) FROM fts_docs", [], |row| row.get(0))
+        .unwrap();
+    let files: i64 = vfs
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM inodes WHERE kind = 'file' AND deleted = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 0, "empty_trash must drop every index row");
+    assert_eq!(files, 0, "trashed inodes must be removed");
+}
+
+#[test]
+fn fts_repair_drops_orphan_rows() {
+    let vfs = test_vfs();
+    vfs.conn()
+        .execute(
+            "INSERT INTO fts_docs (rowid, title, content) VALUES (999999, '', 'orphan')",
+            [],
+        )
+        .unwrap();
+    let (removed, added) = crate::vfs::fts::rebuild_missing(vfs.conn()).unwrap();
+    assert_eq!(removed, 1, "orphan FTS rows must be removed");
+    assert_eq!(added, 0, "no visible document is missing yet");
+}
+
+#[test]
+fn legacy_fts_table_definition_is_repaired() {
+    let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+    db::wal::configure(&conn).unwrap();
+    db::schema::migrate(&mut conn).unwrap();
+    // Recreate the v1 definition that breaks FTS5 deletes.
+    conn.execute_batch(
+        "DROP TABLE fts_docs;
+         CREATE VIRTUAL TABLE fts_docs USING fts5(
+             title, content, content_rowid=inode,
+             tokenize='unicode61 remove_diacritics 2'
+         );",
+    )
+    .unwrap();
+    assert!(db::schema::repair_search_index(&conn).unwrap());
+    conn.execute(
+        "INSERT INTO fts_docs (rowid, title, content) VALUES (1, '', 'x')",
+        [],
+    )
+    .unwrap();
+    conn.execute("DELETE FROM fts_docs WHERE rowid = 1", [])
+        .unwrap();
+}
+
+fn percentile(sorted: &[f64], ratio: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let index = ((sorted.len() as f64 * ratio).ceil() as usize).saturating_sub(1);
+    sorted[index.min(sorted.len() - 1)]
+}
+
+fn measure<F: FnMut()>(samples: &mut Vec<f64>, rounds: usize, mut run: F) {
+    for _ in 0..rounds {
+        let start = std::time::Instant::now();
+        run();
+        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
+}
+
+#[test]
+fn thousand_document_search_performance() {
+    let mut vfs = test_vfs();
+    let terms = [
+        "拉面", "复盘", "张三", "预算", "会议", "日语", "项目", "旅行",
+    ];
+    let kinds = ["note", "todo", "contact", "diary"];
+    for i in 0..1000 {
+        let term = terms[i % terms.len()];
+        let kind = kinds[i % kinds.len()];
+        let body = format!("第 {i} 条种子记录，关键词 {term}。\n这是用于千条检索基线的正文。");
+        let doc = docs::create(
+            &mut vfs,
+            kind,
+            &format!("种子{i}-{term}"),
+            &body,
+            None,
+            Some(fields(&[(
+                "tags",
+                Value::Array(vec![Value::String("种子".into())]),
+            )])),
+        )
+        .expect("seed document should be created");
+        assert!(fts_row_exists(&vfs, doc.id));
+    }
+
+    let mut grep_samples = Vec::new();
+    for term in terms {
+        measure(&mut grep_samples, 3, || {
+            grep_vfs(&vfs, term, None, None);
+        });
+    }
+    grep_samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    let mut index_samples = Vec::new();
+    measure(&mut index_samples, 10, || {
+        docs::index::query(&vfs, "tag", "种子", None, Some(200)).unwrap();
+    });
+    index_samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    let mut dir_samples = Vec::new();
+    measure(&mut dir_samples, 10, || {
+        vfs.read(ReadRequest {
+            path: "/life/notes".into(),
+            rev: None,
+            start_line: None,
+            end_line: None,
+            include_meta: None,
+        })
+        .unwrap();
+    });
+    dir_samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    println!(
+        "1000-doc seed: grep p50={:.1}ms p95={:.1}ms | index_query p50={:.1}ms p95={:.1}ms | dir p50={:.1}ms p95={:.1}ms",
+        percentile(&grep_samples, 0.50),
+        percentile(&grep_samples, 0.95),
+        percentile(&index_samples, 0.50),
+        percentile(&index_samples, 0.95),
+        percentile(&dir_samples, 0.50),
+        percentile(&dir_samples, 0.95),
+    );
+
+    assert!(
+        percentile(&grep_samples, 0.95) < 200.0,
+        "grep first screen must stay under 200ms at 1000 documents"
+    );
+    assert!(
+        percentile(&index_samples, 0.95) < 100.0,
+        "index_query must stay under 100ms at 1000 documents"
+    );
 }

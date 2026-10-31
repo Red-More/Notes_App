@@ -148,6 +148,7 @@ pub fn restore(vfs: &mut VirtualFs, version_id: i64) -> Result<super::types::Doc
     )?;
     meta::upsert(&tx, doc_id, &doc.path, &content)?;
     index::refresh(&tx, doc_id, &doc.path, &content)?;
+    crate::vfs::fts::index_document(&tx, doc_id, &content)?;
     tx.execute(
         "INSERT INTO version_meta
              (inode, rev, label, label_description, is_manual, created_at)

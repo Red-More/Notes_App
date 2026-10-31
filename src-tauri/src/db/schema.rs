@@ -7,9 +7,9 @@
 //! v1：inodes / blobs / meta / fts_docs + 默认目录。
 //! v2：软删时间、置顶位、版本台账、交叉索引、路径 ACL 预留表。
 //! v3：Agent 会话表（conversations / messages）与非密钥设置表（settings）。
-//! FTS5 触发器与索引维护仍留到 P2，grep 暂时走 LIKE 回退。
+//! FTS5 索引在应用层与 blobs 同事务维护（无触发器），schema 版本保持不变。
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 /// 当前 life.db schema 版本。
 pub const SCHEMA_VERSION: i64 = 3;
@@ -68,11 +68,12 @@ CREATE TABLE IF NOT EXISTS meta (
 CREATE INDEX IF NOT EXISTS idx_meta_kind_status ON meta(kind, status);
 CREATE INDEX IF NOT EXISTS idx_meta_due ON meta(due) WHERE due IS NOT NULL;
 
--- FTS5：P1 只建表，触发器与索引维护留到 P2；grep 先走 LIKE 回退。
+-- FTS5：检索索引，由应用层在写事务内同步维护（`vfs::fts`）。
+-- 索引文本对 CJK 逐字加空格，以支持中文短词；详见 `vfs/fts.rs` 的 ADR 说明。
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_docs USING fts5(
     title,
     content,
-    content_rowid=inode,
+    content_rowid=rowid,
     tokenize='unicode61 remove_diacritics 2'
 );
 ";
@@ -224,6 +225,35 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
         log::warn!("life.db schema v{version} is newer than supported v{SCHEMA_VERSION}");
     }
     Ok(())
+}
+
+/// 修复旧库的 `fts_docs` 定义：`content_rowid=inode` 在没有外部内容表时
+/// 会让 FTS5 的删除路径引用不存在的列。该表是派生索引，直接重建并由启动
+/// 巡检回填，不改变 `user_version`。返回是否执行了重建。
+pub fn repair_search_index(conn: &Connection) -> rusqlite::Result<bool> {
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'fts_docs'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(sql) = sql else {
+        return Ok(false);
+    };
+    if !sql.contains("content_rowid=inode") {
+        return Ok(false);
+    }
+    conn.execute_batch(
+        "DROP TABLE fts_docs;
+         CREATE VIRTUAL TABLE fts_docs USING fts5(
+             title,
+             content,
+             content_rowid=rowid,
+             tokenize='unicode61 remove_diacritics 2'
+         );",
+    )?;
+    Ok(true)
 }
 
 /// 确保 Notes 根目录存在并带有显示名（默认 `默认`）。

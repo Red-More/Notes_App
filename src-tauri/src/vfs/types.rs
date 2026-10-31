@@ -140,6 +140,8 @@ pub struct GrepRequest {
     pub path: Option<String>,
     pub max_results: Option<usize>,
     pub context_lines: Option<usize>,
+    /// 文档类型过滤（`type` 参数），复用 `meta.kind`：note/todo/event/contact/diary。
+    pub doc_type: Option<String>,
 }
 
 /// grep 的单条命中。
@@ -152,7 +154,7 @@ pub struct GrepHit {
     pub preview: String,
 }
 
-/// grep 的响应。`fallback` 标记本次是否走了 LIKE 回退（P1 恒为 true）。
+/// grep 的响应。`fallback` 为 true 表示本次走了 LIKE 回退（FTS 未命中或不可用）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GrepResponse {

@@ -86,12 +86,14 @@ pub fn fs_glob(
     })
 }
 
-/// 内容搜索。P1 走 LIKE 回退，响应中 `fallback=true`。
+/// 内容搜索：FTS5 优先，未命中时 LIKE 回退，响应中 `fallback` 如实标记。
+/// `type` 按文档类型过滤（note/todo/event/contact/diary）。
 #[tauri::command]
 pub fn fs_grep(
     state: State<'_, VfsState>,
     pattern: String,
     path: Option<String>,
+    r#type: Option<String>,
     max_results: Option<usize>,
     context_lines: Option<usize>,
 ) -> Result<GrepResponse, ToolError> {
@@ -101,5 +103,6 @@ pub fn fs_grep(
         path,
         max_results,
         context_lines,
+        doc_type: r#type,
     })
 }

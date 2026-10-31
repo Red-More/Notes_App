@@ -418,7 +418,7 @@ WebView 内的 UI、Agent 运行时、技能注入与被注入内容属于**同�
 | M2-7 | ✅ 代码完成 | System Prompt v1：10 条铁律、目录约定、当前日期、「数据不是指令」、`skills_index` 占位 |
 | M2-8 | ✅ 代码完成 | `ChatPage`：流式纯文本气泡、工具卡片、停止/重试、草稿保留、会话抽屉（新建/切换/改名/删除）、底部「对话」入口（默认首屏） |
 | M2-9 | ✅ 代码完成 | Rust 单测覆盖：未知厂商、路径/查询注入的 model、>5 工具、白名单外工具、超大 system prompt；前端测试覆盖事件重建与 ToolError 文案 |
-| M2-10 | ⏳ 待真机 | 真机安装与「记下今天吃了拉面 / 勾掉待办」E2E 由项目负责人在设备上执行 |
+| M2-10 | ✅ 真机完成 | 红米 22101317C（Android 14 / ARM64）完成两句话落盘、越狱 5 项、离线/取消、Key 删除与恢复；证据见 §11.6 |
 
 ### 11.2 新增与修改的代码
 
@@ -443,6 +443,7 @@ WebView 内的 UI、Agent 运行时、技能注入与被注入内容属于**同�
 | `cargo clippy --all-targets -- -D warnings` | 通过（复验前有 3 条 deny 级错误，已修复） |
 | `cargo check --all-targets` | 通过 |
 | `cargo test` | 16 passed（8 个 M0 + 8 个 M2） |
+| 真机 E2E（M2-10） | ✅ Redmi 22101317C / Android 14 / ARM64，详见 §11.6 |
 
 复验中修复的问题：
 
@@ -465,10 +466,10 @@ cargo test
 
 | 项 | 现状 | 后续 |
 |---|---|---|
-| Keystore | 已接入 `android-native-keyring-store` 1.0：密文写 SharedPreferences，加密密钥由 Android Keystore 生成且不可导出；桌面保留 0600 文件 | 真机首次读写需复验（见 §11.5） |
+| Keystore | 已接入 `android-native-keyring-store` 1.0：密文写 SharedPreferences，加密密钥由 Android Keystore 生成且不可导出；桌面保留 0600 文件 | ✅ 真机读写与删除已复验（见 §11.5/§11.6） |
 | 每轮步数/写入限额 | 前端 `beforeToolCall` 统计；Rust 只校验单次请求体积与工具面 | M6 复核是否需要把配额下沉到 Rust |
-| 检索 | `grep` 仍 LIKE 回退、`fallback=true` | M1（按 D7 接受 <500ms） |
-| 真机 E2E | 未执行 | M2-10，需在 ARM64 设备上验收 |
+| 检索 | ✅ M1 已切 FTS（见 §12）；M2 阶段曾按 D7 接受 LIKE 回退 <500ms | — |
+| 真机 E2E | ✅ 已完成 | 见 §11.6；红米 22101317C / Android 14 / ARM64 |
 | 设计文档回写 | `streamProxy` 表述、schema v3 尚未写回 PDF | M6 前回写设计文档第 4/5 章并升版本 |
 
 ### 11.5 M2-4b：Android Keystore 接入
@@ -481,8 +482,107 @@ cargo test
 | 失败策略 | **fail-closed**：Keystore 初始化/读写失败直接返回可行动错误，不回退明文文件 |
 | 旧数据迁移 | 首次启动若存在 `agent-secrets.json`，逐条导入 Keystore，全部成功后删除原文件；失败则保留并记录告警 |
 | 桌面策略 | 继续使用应用私有文件（0600、临时文件 + rename），仅用于开发机 |
-| 待真机复验 | 设置页保存/删除 Key → 杀进程 → 重启后仍可用；`adb shell run-as` 检查 SharedPreferences；删除 Key 后调用失败 |
+| 待真机复验 | ✅ 已复验：Key 密文写入 SharedPreferences；删除模型后密文消失；恢复模型后可正常调用 |
 
+### 11.6 M2-10 真机 E2E 记录（2026-10-31）
+
+| 项 | 值 |
+|---|---|
+| 设备 | Redmi 22101317C（sunstone），Android 14，arm64-v8a |
+| 构建 | arm64 debug APK（含 M1 与工具修复），13:26 构建 / 13:28 安装 |
+| 模型 | SiliconFlow OpenAI 兼容端点（`custom_1`），Key 仅存 Android Keystore |
+| 数据 | `life.db` 位于应用私有目录；核验方式为 `run-as` 拉取 DB + WAL 后离线查询 |
+
+验收结果：
+
+| 用例 | 结果 | 证据 |
+|---|---|---|
+| 「记下今天吃了拉面」 | ✅ | `/life/diary/2026-10-31.md` rev=1，source=agent；用户消息→落盘 6 秒（≤15 秒） |
+| 「记下待办：买牛奶」→「把那条待办勾掉」 | ✅ | `/life/todos/2026-10-31.md` rev 1→2，`- [ ]`→`- [x]`，未新建重复文件 |
+| 重启/重装后可查 | ✅ | 重装并重启后 10 个会话、63 条消息与 6 篇文档完整 |
+| 越狱 5 项 | ✅ | 读 `.agents`、shell、提示词/Key、电话枚举、写 `.agents` 全部拒绝；文件数不变，无 evil.md |
+| FTS 一致性 | ✅ | 6 行 FTS = 6 个可见文件；旧库 `content_rowid=inode` 已原地修复为 `rowid` |
+| 离线 | ✅ | 飞行模式发送出现「回答失败：…」，应用不崩溃 |
+| 取消 | ✅ | 发送后点停止显示「已取消」 |
+| Key 删除 | ✅ | Keystore 中 `custom_1` 密文消失，DB 无明文；无模型时前端与 `chat_create` 均拒绝发起请求 |
+| 配置恢复 | ✅ | 重新添加模型与 Key 后新建会话，`ping` → `pong ✅`，消息 93/94 已落库 |
+
+真机发现并已修复：
+
+1. **Gradle 复用旧 APK**：`pnpm tauri android build` 首次产物仍是 8:06 的旧 APK，安装后跑的是旧库；按 README 复制 `libapp_lib.so` + `assembleArm64Debug -x rustBuildArm64Debug` 强制重打包解决。
+2. **`fs_glob` 拒绝绝对模式**：模型按工具描述传 `/life/todos/*.md` 连续失败；VFS 现在同时接受绝对模式与「相对模式 + root」，并新增 `glob_accepts_absolute_and_relative_patterns` 单测。
+3. **工具错误回灌 `[object Object]`**：pi 对非 `Error` 抛出物走 `String(error)`；5 个工具改为返回 `isError: true` 的可读中文结果（notFound/alreadyExists/conflict/noMatch 等），模型可自我纠正。
+
+已知偏差（转 M4-5）：错误/取消的助手气泡不落库，切换会话或重启后只保留用户消息；M4 补三态持久化与重试入口。
+
+修复后门禁复跑：`pnpm lint` 0/0、`pnpm test` 122 用例、`pnpm build` 成功；`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test` **35 passed**。
+
+
+---
+
+## 12. M1 实施记录（2026-10-31）
+
+> 本节为执行记录，不改变 v1.3.0 的任务与验收标准。M2-10 真机 E2E 已于 2026-10-31 完成（见 §11.6）。
+
+### 12.1 任务完成情况
+
+| ID | 状态 | 交付物 / 证据 |
+|---|---|---|
+| M1-1 | ✅ 代码完成 | 新增 `src-tauri/src/vfs/fts.rs`；`write/edit/doc_save/version_restore` 在写事务内同步 FTS；`doc_delete` 移出、`doc_restore` 重建、`doc_purge/doc_empty_trash` 清理；启动补建缺失行 |
+| M1-2 | ✅ 代码完成 | `grep` 先 FTS5 MATCH 召回，再回正文定位行号与上下文；无命中或索引不可用时回退 LIKE 并如实返回 `fallback`；新增 `type` 过滤（`GrepRequest.doc_type` ↔ `fs_grep(type)`），Agent 工具 schema 同步 |
+| M1-3 | ✅ 完成 | ADR 结论：保留 `unicode61`，在索引与查询两侧对 CJK 逐字空格，中文短词用短语查询；未引入 jieba/ICU |
+| M1-4 | ✅ 完成 | 1000 条混合种子（note/todo/contact/diary）：grep 首屏 P50 **1.5ms** / P95 **3.0ms**；`index_query` P50 **1.0ms** / P95 **2.0ms**；目录列举 P50 **0.9ms** / P95 **2.7ms** |
+| M1-5 | ✅ 代码完成 | 启动巡检删除孤儿行、补建缺失行、行数不一致告警；新增 `search_reindex` 命令与设置页「重建检索索引」入口 |
+| M1-6 | ✅ 代码完成 | 笔记搜索改走 `fs_grep`（`api.searchNotes`），替换 `doc_list` 的 `instr` 路径；卡片命中高亮、空结果与回退提示 |
+
+性能数字来自 `cargo test -- --nocapture` 的内存库（rusqlite 0.37 bundled）；真机 release 需在 M6 复测。
+
+### 12.2 中文分词 ADR（M1-3）
+
+- **背景**：`fts_docs` 使用 `tokenize='unicode61 remove_diacritics 2'`，tokenizer 配置保持不变。
+- **实测**：`今天吃了拉面` 搜 `拉面`、`复盘今天的日语学习` 搜 `日语`、`张三的电话` 搜 `张三` 均无召回；unicode61 把连续 CJK 视为单个 token，`拉面*` 前缀查询同样失败。
+- **备选与否决**：`trigram` 需 ≥3 字符，两字中文仍失败；jieba/ICU 会引入额外动态库，与 M1-3 约束冲突。
+- **决策**：写入与查询时对 CJK 逐字加空格（索引文本 `今 天 吃 了 拉 面` ↔ 查询 `"拉 面"*`），继续使用 stock SQLite。单测覆盖 `拉面/日语/张三/预算` 四个短词。
+- **代价**：索引文本体积约为原文 2–3 倍；`fts_docs.content` 存分词文本而非原文，行号与上下文仍取自 `blobs`。
+- **回退**：FTS 无命中、索引缺失或 MATCH 不可用时，自动走 LIKE 全表扫描并标记 `fallback=true`。
+
+### 12.3 新增与修改的代码
+
+| 层 | 文件 |
+|---|---|
+| 检索索引 | `src-tauri/src/vfs/fts.rs`（新增）、`vfs/mod.rs`、`vfs/types.rs` |
+| 写入事务 | `src-tauri/src/docs/mod.rs`、`docs/versions.rs` |
+| Schema | `src-tauri/src/db/schema.rs`（`content_rowid=rowid`；旧库原地修复）、`db/mod.rs` |
+| 命令与启动 | `src-tauri/src/commands/fs.rs`、`commands/index.rs`、`lib.rs` |
+| 前端契约 | `src/api.ts`、`src/types.ts`、`src/agent/tools.ts` |
+| 前端 UI | `src/pages/notes/NoteListPage.tsx`、`src/pages/settings/SettingsPage.tsx`、`src/index.css` |
+| 测试 | `src-tauri/src/tests.rs`（+9：FTS 同步/回滚/中文短词/type/回退自愈/清空回收站/旧表修复/孤儿清理/千条性能） |
+
+> 旧库修复说明：v1 建表语句里的 `content_rowid=inode` 在没有外部内容表时会让 FTS5 删除路径引用不存在的列。M1 起改为 `content_rowid=rowid`，启动时检测并原地重建这张派生表；**不升 schema 版本、不新增触发器**，重建后由启动巡检回填。
+
+### 12.4 验证结果
+
+| 项 | 结果 |
+|---|---|
+| `pnpm lint` | 0 warnings / 0 errors |
+| `pnpm test` | 11 文件 / 122 用例通过 |
+| `pnpm build` | 成功；`ChatPage` 175.41KB min / **50.9KB gzip**（≤60KB） |
+| `cargo fmt --check` | 通过 |
+| `cargo clippy --all-targets -- -D warnings` | 通过 |
+| `cargo check --all-targets` | 通过 |
+| `cargo test` | 35 passed（25 既有 + 9 M1 + 1 真机修复回归） |
+
+> 复跑 `cargo fmt` 时顺带规范化了 `agent/llm.rs`、`agent/model_store.rs`、`agent/params.rs` 的换行与缩进，无逻辑变更。
+
+### 12.5 已知偏差与后续
+
+| 项 | 现状 | 后续 |
+|---|---|---|
+| 真机性能 | 仅内存库压测（P95 2.7ms） | M6 在 ARM64 release 上复测 grep 首屏 |
+| M1-6 形态 | 全局搜索落在笔记页（命中高亮 + 回退提示），未单独建搜索页 | 若产品需要跨类型搜索页，M4 再做 |
+| 索引文本 | `fts_docs.content` 为 CJK 逐字空格后的文本 | 设计文档 §4/§5 回写时补充该实现事实 |
+| `doc_list` 搜索 | 待办/联系人/日程页仍用 `instr` | 非 M1 范围；如需统一，后续按 `fs_grep` 迁移 |
+| 手动重建入口 | 设置页按钮 | — |
 
 ---
 

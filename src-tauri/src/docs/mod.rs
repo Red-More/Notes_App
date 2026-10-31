@@ -291,6 +291,7 @@ pub fn save(
     )?;
     meta::upsert(&tx, id, &new_path, &markdown)?;
     crate::vfs::index::refresh(&tx, id, &new_path, &markdown)?;
+    crate::vfs::fts::index_document(&tx, id, &markdown)?;
     tx.execute(
         "INSERT OR IGNORE INTO version_meta
              (inode, rev, label, label_description, is_manual, created_at)
@@ -312,6 +313,8 @@ pub fn delete_many(vfs: &mut VirtualFs, ids: &[i64]) -> Result<(), ToolError> {
              WHERE inode = ?2 AND kind = 'file' AND deleted = 0",
             params![now, id],
         )?;
+        // 回收站内容不可被检索；恢复时再重建索引行。
+        crate::vfs::fts::remove_document(&tx, *id)?;
     }
     tx.commit()?;
     Ok(())
@@ -339,6 +342,7 @@ pub fn restore_many(vfs: &mut VirtualFs, ids: &[i64]) -> Result<(), ToolError> {
             .optional()?;
         if let Some((path, content)) = row {
             crate::vfs::index::refresh(&tx, *id, &path, &content)?;
+            crate::vfs::fts::index_document(&tx, *id, &content)?;
         }
     }
     tx.commit()?;
@@ -349,6 +353,7 @@ pub fn restore_many(vfs: &mut VirtualFs, ids: &[i64]) -> Result<(), ToolError> {
 pub fn purge_many(vfs: &mut VirtualFs, ids: &[i64]) -> Result<(), ToolError> {
     let tx = vfs.conn_mut().transaction()?;
     for id in ids {
+        crate::vfs::fts::remove_document(&tx, *id)?;
         tx.execute(
             "DELETE FROM inodes WHERE inode = ?1 AND kind = 'file' AND deleted = 1",
             params![id],
@@ -360,6 +365,7 @@ pub fn purge_many(vfs: &mut VirtualFs, ids: &[i64]) -> Result<(), ToolError> {
 
 /// 清空回收站。
 pub fn empty_trash(vfs: &mut VirtualFs) -> Result<(), ToolError> {
+    crate::vfs::fts::remove_deleted(vfs.conn_mut())?;
     vfs.conn_mut()
         .execute("DELETE FROM inodes WHERE kind = 'file' AND deleted = 1", [])?;
     Ok(())

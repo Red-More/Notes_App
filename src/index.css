@@ -575,6 +575,22 @@ textarea {
   text-overflow: ellipsis;
 }
 
+/* Search hit highlight inside note cards (M1-6). */
+.search-hit {
+  background: var(--accent-weak);
+  color: var(--accent-deep);
+  border-radius: 3px;
+  padding: 0 1px;
+}
+
+/* Shown when fs_grep had to fall back to the LIKE scan. */
+.search-fallback-hint {
+  margin: 0 16px 8px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--text-3);
+}
+
 .note-card-meta {
   flex-shrink: 0;
   display: flex;

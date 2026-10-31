@@ -62,11 +62,27 @@ const SORT_DIR_DEFAULT: Record<SortKey, SortDir> = {
   size: 'desc',
 }
 
+/** Highlight the first case-insensitive occurrence of `needle` in `text`. */
+function Highlight({ text, needle }: { text: string; needle: string }) {
+  const query = needle.trim()
+  if (!query) return <>{text}</>
+  const index = text.toLowerCase().indexOf(query.toLowerCase())
+  if (index < 0) return <>{text}</>
+  return (
+    <>
+      {text.slice(0, index)}
+      <mark className="search-hit">{text.slice(index, index + query.length)}</mark>
+      {text.slice(index + query.length)}
+    </>
+  )
+}
+
 export default function NoteListPage({ isActive, version, onOpenNote, onOpenFolders }: Props) {
   const [notes, setNotes] = useState<Note[]>([])
   const [stats, setStats] = useState<FolderStats | null>(null)
   const [filter, setFilter] = useState<FolderFilter>('all')
   const [searchInput, setSearchInput, query] = useDebouncedSearch()
+  const [searchFallback, setSearchFallback] = useState(false)
   const [sortKey, setSortKey] = useState<SortKey>('updated')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
   const [sortOpen, setSortOpen] = useState(false)
@@ -83,14 +99,27 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
   const { largeTitleRef, searchWrapRef, scrollRef, contentShiftRef, scrollEl } =
     useCollapsibleHeader()
 
-  const load = useCallback(async () => {
-    try {
-      const list = await api.listNotes({
+  // Search goes through fs_grep (FTS5 with LIKE fallback); list mode is a plain doc query.
+  const fetchNotes = useCallback(
+    async (rawSearch: string) => {
+      const search = rawSearch.trim()
+      const filters = {
         folderId: typeof filter === 'number' ? filter : undefined,
         unclassified: filter === 'uncat' || undefined,
-        search: query || undefined,
-      })
-      setNotes(list)
+      }
+      if (search) {
+        return api.searchNotes({ search, ...filters })
+      }
+      return { notes: await api.listNotes(filters), fallback: false }
+    },
+    [filter],
+  )
+
+  const load = useCallback(async () => {
+    try {
+      const result = await fetchNotes(query)
+      setNotes(result.notes)
+      setSearchFallback(result.fallback)
       setStats(await api.listFolders())
     } catch (e) {
       console.error('加载笔记失败', e)
@@ -98,7 +127,7 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
     } finally {
       setLoading(false)
     }
-  }, [filter, query])
+  }, [fetchNotes, query])
 
   // Elastic overscroll shared by every list; the notes list also refreshes.
   const { pullDist, springing, refreshing } = useElasticOverscroll(scrollEl, {
@@ -118,13 +147,10 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
     let cancelled = false
     const run = async () => {
       try {
-        const list = await api.listNotes({
-          folderId: typeof filter === 'number' ? filter : undefined,
-          unclassified: filter === 'uncat' || undefined,
-          search: query || undefined,
-        })
+        const result = await fetchNotes(query)
         if (cancelled) return
-        setNotes(list)
+        setNotes(result.notes)
+        setSearchFallback(result.fallback)
         setVisible(PAGE)
         if (cancelled) return
         setStats(await api.listFolders())
@@ -139,7 +165,7 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
     return () => {
       cancelled = true
     }
-  }, [filter, query, version])
+  }, [fetchNotes, query, version])
 
   // Re-sort the current (already filtered/searched) result set on the client:
   // pinned notes stay on top, then the chosen dimension and direction apply.
@@ -399,6 +425,12 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
 
       <ChipRow items={tabs} value={filter} onChange={setFilter} />
 
+      {query && searchFallback && (
+        <div className="search-fallback-hint" role="status">
+          检索索引未命中，本次结果来自回退扫描。
+        </div>
+      )}
+
       <div className="page-scroll" ref={scrollRef}>
         {(pullDist > 0 || refreshing) && (
           <div className="pull-indicator">
@@ -433,9 +465,13 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
                     )}
                     <div className="note-card-title">
                       {note.isPinned === 1 && <span className="pin-badge">📌</span>}
-                      <span className="title-text">{note.title}</span>
+                      <span className="title-text">
+                        <Highlight text={note.title} needle={query} />
+                      </span>
                     </div>
-                    <div className="note-card-content">{note.content}</div>
+                    <div className="note-card-content">
+                      <Highlight text={note.content} needle={query} />
+                    </div>
                     <div className="note-card-meta">
                       <span className="note-card-time">{formatAmPmDateTime(note.updatedAt)}</span>
                       <span className="note-card-words">{note.content.length}字</span>

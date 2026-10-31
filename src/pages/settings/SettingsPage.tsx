@@ -29,6 +29,7 @@ import {
   type LayoutPrefs,
 } from '../../editor/layout'
 import { toast } from '../../toast'
+import { api } from '../../api'
 import AgentSettingsSection from './AgentSettingsSection'
 import {
   getMermaidEnhance,
@@ -136,6 +137,7 @@ export default function SettingsPage({ onBack }: Props) {
   const [layout, setLayout] = useState(() => getLayoutPrefs())
   const [hintFor, setHintFor] = useState<SaveStrategyKey | null>(null)
   const [tipFor, setTipFor] = useState<SaveStrategyKey | null>(null)
+  const [reindexing, setReindexing] = useState(false)
   const mermaidEnhance = useSyncExternalStore(
     subscribeMermaidEnhance,
     getMermaidEnhance,
@@ -210,6 +212,19 @@ export default function SettingsPage({ onBack }: Props) {
     setTipFor(null)
   }
 
+  const rebuildSearchIndex = async () => {
+    setReindexing(true)
+    try {
+      const count = await api.rebuildSearchIndex()
+      toast(`已重建 ${count} 篇文档的检索索引`)
+    } catch (e) {
+      console.error('重建检索索引失败', e)
+      toast('重建检索索引失败')
+    } finally {
+      setReindexing(false)
+    }
+  }
+
   return (
     <div className="editor-page">
       <div className="editor-topbar">
@@ -228,6 +243,22 @@ export default function SettingsPage({ onBack }: Props) {
         </div>
 
         <AgentSettingsSection />
+
+        <div className="settings-section-title">检索索引</div>
+        <div className="form-field">
+          <span className="form-label">全文搜索</span>
+          <p className="settings-note">
+            索引在每次写入时自动维护；若搜索结果异常，可手动重建。
+          </p>
+          <button
+            type="button"
+            className="restore-default"
+            onClick={() => void rebuildSearchIndex()}
+            disabled={reindexing}
+          >
+            {reindexing ? '正在重建…' : '重建检索索引'}
+          </button>
+        </div>
 
         <div className="settings-section-title">编辑与保存</div>
         <div className="form-field">

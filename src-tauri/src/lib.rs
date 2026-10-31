@@ -24,6 +24,21 @@ pub fn run() {
             if let Err(e) = vfs::index::rebuild_missing(&conn) {
                 eprintln!("life.db index rebuild failed: {e}");
             }
+            // 检索索引自愈：删除孤儿行、补建缺失行；FTS 行数与可见文件数不一致时告警。
+            match vfs::fts::rebuild_missing(&conn) {
+                Ok((removed, added)) if removed > 0 || added > 0 => {
+                    log::info!("search index repaired: removed={removed}, added={added}");
+                }
+                Ok(_) => {}
+                Err(e) => log::warn!("search index repair failed: {e}"),
+            }
+            match vfs::fts::stats(&conn) {
+                Ok((indexed, visible)) if indexed != visible => {
+                    log::warn!("search index mismatch: indexed={indexed}, visible={visible}")
+                }
+                Ok(_) => {}
+                Err(e) => log::warn!("search index stats failed: {e}"),
+            }
             app.manage(VfsState(Mutex::new(VirtualFs::new(conn))));
             // Agent 侧状态：HTTP 客户端、私有密钥文件、取消标记。
             let secret_path = app.path().app_data_dir()?.join("agent-secrets.json");
@@ -79,6 +94,7 @@ pub fn run() {
             commands::export::export_docs,
             commands::export::export_folder,
             commands::index::index_query,
+            commands::index::search_reindex,
             commands::agent::chat_list,
             commands::agent::chat_create,
             commands::agent::chat_rename,

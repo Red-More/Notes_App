@@ -13,6 +13,7 @@
 pub mod acl;
 pub mod cap_gate;
 pub mod error;
+pub mod fts;
 pub mod index;
 pub mod meta;
 pub mod types;
@@ -194,6 +195,7 @@ impl VirtualFs {
         )?;
         meta::upsert(&tx, inode, &path, &content)?;
         index::refresh(&tx, inode, &path, &content)?;
+        fts::index_document(&tx, inode, &content)?;
         record_version(&tx, inode, 1, &now_str)?;
         tx.commit()?;
 
@@ -278,6 +280,7 @@ impl VirtualFs {
         )?;
         meta::upsert(&tx, inode, &path, &replaced)?;
         index::refresh(&tx, inode, &path, &replaced)?;
+        fts::index_document(&tx, inode, &replaced)?;
         record_version(&tx, inode, next, &now_str)?;
         tx.commit()?;
 
@@ -289,10 +292,18 @@ impl VirtualFs {
     }
 
     /// 路径模式匹配，返回最多 200 条。
+    ///
+    /// `pattern` 支持两种写法：以 `/life` 开头的绝对模式（模型常这么写），
+    /// 或相对模式 + `root`（默认 `/life`）。两者最终都会落到同一个 GLOB 查询。
     pub fn glob(&self, req: GlobRequest) -> Result<Vec<GlobEntry>, ToolError> {
         let root = cap_gate::normalize_path(req.root.as_deref().unwrap_or(ROOT))?;
-        let pattern = cap_gate::validate_glob_pattern(&req.pattern)?;
-        let full_pattern = format!("{root}/{pattern}");
+        let raw_pattern = req.pattern.trim();
+        let full_pattern = if raw_pattern.starts_with('/') {
+            cap_gate::normalize_path(raw_pattern)?
+        } else {
+            let pattern = cap_gate::validate_glob_pattern(raw_pattern)?;
+            format!("{root}/{pattern}")
+        };
         let case_sensitive = req.case_sensitive.unwrap_or(true);
         // `.agents` 只读区排除：相对 pattern（如 .agents/*.md）一样到不了这里。
         let agents_pattern = format!("{ROOT}{AGENTS_DIR}/*");
@@ -328,8 +339,8 @@ impl VirtualFs {
         Ok(entries)
     }
 
-    /// 内容搜索。P1 尚未维护 FTS5 索引，因此统一走 LIKE/instr 回退，
-    /// 响应中 `fallback=true`；P2 接入触发器后可改为 FTS5 MATCH。
+    /// 内容搜索：优先 FTS5 MATCH，命中后回正文定位行号与上下文；索引无命中
+    /// 或不可用时回退到 LIKE 全表扫描，并在响应里如实标记 `fallback`。
     pub fn grep(&self, req: GrepRequest) -> Result<GrepResponse, ToolError> {
         let target = cap_gate::normalize_path(req.path.as_deref().unwrap_or(ROOT))?;
         let pattern = req.pattern.trim().to_string();
@@ -341,45 +352,91 @@ impl VirtualFs {
             .unwrap_or(DEFAULT_GREP_RESULTS)
             .clamp(1, MAX_GREP_RESULTS);
         let context = req.context_lines.unwrap_or(0).min(MAX_CONTEXT_LINES);
+        let scope = self.resolve_grep_scope(&target)?;
+        let needle = pattern.to_lowercase();
+        let doc_type = req
+            .doc_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
 
+        if let Some(match_expr) = fts::match_query(&pattern) {
+            // 索引缺失/损坏时静默回退，不让一次检索因为 FTS 状态而失败。
+            if let Ok(hits) =
+                self.grep_index(&match_expr, &scope, doc_type, &needle, max_results, context)
+            {
+                if !hits.is_empty() {
+                    return Ok(GrepResponse {
+                        total: hits.len(),
+                        hits,
+                        fallback: false,
+                    });
+                }
+            }
+        }
+
+        let hits = self.grep_like(&scope, doc_type, &needle, max_results, context)?;
+        Ok(GrepResponse {
+            total: hits.len(),
+            hits,
+            fallback: true,
+        })
+    }
+
+    /// 解析 grep 的检索范围：根目录 / 单文件 / 目录前缀。
+    fn resolve_grep_scope(&self, target: &str) -> Result<GrepScope, ToolError> {
+        if target == ROOT {
+            return Ok(GrepScope::Root);
+        }
+        let kind: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT kind FROM inodes WHERE path = ?1 AND deleted = 0",
+                params![target],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match kind.as_deref() {
+            Some("file") => Ok(GrepScope::File(target.to_string())),
+            Some(_) => Ok(GrepScope::Dir(target.to_string())),
+            None => Err(ToolError::NotFound {
+                path: target.to_string(),
+            }),
+        }
+    }
+
+    /// FTS 召回候选文档，再回正文逐行定位真实行号与上下文。
+    fn grep_index(
+        &self,
+        match_expr: &str,
+        scope: &GrepScope,
+        doc_type: Option<&str>,
+        needle: &str,
+        max_results: usize,
+        context: usize,
+    ) -> Result<Vec<GrepHit>, ToolError> {
         // `.agents` 只读区排除：即便调用方省略 path（默认全库检索）也到不了这里。
         let agents_pattern = format!("{ROOT}{AGENTS_DIR}/*");
         let agents_exact = format!("{ROOT}{AGENTS_DIR}");
         let mut sql = String::from(
             "SELECT i.path, i.head_rev, b.content
-             FROM inodes i
+             FROM fts_docs
+             JOIN inodes i ON i.inode = fts_docs.rowid
              JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
-             WHERE i.deleted = 0 AND i.kind = 'file'
-               AND instr(lower(b.content), lower(?1)) > 0
-               AND i.path NOT GLOB ?2 AND i.path != ?3",
+             LEFT JOIN meta m ON m.inode = i.inode
+             WHERE fts_docs MATCH ?
+               AND i.deleted = 0 AND i.kind = 'file'
+               AND i.path NOT GLOB ? AND i.path != ?",
         );
         let mut args: Vec<SqlValue> = vec![
-            SqlValue::Text(pattern.clone()),
+            SqlValue::Text(match_expr.to_string()),
             SqlValue::Text(agents_pattern),
             SqlValue::Text(agents_exact),
         ];
-
-        if target != ROOT {
-            let kind: Option<String> = self
-                .conn
-                .query_row(
-                    "SELECT kind FROM inodes WHERE path = ?1 AND deleted = 0",
-                    params![target],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            match kind.as_deref() {
-                Some("file") => {
-                    sql.push_str(" AND i.path = ?4");
-                    args.push(SqlValue::Text(target));
-                }
-                Some(_) => {
-                    sql.push_str(" AND i.path LIKE ?4 ESCAPE '\\'");
-                    let prefix = format!("{}%", cap_gate::escape_like(&format!("{target}/")));
-                    args.push(SqlValue::Text(prefix));
-                }
-                None => return Err(ToolError::NotFound { path: target }),
-            }
+        push_grep_scope(&mut sql, &mut args, scope);
+        if let Some(kind) = doc_type {
+            sql.push_str(" AND COALESCE(m.kind, '') = ?");
+            args.push(SqlValue::Text(kind.to_string()));
         }
         sql.push_str(" ORDER BY i.path ASC");
 
@@ -392,35 +449,81 @@ impl VirtualFs {
             ))
         })?;
 
-        let needle = pattern.to_lowercase();
         let mut hits = Vec::new();
         for row in rows {
             let (path, rev, content) = row?;
-            let lines: Vec<&str> = content.lines().collect();
-            for (index, line) in lines.iter().enumerate() {
-                if !line.to_lowercase().contains(needle.as_str()) {
-                    continue;
-                }
-                hits.push(GrepHit {
-                    path: path.clone(),
-                    rev,
-                    line: index + 1,
-                    preview: preview(&lines, index, context),
-                });
-                if hits.len() >= max_results {
-                    break;
-                }
-            }
-            if hits.len() >= max_results {
+            if scan_document(
+                &content,
+                &path,
+                rev,
+                needle,
+                context,
+                max_results,
+                &mut hits,
+            ) {
                 break;
             }
         }
+        Ok(hits)
+    }
 
-        Ok(GrepResponse {
-            total: hits.len(),
-            hits,
-            fallback: true,
-        })
+    /// LIKE 回退检索：索引不可用或未命中时仍保证可搜到。
+    fn grep_like(
+        &self,
+        scope: &GrepScope,
+        doc_type: Option<&str>,
+        needle: &str,
+        max_results: usize,
+        context: usize,
+    ) -> Result<Vec<GrepHit>, ToolError> {
+        let agents_pattern = format!("{ROOT}{AGENTS_DIR}/*");
+        let agents_exact = format!("{ROOT}{AGENTS_DIR}");
+        let mut sql = String::from(
+            "SELECT i.path, i.head_rev, b.content
+             FROM inodes i
+             JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
+             LEFT JOIN meta m ON m.inode = i.inode
+             WHERE i.deleted = 0 AND i.kind = 'file'
+               AND instr(lower(b.content), lower(?)) > 0
+               AND i.path NOT GLOB ? AND i.path != ?",
+        );
+        let mut args: Vec<SqlValue> = vec![
+            SqlValue::Text(needle.to_string()),
+            SqlValue::Text(agents_pattern),
+            SqlValue::Text(agents_exact),
+        ];
+        push_grep_scope(&mut sql, &mut args, scope);
+        if let Some(kind) = doc_type {
+            sql.push_str(" AND COALESCE(m.kind, '') = ?");
+            args.push(SqlValue::Text(kind.to_string()));
+        }
+        sql.push_str(" ORDER BY i.path ASC");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+
+        let mut hits = Vec::new();
+        for row in rows {
+            let (path, rev, content) = row?;
+            if scan_document(
+                &content,
+                &path,
+                rev,
+                needle,
+                context,
+                max_results,
+                &mut hits,
+            ) {
+                break;
+            }
+        }
+        Ok(hits)
     }
 
     /// 列举目录的直接子项；结果的 kind 区分 directory/file。
@@ -469,6 +572,57 @@ impl VirtualFs {
             .optional()
             .map_err(ToolError::from)
     }
+}
+
+/// grep 的检索范围：全库 / 单文件 / 目录前缀。
+enum GrepScope {
+    Root,
+    File(String),
+    Dir(String),
+}
+
+/// 把范围条件追加到 SQL 与参数列表；两个检索路径共用同一套语义。
+fn push_grep_scope(sql: &mut String, args: &mut Vec<SqlValue>, scope: &GrepScope) {
+    match scope {
+        GrepScope::Root => {}
+        GrepScope::File(path) => {
+            sql.push_str(" AND i.path = ?");
+            args.push(SqlValue::Text(path.clone()));
+        }
+        GrepScope::Dir(dir) => {
+            sql.push_str(" AND i.path LIKE ? ESCAPE '\\'");
+            let prefix = format!("{}%", cap_gate::escape_like(&format!("{dir}/")));
+            args.push(SqlValue::Text(prefix));
+        }
+    }
+}
+
+/// 在正文中定位命中行；达到上限时返回 true，调用方可提前结束扫描。
+fn scan_document(
+    content: &str,
+    path: &str,
+    rev: i64,
+    needle: &str,
+    context: usize,
+    max_results: usize,
+    hits: &mut Vec<GrepHit>,
+) -> bool {
+    let lines: Vec<&str> = content.lines().collect();
+    for (index, line) in lines.iter().enumerate() {
+        if !line.to_lowercase().contains(needle) {
+            continue;
+        }
+        hits.push(GrepHit {
+            path: path.to_string(),
+            rev,
+            line: index + 1,
+            preview: preview(&lines, index, context),
+        });
+        if hits.len() >= max_results {
+            return true;
+        }
+    }
+    false
 }
 
 /// Track a revision in `version_meta` so the UI can address (inode, rev).

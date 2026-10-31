@@ -215,25 +215,38 @@ export const api = {
   fsGrep: (params: {
     pattern: string
     path?: string
+    type?: string
     maxResults?: number
     contextLines?: number
   }) => invoke<VfsGrepResponse>('fs_grep', params),
 
   // ---- Notes (doc kind = note) ----
-  listNotes: async (params: {
-    folderId?: number
-    unclassified?: boolean
-    search?: string
-    sort?: NoteSort
-  }) => {
+  listNotes: async (params: { folderId?: number; unclassified?: boolean; sort?: NoteSort }) => {
     const docs = await docApi.list({
       kind: 'note',
       folderId: params.folderId,
       unclassified: params.unclassified,
-      search: params.search,
       sort: params.sort,
     })
     return docs.map(docToNote)
+  },
+  /**
+   * M1-6：笔记搜索统一走 `fs_grep`（FTS5 + LIKE 回退），不再依赖 doc_list 的 instr。
+   * grep 返回命中路径，再取同一批文档做领域映射与排序。
+   */
+  searchNotes: async (params: { search: string; folderId?: number; unclassified?: boolean }) => {
+    const hits = await api.fsGrep({ pattern: params.search, type: 'note', maxResults: 200 })
+    const docs = await docApi.list({
+      kind: 'note',
+      folderId: params.folderId,
+      unclassified: params.unclassified,
+      limit: 2000,
+    })
+    const matched = new Set(hits.hits.map((hit) => hit.path))
+    return {
+      notes: docs.filter((doc) => matched.has(doc.path)).map(docToNote),
+      fallback: hits.fallback,
+    }
   },
   getNote: async (id: number) => docToNote(await docApi.get(id)),
   createNote: async (params: { title: string; content: string; folderId: number | null }) =>
@@ -297,6 +310,9 @@ export const api = {
   renameDefaultFolder: (name: string) => docApi.renameDefaultFolder(name),
   deleteFolder: (id: number) => docApi.deleteFolder(id),
   setFolderPinned: (params: { id: number; pinned: boolean }) => docApi.setFolderPinned(params),
+
+  /** 手动重建检索索引（M1-5）；正常写入时索引自动维护。 */
+  rebuildSearchIndex: () => invoke<number>('search_reindex'),
 
   // ---- Todos (doc kind = todo) ----
   listTodos: async (search?: string) => {

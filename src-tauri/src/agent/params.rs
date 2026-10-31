@@ -306,16 +306,10 @@ fn check_range_f64(name: &str, value: Option<f64>, min: f64, max: f64) -> Result
 // ---------------------------------------------------------------------------
 
 pub fn get(conn: &Connection, model_entry_id: &str) -> LlmParams {
-    params_map(conn)
-        .remove(model_entry_id)
-        .unwrap_or_default()
+    params_map(conn).remove(model_entry_id).unwrap_or_default()
 }
 
-pub fn save(
-    conn: &Connection,
-    model_entry_id: &str,
-    params: &LlmParams,
-) -> Result<(), ToolError> {
+pub fn save(conn: &Connection, model_entry_id: &str, params: &LlmParams) -> Result<(), ToolError> {
     validate(params)?;
     let mut map = params_map(conn);
     if params.is_empty() {

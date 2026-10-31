@@ -449,8 +449,7 @@ fn read_models(conn: &Connection) -> Vec<ModelEntry> {
     items
         .into_iter()
         .map(|mut item| {
-            item.base_url =
-                normalize_anthropic_base(item.base_url, item.format, item.full_url);
+            item.base_url = normalize_anthropic_base(item.base_url, item.format, item.full_url);
             item
         })
         .filter(|item| match validate_base_url(&item.base_url) {
