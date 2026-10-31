@@ -280,6 +280,9 @@ export interface NewChatMessage {
 /** Wire protocol used by one user-defined model entry. */
 export type ModelApiFormat = 'openai-chat' | 'openai-responses' | 'anthropic-messages'
 
+/** Capability a model entry is configured for; only `chat` runs today. */
+export type ModelKind = 'chat' | 'image' | 'video' | 'tts' | 'classify'
+
 /** One user-added model; never contains the API key itself. */
 export interface AgentModelInfo {
   id: string
@@ -289,6 +292,17 @@ export interface AgentModelInfo {
   /** True when the URL is the complete endpoint (no path appended). */
   fullUrl: boolean
   modelId: string
+  kind: ModelKind
+  /** Capability hints mirrored from the per-model params. */
+  contextWindowInput?: number
+  contextWindowOutput?: number
+  supportsImages?: boolean
+  /** Optional USD prices mirrored into the capability matrix. */
+  inputPrice?: number
+  outputPrice?: number
+  imagePrice?: number
+  videoSecondPrice?: number
+  ttsKcharPrice?: number
   configured: boolean
 }
 
@@ -317,6 +331,12 @@ export interface LlmParams {
   toolRounds?: number
   supportsImages?: boolean
   thinkingMode?: 'default' | 'on' | 'off'
+  /** Optional USD prices; metadata only, never sent in request bodies. */
+  inputPrice?: number
+  outputPrice?: number
+  imagePrice?: number
+  videoSecondPrice?: number
+  ttsKcharPrice?: number
 }
 
 export interface ConnectionTestResult {

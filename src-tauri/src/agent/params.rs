@@ -66,6 +66,13 @@ pub struct LlmParams {
     pub tool_rounds: Option<u32>,
     pub supports_images: Option<bool>,
     pub thinking_mode: Option<ThinkingMode>,
+    // Cost layer (USD, optional): per 1M tokens, per image, per video second,
+    // per 1k spoken characters. Displayed by the capability matrix.
+    pub input_price: Option<f64>,
+    pub output_price: Option<f64>,
+    pub image_price: Option<f64>,
+    pub video_second_price: Option<f64>,
+    pub tts_kchar_price: Option<f64>,
 }
 
 impl LlmParams {
@@ -87,6 +94,11 @@ impl LlmParams {
             && self.tool_rounds.is_none()
             && self.supports_images.is_none()
             && self.thinking_mode.is_none()
+            && self.input_price.is_none()
+            && self.output_price.is_none()
+            && self.image_price.is_none()
+            && self.video_second_price.is_none()
+            && self.tts_kchar_price.is_none()
     }
 
     /// Output budget: an explicit `max_tokens` wins over the capability hint.
@@ -214,6 +226,16 @@ pub fn validate(params: &LlmParams) -> Result<(), ToolError> {
         if !(1..=500).contains(&rounds) {
             return Err(ToolError::invalid("工具调用轮次必须在 1–500 之间"));
         }
+    }
+    // Prices are metadata only, but must stay finite and non-negative.
+    for (name, price) in [
+        ("input_price", params.input_price),
+        ("output_price", params.output_price),
+        ("image_price", params.image_price),
+        ("video_second_price", params.video_second_price),
+        ("tts_kchar_price", params.tts_kchar_price),
+    ] {
+        check_range_f64(name, price, 0.0, 1_000_000.0)?;
     }
     if let Some(stop) = &params.stop {
         if stop.len() > MAX_STOP_ITEMS {

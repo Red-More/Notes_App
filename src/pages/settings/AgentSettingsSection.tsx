@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react'
 import { chatApi } from '../../api'
-import type { AgentModelInfo, AgentSettings, LlmParams, ModelApiFormat } from '../../types'
+import type {
+  AgentModelInfo,
+  AgentSettings,
+  LlmParams,
+  ModelApiFormat,
+  ModelKind,
+} from '../../types'
 import { toast } from '../../toast'
 import { friendlyError } from '../../utils'
 import { ConfirmDialog, Modal } from '../../components/ui'
@@ -11,6 +17,31 @@ const FORMAT_OPTIONS: Array<{ key: ModelApiFormat; label: string }> = [
   { key: 'openai-responses', label: 'OpenAI Responses API' },
   { key: 'anthropic-messages', label: 'Anthropic Messages' },
 ]
+
+/** Capability groups shown in the model list; only chat runs today. */
+const KIND_OPTIONS: Array<{ key: ModelKind; label: string }> = [
+  { key: 'chat', label: '对话模型' },
+  { key: 'image', label: '图像生成' },
+  { key: 'video', label: '视频生成' },
+  { key: 'tts', label: '文字转语音' },
+  { key: 'classify', label: '分类模型' },
+]
+
+const KIND_ORDER: ModelKind[] = KIND_OPTIONS.map((item) => item.key)
+
+function kindLabel(kind: ModelKind): string {
+  return KIND_OPTIONS.find((item) => item.key === kind)?.label ?? kind
+}
+
+/** Condensed capability hint for one model row. */
+function capabilityLabel(entry: AgentModelInfo): string {
+  const window = entry.contextWindowInput
+    ? entry.contextWindowInput >= 1000000
+      ? `上下文 ${entry.contextWindowInput / 1000000}M`
+      : `上下文 ${Math.round(entry.contextWindowInput / 1000)}k`
+    : '上下文未声明'
+  return `${window} · ${entry.supportsImages ? '图片输入' : '纯文本'}`
+}
 
 /** Base URL suggestions only; the app never ships preset models. */
 const URL_PRESETS: Array<{ label: string; baseUrl: string; format: ModelApiFormat }> = [
@@ -67,6 +98,7 @@ interface Draft {
   id: string
   label: string
   format: ModelApiFormat
+  kind: ModelKind
   baseUrl: string
   modelId: string
   fullUrl: boolean
@@ -85,6 +117,7 @@ function emptyDraft(): Draft {
     id: '',
     label: '',
     format: 'openai-chat',
+    kind: 'chat',
     baseUrl: '',
     modelId: '',
     fullUrl: false,
@@ -303,6 +336,61 @@ function ParamsEditor(props: {
       </div>
 
       <div className="form-field">
+        <span className="form-label">价格（USD，可选）</span>
+        {(draft.kind === 'chat' || draft.kind === 'classify') && (
+          <>
+            <NumberField
+              label="输入 / 百万 token"
+              value={params.inputPrice}
+              min={0}
+              max={1000000}
+              placeholder="留空表示未配置"
+              onChange={(inputPrice) => patchParams({ inputPrice })}
+            />
+            <NumberField
+              label="输出 / 百万 token"
+              value={params.outputPrice}
+              min={0}
+              max={1000000}
+              placeholder="留空表示未配置"
+              onChange={(outputPrice) => patchParams({ outputPrice })}
+            />
+          </>
+        )}
+        {draft.kind === 'image' && (
+          <NumberField
+            label="每张图片"
+            value={params.imagePrice}
+            min={0}
+            max={1000000}
+            placeholder="留空表示未配置"
+            onChange={(imagePrice) => patchParams({ imagePrice })}
+          />
+        )}
+        {draft.kind === 'video' && (
+          <NumberField
+            label="每秒视频"
+            value={params.videoSecondPrice}
+            min={0}
+            max={1000000}
+            placeholder="留空表示未配置"
+            onChange={(videoSecondPrice) => patchParams({ videoSecondPrice })}
+          />
+        )}
+        {draft.kind === 'tts' && (
+          <NumberField
+            label="每千字符"
+            value={params.ttsKcharPrice}
+            min={0}
+            max={1000000}
+            placeholder="留空表示未配置"
+            onChange={(ttsKcharPrice) => patchParams({ ttsKcharPrice })}
+          />
+        )}
+        <p className="settings-note">价格只用于成本统计，不会写入请求体。</p>
+      </div>
+
+      <div className="form-field">
         <span className="form-label">超参数</span>
         <NumberField
           label="Temperature"
@@ -382,6 +470,7 @@ export default function AgentSettingsSection() {
         id: entry.id,
         label: entry.label,
         format: entry.format,
+        kind: entry.kind,
         baseUrl: entry.baseUrl,
         modelId: entry.modelId,
         fullUrl: entry.fullUrl,
@@ -451,6 +540,10 @@ export default function AgentSettingsSection() {
 
   const testDraft = async () => {
     if (!draft) return
+    if (draft.kind !== 'chat') {
+      toast('媒体与分类模型暂不支持连接测试')
+      return
+    }
     const modelId = draft.modelId.trim()
     if (!draft.baseUrl.trim() || !modelId) {
       toast('请先填写请求地址与 Model ID')
@@ -510,6 +603,7 @@ export default function AgentSettingsSection() {
         baseUrl: draft.baseUrl.trim(),
         modelId,
         fullUrl: draft.fullUrl,
+        kind: draft.kind,
         apiKey: draft.apiKey.trim() || undefined,
       })
       await chatApi.paramsSet(saved.id, params)
@@ -537,6 +631,10 @@ export default function AgentSettingsSection() {
   }
 
   const testSaved = async (entry: AgentModelInfo) => {
+    if (entry.kind !== 'chat') {
+      toast('媒体与分类模型暂不支持连接测试')
+      return
+    }
     setBusy(true)
     try {
       const result = await chatApi.testConnection({
@@ -590,63 +688,74 @@ export default function AgentSettingsSection() {
 
       {settings && settings.models.length === 0 && (
         <p className="settings-note">
-          列表为空。添加模型后会出现在这里；未添加模型时无法发起对话。
+          列表为空。添加对话模型后即可开始聊天；图像/视频/语音/分类模型可先添加，接入后启用。
         </p>
       )}
 
-      {settings?.models.map((entry) => {
-        const active = settings.activeId === entry.id
+      {KIND_ORDER.map((kind) => {
+        const group = settings?.models.filter((entry) => entry.kind === kind) ?? []
+        if (group.length === 0) return null
         return (
-          <div key={entry.id} className={`model-row ${active ? 'active' : ''}`}>
-            <div className="model-info">
-              <div className="model-title">
-                {entry.label}
-                {active && <span className="model-badge">使用中</span>}
-              </div>
-              <div className="model-meta">
-                {entry.modelId} · {formatLabel(entry.format)}
-              </div>
-              <div className="model-meta">
-                {entry.fullUrl ? '完整地址' : 'Base URL'} · {entry.baseUrl}
-              </div>
-              <div className="model-meta">
-                {entry.configured ? '已配置 API Key' : '未配置 API Key'}
-              </div>
-            </div>
-            <div className="model-actions">
-              <button
-                type="button"
-                className="restore-default"
-                disabled={busy || active}
-                onClick={() => void activate(entry)}
-              >
-                使用
-              </button>
-              <button
-                type="button"
-                className="restore-default"
-                disabled={busy}
-                onClick={() => void testSaved(entry)}
-              >
-                测试
-              </button>
-              <button
-                type="button"
-                className="restore-default"
-                disabled={busy}
-                onClick={() => void openEdit(entry)}
-              >
-                编辑
-              </button>
-              <button
-                type="button"
-                className="restore-default danger"
-                disabled={busy}
-                onClick={() => setDeleteTarget(entry)}
-              >
-                删除
-              </button>
-            </div>
+          <div key={kind} className="model-group">
+            <div className="model-group-title">{kindLabel(kind)}</div>
+            {group.map((entry) => {
+              const active = kind === 'chat' && settings?.activeId === entry.id
+              return (
+                <div key={entry.id} className={`model-row ${active ? 'active' : ''}`}>
+                  <div className="model-info">
+                    <div className="model-title">
+                      {entry.label}
+                      {active && <span className="model-badge">使用中</span>}
+                      {kind !== 'chat' && <span className="model-badge">待接入</span>}
+                    </div>
+                    <div className="model-meta">
+                      {entry.modelId} · {formatLabel(entry.format)}
+                    </div>
+                    <div className="model-meta">{capabilityLabel(entry)}</div>
+                    <div className="model-meta">
+                      {entry.fullUrl ? '完整地址' : 'Base URL'} · {entry.baseUrl}
+                    </div>
+                    <div className="model-meta">
+                      {entry.configured ? '已配置 API Key' : '未配置 API Key'}
+                    </div>
+                  </div>
+                  <div className="model-actions">
+                    <button
+                      type="button"
+                      className="restore-default"
+                      disabled={busy || active || kind !== 'chat'}
+                      onClick={() => void activate(entry)}
+                    >
+                      使用
+                    </button>
+                    <button
+                      type="button"
+                      className="restore-default"
+                      disabled={busy || kind !== 'chat'}
+                      onClick={() => void testSaved(entry)}
+                    >
+                      测试
+                    </button>
+                    <button
+                      type="button"
+                      className="restore-default"
+                      disabled={busy}
+                      onClick={() => void openEdit(entry)}
+                    >
+                      编辑
+                    </button>
+                    <button
+                      type="button"
+                      className="restore-default danger"
+                      disabled={busy}
+                      onClick={() => setDeleteTarget(entry)}
+                    >
+                      删除
+                    </button>
+                  </div>
+                </div>
+              )
+            })}
           </div>
         )
       })}
@@ -663,7 +772,7 @@ export default function AgentSettingsSection() {
               <button
                 type="button"
                 className="btn btn-plain"
-                disabled={busy}
+                disabled={busy || draft.kind !== 'chat'}
                 onClick={() => void testDraft()}
               >
                 测试连接
@@ -692,6 +801,26 @@ export default function AgentSettingsSection() {
                 </option>
               ))}
             </select>
+          </div>
+
+          <div className="form-field">
+            <span className="form-label">模型能力（Model Kind）</span>
+            <select
+              className="form-input"
+              value={draft.kind}
+              onChange={(e) => patchDraft({ kind: e.target.value as ModelKind })}
+            >
+              {KIND_OPTIONS.map((item) => (
+                <option key={item.key} value={item.key}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+            {draft.kind !== 'chat' && (
+              <p className="settings-note">
+                媒体与分类能力将在对应管线接入后启用；当前只有对话模型可以设为「使用中」。
+              </p>
+            )}
           </div>
 
           <div className="form-field">

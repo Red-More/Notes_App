@@ -769,7 +769,7 @@ export default function ChatPage({ isActive }: Props) {
 
   const newConversation = useCallback(async () => {
     if (!settings?.activeId) {
-      toast('请先在设置 → AI 助理中添加并启用一个模型')
+      toast('请先在设置 → AI 助理中添加并启用一个对话模型')
       return
     }
     try {

@@ -52,9 +52,11 @@ export function profileFromSettings(
   entryId: string | undefined,
   model: string | undefined,
 ): AgentProfile | null {
+  // Only chat entries can back the agent; media kinds stay out of the transcript.
+  const chatModels = settings.models.filter((item) => item.kind === 'chat')
   const entry =
-    settings.models.find((item) => item.id === entryId) ??
-    settings.models.find((item) => item.id === settings.activeId)
+    chatModels.find((item) => item.id === entryId) ??
+    chatModels.find((item) => item.id === settings.activeId)
   if (!entry) return null
   return {
     provider: entry.id,

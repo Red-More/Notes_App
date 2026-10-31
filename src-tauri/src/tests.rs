@@ -5,11 +5,12 @@
 use rusqlite::params;
 use serde_json::Value;
 
-use crate::agent::model_store::{self, ApiFormat, ModelEntry, ModelInput};
+use crate::agent::model_store::{self, ApiFormat, ModelEntry, ModelInput, ModelKind};
 use crate::agent::params::{self, LlmParams};
 use crate::agent::{conversations, discovery, llm, secrets};
 use crate::db;
 use crate::docs::{self, types::DocFields, versions};
+use crate::media::{assets, jobs};
 use crate::skills::{self, SkillInput};
 use crate::vfs::cap_gate;
 use crate::vfs::error::ToolError;
@@ -491,6 +492,7 @@ fn add_model(vfs: &VirtualFs, label: &str, model_id: &str) -> ModelEntry {
             base_url: "https://api.example.com/v1".into(),
             model_id: model_id.into(),
             full_url: false,
+            kind: ModelKind::Chat,
         },
     )
     .expect("model should be created")
@@ -508,14 +510,20 @@ fn put_setting(vfs: &VirtualFs, key: &str, value: &str) {
 }
 
 #[test]
-fn schema_v3_creates_agent_tables() {
+fn schema_creates_agent_and_media_tables() {
     let vfs = test_vfs();
     let conn = vfs.conn();
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 3, "M2 requires schema v3");
-    for table in ["conversations", "messages", "settings"] {
+    assert_eq!(version, 4, "media tables require schema v4");
+    for table in [
+        "conversations",
+        "messages",
+        "settings",
+        "media_jobs",
+        "media_assets",
+    ] {
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
@@ -637,6 +645,7 @@ fn model_registry_starts_empty_and_persists_crud() {
             base_url: "https://api.example.com/v1".into(),
             model_id: "demo-model-2".into(),
             full_url: true,
+            kind: ModelKind::Chat,
         },
     )
     .unwrap();
@@ -676,6 +685,174 @@ fn model_registry_starts_empty_and_persists_crud() {
 }
 
 #[test]
+fn model_kind_gates_chat_activation() {
+    let vfs = test_vfs();
+    let image = model_store::save(
+        vfs.conn(),
+        ModelInput {
+            id: String::new(),
+            label: "图像模型".into(),
+            format: ApiFormat::OpenAiChat,
+            base_url: "https://api.example.com/v1".into(),
+            model_id: "image-demo".into(),
+            full_url: false,
+            kind: ModelKind::Image,
+        },
+    )
+    .unwrap();
+    assert!(
+        model_store::set_active(vfs.conn(), &image.id).is_err(),
+        "media entries cannot back the chat agent"
+    );
+    assert!(
+        model_store::settings(vfs.conn(), &[])
+            .unwrap()
+            .active_id
+            .is_none(),
+        "a media-only registry has no active chat model"
+    );
+
+    let chat = add_model(&vfs, "对话模型", "chat-demo");
+    let settings = model_store::settings(vfs.conn(), &[]).unwrap();
+    assert_eq!(settings.active_id.as_deref(), Some(chat.id.as_str()));
+    assert_eq!(settings.models[0].kind, ModelKind::Image);
+    assert_eq!(settings.models[1].kind, ModelKind::Chat);
+
+    // Turning the active chat entry into a media kind must heal the pointer.
+    model_store::save(
+        vfs.conn(),
+        ModelInput {
+            id: chat.id.clone(),
+            label: "对话模型".into(),
+            format: ApiFormat::OpenAiChat,
+            base_url: "https://api.example.com/v1".into(),
+            model_id: "chat-demo".into(),
+            full_url: false,
+            kind: ModelKind::Image,
+        },
+    )
+    .unwrap();
+    assert!(model_store::settings(vfs.conn(), &[])
+        .unwrap()
+        .active_id
+        .is_none());
+}
+
+#[test]
+fn media_jobs_persist_cancel_and_recover() {
+    let vfs = test_vfs();
+    let image = model_store::save(
+        vfs.conn(),
+        ModelInput {
+            id: String::new(),
+            label: "图像模型".into(),
+            format: ApiFormat::OpenAiChat,
+            base_url: "https://api.example.com/v1".into(),
+            model_id: "image-demo".into(),
+            full_url: false,
+            kind: ModelKind::Image,
+        },
+    )
+    .unwrap();
+    let job = jobs::submit(
+        vfs.conn(),
+        jobs::NewJob {
+            kind: jobs::JobKind::Image,
+            model_entry: image.id.clone(),
+            params: serde_json::json!({"prompt": "封面"}),
+        },
+    )
+    .unwrap();
+    assert_eq!(job.status, jobs::JobStatus::Pending);
+    assert_eq!(job.progress, 0);
+    assert_eq!(jobs::list(vfs.conn(), 10).unwrap().len(), 1);
+
+    // A chat entry cannot back an image job.
+    let chat = add_model(&vfs, "对话模型", "chat-demo");
+    assert!(jobs::submit(
+        vfs.conn(),
+        jobs::NewJob {
+            kind: jobs::JobKind::Image,
+            model_entry: chat.id,
+            params: Value::Null,
+        },
+    )
+    .is_err());
+
+    let running = jobs::mark_running(vfs.conn(), job.id).unwrap();
+    assert_eq!(running.status, jobs::JobStatus::Running);
+    jobs::set_progress(vfs.conn(), job.id, 40).unwrap();
+    assert_eq!(jobs::get(vfs.conn(), job.id).unwrap().progress, 40);
+
+    // A process restart cannot resume a running job.
+    assert_eq!(jobs::recover(vfs.conn()).unwrap(), 1);
+    let failed = jobs::get(vfs.conn(), job.id).unwrap();
+    assert_eq!(failed.status, jobs::JobStatus::Failed);
+    assert!(failed.error.is_some());
+
+    let second = jobs::submit(
+        vfs.conn(),
+        jobs::NewJob {
+            kind: jobs::JobKind::Image,
+            model_entry: image.id.clone(),
+            params: Value::Null,
+        },
+    )
+    .unwrap();
+    let cancelled = jobs::cancel(vfs.conn(), second.id).unwrap();
+    assert_eq!(cancelled.status, jobs::JobStatus::Cancelled);
+    assert!(jobs::cancel(vfs.conn(), second.id).is_err());
+
+    let third = jobs::submit(
+        vfs.conn(),
+        jobs::NewJob {
+            kind: jobs::JobKind::Image,
+            model_entry: image.id,
+            params: Value::Null,
+        },
+    )
+    .unwrap();
+    jobs::mark_running(vfs.conn(), third.id).unwrap();
+    let done = jobs::finish(
+        vfs.conn(),
+        third.id,
+        jobs::JobStatus::Succeeded,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(done.status, jobs::JobStatus::Succeeded);
+    assert_eq!(done.progress, 100);
+    // Terminal jobs are never touched by restart recovery.
+    assert_eq!(jobs::recover(vfs.conn()).unwrap(), 0);
+}
+
+#[test]
+fn media_assets_dedupe_by_content_hash() {
+    let vfs = test_vfs();
+    let dir = std::env::temp_dir().join(format!("notes-media-{}", std::process::id()));
+    let bytes = b"fake-png-bytes";
+    let first =
+        assets::store(vfs.conn(), &dir, bytes, "image/png", assets::AssetMeta::default()).unwrap();
+    let second =
+        assets::store(vfs.conn(), &dir, bytes, "image/png", assets::AssetMeta::default()).unwrap();
+    assert_eq!(first.id, second.id, "identical bytes share one asset row");
+    assert_eq!(first.sha256, second.sha256);
+    let file = assets::path(&dir, &first);
+    assert!(file.exists());
+    assert_eq!(std::fs::read(&file).unwrap(), bytes);
+    assert!(assets::store(
+        vfs.conn(),
+        &dir,
+        b"",
+        "image/png",
+        assets::AssetMeta::default()
+    )
+    .is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn model_registry_validates_base_url_and_labels() {
     let vfs = test_vfs();
     let invalid = [
@@ -698,6 +875,7 @@ fn model_registry_validates_base_url_and_labels() {
                 base_url: base_url.into(),
                 model_id: "demo".into(),
                 full_url: false,
+                kind: ModelKind::Chat,
             },
         );
         assert!(result.is_err(), "{base_url} must be rejected");
@@ -712,6 +890,7 @@ fn model_registry_validates_base_url_and_labels() {
             base_url: "https://api.example.com/v1".into(),
             model_id: String::new(),
             full_url: false,
+            kind: ModelKind::Chat,
         },
     );
     assert!(no_model.is_err(), "Model ID is required");
@@ -730,6 +909,7 @@ fn model_registry_validates_base_url_and_labels() {
             base_url: "https://api.example.com/v1".into(),
             model_id: "display-fallback".into(),
             full_url: false,
+            kind: ModelKind::Chat,
         },
     )
     .is_err());
@@ -761,6 +941,7 @@ fn model_endpoints_cover_three_formats() {
             base_url: base_url.into(),
             full_url: false,
             model_id: "demo-model".into(),
+            kind: ModelKind::Chat,
         };
         assert_eq!(model_store::endpoint(&entry), format!("{base_url}{suffix}"));
         let full = ModelEntry {
@@ -787,6 +968,7 @@ fn anthropic_base_url_normalizes_legacy_v1_suffix() {
             base_url: "https://api.example.com/v1".into(),
             model_id: "claude-demo".into(),
             full_url: false,
+            kind: ModelKind::Chat,
         },
     )
     .unwrap();
@@ -805,6 +987,7 @@ fn anthropic_base_url_normalizes_legacy_v1_suffix() {
             base_url: "https://api.example.com/v1/messages".into(),
             model_id: "claude-demo".into(),
             full_url: true,
+            kind: ModelKind::Chat,
         },
     )
     .unwrap();
@@ -928,6 +1111,7 @@ fn test_entry(id: &str, model_id: &str) -> ModelEntry {
         base_url: "https://api.example.com/v1".into(),
         full_url: false,
         model_id: model_id.into(),
+        kind: ModelKind::Chat,
     }
 }
 
@@ -1049,6 +1233,11 @@ fn llm_params_roundtrip_and_validation() {
         tool_rounds: Some(500),
         supports_images: Some(false),
         thinking_mode: Some(params::ThinkingMode::Default),
+        input_price: Some(0.5),
+        output_price: Some(1.5),
+        image_price: None,
+        video_second_price: None,
+        tts_kchar_price: None,
     };
     params::save(vfs.conn(), "custom_1", &valid).unwrap();
     let loaded = params::get(vfs.conn(), "custom_1");
@@ -1057,6 +1246,9 @@ fn llm_params_roundtrip_and_validation() {
 
     let mut invalid = valid.clone();
     invalid.temperature = Some(3.0);
+    assert!(params::save(vfs.conn(), "custom_1", &invalid).is_err());
+    let mut invalid = valid.clone();
+    invalid.image_price = Some(-1.0);
     assert!(params::save(vfs.conn(), "custom_1", &invalid).is_err());
     let mut invalid = valid.clone();
     invalid.timeout_seconds = Some(1);

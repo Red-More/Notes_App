@@ -14,6 +14,7 @@ import type {
   FolderStats,
   LlmParams,
   ModelApiFormat,
+  ModelKind,
   NewChatMessage,
   Note,
   NoteVersion,
@@ -549,6 +550,7 @@ export const chatApi = {
     baseUrl: string
     modelId: string
     fullUrl?: boolean
+    kind?: ModelKind
     apiKey?: string
   }) => invoke<AgentModelInfo>('agent_model_save', { input }),
   deleteModel: (id: string) => invoke<void>('agent_model_delete', { id }),

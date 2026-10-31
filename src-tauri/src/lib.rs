@@ -2,6 +2,7 @@ mod agent;
 mod commands;
 mod db;
 mod docs;
+mod media;
 mod skills;
 #[cfg(test)]
 mod tests;
@@ -42,6 +43,10 @@ pub fn run() {
             }
             // 首次启动写入 6 个内置技能；已种过则不再补，避免卸载后复活。
             let mut vault = VirtualFs::new(conn);
+            // 媒体作业不跨进程续跑：上次运行中的作业标记失败，排队中的保留。
+            if let Err(e) = media::jobs::recover(vault.conn()) {
+                log::warn!("media job recovery failed: {e}");
+            }
             if let Err(e) = skills::seed_builtins(&mut vault) {
                 eprintln!("life.db skill seed failed: {e}");
             }
@@ -53,6 +58,10 @@ pub fn run() {
             // Agent 侧状态：HTTP 客户端、私有密钥文件、取消标记。
             let secret_path = app.path().app_data_dir()?.join("agent-secrets.json");
             app.manage(agent::AgentState::new(secret_path));
+            // 媒体资产目录与作业取消标记；与 Agent run 生命周期解耦。
+            let media_root = app.path().app_data_dir()?.join("media");
+            std::fs::create_dir_all(&media_root)?;
+            app.manage(media::MediaState::new(media_root));
             // Log to the console and a rotating file under the OS log dir in
             // every build mode, so diagnostics exist on user machines too.
             let log_dir = app.path().app_log_dir()?;
@@ -131,6 +140,12 @@ pub fn run() {
             commands::agent::agent_params_set,
             commands::agent::agent_stream,
             commands::agent::agent_cancel,
+            commands::media::media_job_submit,
+            commands::media::media_job_list,
+            commands::media::media_job_get,
+            commands::media::media_job_cancel,
+            commands::media::media_asset_get,
+            commands::media::media_asset_path,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

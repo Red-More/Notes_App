@@ -17,6 +17,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use url::{Host, Url};
 
+use super::params;
 use super::secrets::SecretStore;
 use crate::vfs::error::ToolError;
 
@@ -71,6 +72,26 @@ impl ApiFormat {
     }
 }
 
+/// What a model entry is used for. Only `Chat` runs today; the other kinds are
+/// configured ahead of the media pipeline and stay inactive until wired up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelKind {
+    #[default]
+    Chat,
+    Image,
+    Video,
+    Tts,
+    Classify,
+}
+
+impl ModelKind {
+    /// Whether this entry can currently back the chat agent.
+    pub fn is_chat(self) -> bool {
+        matches!(self, Self::Chat)
+    }
+}
+
 /// One persisted model entry. API keys live in the OS secret store, never here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -83,6 +104,9 @@ pub struct ModelEntry {
     #[serde(default)]
     pub full_url: bool,
     pub model_id: String,
+    /// Capability this entry serves; older records default to chat.
+    #[serde(default)]
+    pub kind: ModelKind,
 }
 
 /// Input for creating or editing a model entry.
@@ -100,6 +124,8 @@ pub struct ModelInput {
     pub model_id: String,
     #[serde(default)]
     pub full_url: bool,
+    #[serde(default)]
+    pub kind: ModelKind,
 }
 
 /// Model row shown in settings; never contains the API key itself.
@@ -112,6 +138,17 @@ pub struct ModelView {
     pub base_url: String,
     pub full_url: bool,
     pub model_id: String,
+    pub kind: ModelKind,
+    /// Capability hints mirrored from `LlmParams` so the list can show them.
+    pub context_window_input: Option<u32>,
+    pub context_window_output: Option<u32>,
+    pub supports_images: Option<bool>,
+    /// Optional USD prices mirrored from `LlmParams`.
+    pub input_price: Option<f64>,
+    pub output_price: Option<f64>,
+    pub image_price: Option<f64>,
+    pub video_second_price: Option<f64>,
+    pub tts_kchar_price: Option<f64>,
     pub configured: bool,
 }
 
@@ -135,20 +172,10 @@ pub fn resolve(conn: &Connection, id: &str) -> Result<ModelEntry, ToolError> {
         .ok_or_else(|| ToolError::invalid(format!("未找到模型：{id}")))
 }
 
-/// Active model plus the full list and key status.
+/// Active chat model plus the full list and key status.
 pub fn settings(conn: &Connection, keys: &[(String, bool)]) -> Result<AgentSettings, ToolError> {
     let models = configs(conn)?;
-    let stored = read_setting(conn, KEY_ACTIVE)?;
-    let active_id = stored
-        .filter(|id| models.iter().any(|item| item.id == *id))
-        .or_else(|| models.first().map(|item| item.id.clone()));
-    // Heal a stale pointer left behind by a deleted model entry.
-    if active_id.as_deref() != read_setting(conn, KEY_ACTIVE)?.as_deref() {
-        match &active_id {
-            Some(id) => write_setting(conn, KEY_ACTIVE, id)?,
-            None => delete_setting(conn, KEY_ACTIVE)?,
-        }
-    }
+    let active_id = heal_active(conn, &models)?;
     let key_map: BTreeMap<&str, bool> = keys
         .iter()
         .map(|(id, configured)| (id.as_str(), *configured))
@@ -157,22 +184,67 @@ pub fn settings(conn: &Connection, keys: &[(String, bool)]) -> Result<AgentSetti
         active_id,
         models: models
             .into_iter()
-            .map(|item| ModelView {
-                configured: key_map.get(item.id.as_str()).copied().unwrap_or(false),
-                id: item.id,
-                label: item.label,
-                format: item.format,
-                base_url: item.base_url,
-                full_url: item.full_url,
-                model_id: item.model_id,
+            .map(|item| {
+                let configured = key_map.get(item.id.as_str()).copied().unwrap_or(false);
+                view(conn, item, configured)
             })
             .collect(),
     })
 }
 
+/// Settings row for one entry, including capability hints from `LlmParams`.
+pub fn view(conn: &Connection, entry: ModelEntry, configured: bool) -> ModelView {
+    let params = params::get(conn, &entry.id);
+    ModelView {
+        id: entry.id,
+        label: entry.label,
+        format: entry.format,
+        base_url: entry.base_url,
+        full_url: entry.full_url,
+        model_id: entry.model_id,
+        kind: entry.kind,
+        context_window_input: params.context_window_input,
+        context_window_output: params.context_window_output,
+        supports_images: params.supports_images,
+        input_price: params.input_price,
+        output_price: params.output_price,
+        image_price: params.image_price,
+        video_second_price: params.video_second_price,
+        tts_kchar_price: params.tts_kchar_price,
+        configured,
+    }
+}
+
+/// Only chat entries may back the chat agent. Heal stale or non-chat pointers.
+fn heal_active(conn: &Connection, models: &[ModelEntry]) -> Result<Option<String>, ToolError> {
+    let stored = read_setting(conn, KEY_ACTIVE)?;
+    let active = stored
+        .as_deref()
+        .filter(|id| {
+            models
+                .iter()
+                .any(|item| item.id == *id && item.kind.is_chat())
+        })
+        .map(str::to_string)
+        .or_else(|| {
+            models
+                .iter()
+                .find(|item| item.kind.is_chat())
+                .map(|item| item.id.clone())
+        });
+    if active.as_deref() != stored.as_deref() {
+        match &active {
+            Some(id) => write_setting(conn, KEY_ACTIVE, id)?,
+            None => delete_setting(conn, KEY_ACTIVE)?,
+        }
+    }
+    Ok(active)
+}
+
 pub fn set_active(conn: &Connection, id: &str) -> Result<(), ToolError> {
-    if !exists(conn, id)? {
-        return Err(ToolError::invalid("未找到模型"));
+    let entry = resolve(conn, id)?;
+    if !entry.kind.is_chat() {
+        return Err(ToolError::invalid("只有对话模型可以设为当前模型"));
     }
     write_setting(conn, KEY_ACTIVE, id)
 }
@@ -213,6 +285,7 @@ pub fn save(conn: &Connection, input: ModelInput) -> Result<ModelEntry, ToolErro
         base_url,
         full_url: input.full_url,
         model_id,
+        kind: input.kind,
     };
     let mut next = all;
     match next.iter_mut().find(|item| item.id == id) {
@@ -220,14 +293,12 @@ pub fn save(conn: &Connection, input: ModelInput) -> Result<ModelEntry, ToolErro
         None => next.push(entry.clone()),
     }
     write_models(conn, &next)?;
-    // First model added becomes active so the chat page is usable immediately.
-    if read_setting(conn, KEY_ACTIVE)?.is_none() {
-        write_setting(conn, KEY_ACTIVE, &id)?;
-    }
+    // First chat model added becomes active so the chat page is usable immediately.
+    heal_active(conn, &next)?;
     Ok(entry)
 }
 
-/// Delete an entry and move the active pointer to the next remaining model.
+/// Delete an entry and move the active pointer to the next remaining chat model.
 pub fn delete(conn: &Connection, id: &str) -> Result<(), ToolError> {
     let mut all = configs(conn)?;
     let before = all.len();
@@ -236,17 +307,8 @@ pub fn delete(conn: &Connection, id: &str) -> Result<(), ToolError> {
         return Err(ToolError::invalid(format!("未找到模型：{id}")));
     }
     write_models(conn, &all)?;
-    if read_setting(conn, KEY_ACTIVE)?.as_deref() == Some(id) {
-        match all.first() {
-            Some(next) => write_setting(conn, KEY_ACTIVE, &next.id)?,
-            None => delete_setting(conn, KEY_ACTIVE)?,
-        }
-    }
+    heal_active(conn, &all)?;
     Ok(())
-}
-
-pub fn exists(conn: &Connection, id: &str) -> Result<bool, ToolError> {
-    Ok(configs(conn)?.iter().any(|item| item.id == id))
 }
 
 /// Build the request endpoint. The model id never enters the URL, so no

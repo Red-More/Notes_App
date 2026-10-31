@@ -13,7 +13,7 @@ use serde::Deserialize;
 
 use crate::agent::discovery::ConnectionTest;
 use crate::agent::model_store::{
-    self, AgentSettings, ApiFormat, ModelEntry, ModelInput, ModelView,
+    self, AgentSettings, ApiFormat, ModelEntry, ModelInput, ModelKind, ModelView,
 };
 use crate::agent::params::{self, LlmParams};
 use crate::agent::{conversations, discovery, llm, AgentState};
@@ -38,7 +38,7 @@ pub fn chat_create(
     let settings = model_store::settings(vfs.conn(), &[])?;
     let active = settings
         .active_id
-        .ok_or_else(|| ToolError::invalid("请先在设置中添加并启用一个模型"))?;
+        .ok_or_else(|| ToolError::invalid("请先在设置中添加并启用一个对话模型"))?;
     let entry = model_store::resolve(vfs.conn(), &active)?;
     conversations::create(&vfs, title, entry.id, entry.model_id)
 }
@@ -115,6 +115,8 @@ pub struct ModelSaveInput {
     #[serde(default)]
     pub full_url: bool,
     #[serde(default)]
+    pub kind: ModelKind,
+    #[serde(default)]
     pub api_key: Option<String>,
 }
 
@@ -140,6 +142,7 @@ pub fn agent_model_save(
             base_url: input.base_url,
             model_id: input.model_id,
             full_url: input.full_url,
+            kind: input.kind,
         },
     )?;
     if let Some(key) = new_key {
@@ -153,15 +156,8 @@ pub fn agent_model_save(
     } else if !agent_state.secrets.has(&saved.id) {
         return Err(ToolError::invalid("API Key 未保存，请重新填写"));
     }
-    Ok(ModelView {
-        configured: agent_state.secrets.has(&saved.id),
-        id: saved.id,
-        label: saved.label,
-        format: saved.format,
-        base_url: saved.base_url,
-        full_url: saved.full_url,
-        model_id: saved.model_id,
-    })
+    let configured = agent_state.secrets.has(&saved.id);
+    Ok(model_store::view(vfs.conn(), saved, configured))
 }
 
 /// 删除模型条目；密钥与参数随后清理，激活指针自动前移。
@@ -202,6 +198,10 @@ pub async fn agent_stream(
         let vfs = vfs_state.0.lock().unwrap();
         model_store::cleanup_legacy(vfs.conn(), &state.secrets);
         let entry = model_store::resolve(vfs.conn(), &request.model.provider)?;
+        // Only chat entries can stream into the agent; media kinds stay inactive.
+        if !entry.kind.is_chat() {
+            return Err(ToolError::invalid("该模型条目不是对话模型"));
+        }
         let params = params::get(vfs.conn(), &entry.id);
         (entry, params)
     };
@@ -298,6 +298,7 @@ pub async fn agent_test_connection(
         ),
         full_url: input.full_url,
         model_id: input.model_id.trim().to_string(),
+        kind: ModelKind::Chat,
     };
     if entry.model_id.is_empty() {
         return Err(ToolError::invalid("请先填写 Model ID"));

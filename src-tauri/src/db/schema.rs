@@ -7,12 +7,13 @@
 //! v1：inodes / blobs / meta / fts_docs + 默认目录。
 //! v2：软删时间、置顶位、版本台账、交叉索引、路径 ACL 预留表。
 //! v3：Agent 会话表（conversations / messages）与非密钥设置表（settings）。
+//! v4：媒体作业表（media_jobs）与媒体资产表（media_assets）。
 //! FTS5 索引在应用层与 blobs 同事务维护（无触发器），schema 版本保持不变。
 
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// 当前 life.db schema 版本。
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// 虚拟文件系统的根路径，与 `vfs::cap_gate::ROOT` 保持一致。
 const ROOT: &str = "/life";
@@ -151,6 +152,39 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 ";
 
+const V4_TABLES: &str = "
+-- 媒体作业：与 Agent run 生命周期解耦，可取消、可在重启后恢复。
+CREATE TABLE IF NOT EXISTS media_jobs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind        TEXT NOT NULL CHECK (kind IN ('image', 'video', 'tts', 'classify')),
+    model_entry TEXT NOT NULL,
+    params      TEXT NOT NULL DEFAULT '{}',
+    status      TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
+    progress    INTEGER NOT NULL DEFAULT 0,
+    asset_id    INTEGER,
+    error       TEXT,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_media_jobs_status ON media_jobs(status, id);
+CREATE INDEX IF NOT EXISTS idx_media_jobs_model ON media_jobs(model_entry);
+
+-- 媒体资产：二进制落盘，库内只存元数据与内容哈希。
+CREATE TABLE IF NOT EXISTS media_assets (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    sha256      TEXT NOT NULL UNIQUE,
+    mime        TEXT NOT NULL,
+    size        INTEGER NOT NULL,
+    width       INTEGER,
+    height      INTEGER,
+    duration_ms INTEGER,
+    source_job  INTEGER,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_media_assets_created ON media_assets(created_at DESC);
+";
+
 /// 迁移用的列探测：表/列名均为本模块常量，格式化进 SQL 安全。
 fn table_has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
     let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{column}'");
@@ -216,6 +250,14 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     if version < 3 {
         let tx = conn.transaction()?;
         tx.execute_batch(V3_TABLES)?;
+        tx.pragma_update(None, "user_version", 3)?;
+        tx.commit()?;
+        version = 3;
+    }
+
+    if version < 4 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V4_TABLES)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         version = SCHEMA_VERSION;

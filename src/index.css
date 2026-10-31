@@ -3351,6 +3351,14 @@ body.split-resizing {
 }
 
 /* Agent settings: user-defined model list */
+.model-group-title {
+  margin: 16px 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  letter-spacing: 0.04em;
+}
+
 .model-row {
   background: var(--surface);
   border: 1.5px solid transparent;
