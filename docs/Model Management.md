@@ -112,11 +112,12 @@ Full URL 开启时直接 POST 用户填写的完整地址，路径必须由用�
 ## 四、高级设置
 
 默认折叠，全部可留空；未填写的字段**不会写入请求体**，由服务端决定默认值。
+唯一例外：Anthropic 协议的 `max_tokens` 是必填字段，输出留空时由协议兜底 4096，这不是模型默认值。
 
 | 配置组 | 字段 | 范围 / 行为 |
 |---|---|---|
 | **上下文窗口** | 输入 | 256–1,000,000；仅作客户端能力提示，不发送给厂商 |
-| | 输出 | 1–32,768；同时作为输出预算（映射为 `max_tokens` / `max_output_tokens`） |
+| | 输出 | 1–32,768；同时作为输出预算（映射为 `max_tokens` / `max_output_tokens`；Anthropic 留空时按协议兜底 4096） |
 | **工具调用轮次** | 最大轮次 | 1–500，默认 500；**本地 Agent 循环限制，绝不发送给厂商** |
 | **图片输入** | 支持 / 不支持 | 能力声明，不发送给厂商，只影响模型描述 |
 | **思考模式** | 跟随模型默认 / 开启 / 关闭 | 仅存储偏好，不向厂商注入默认值 |
@@ -133,7 +134,7 @@ Full URL 开启时直接 POST 用户填写的完整地址，路径必须由用�
 |---|---|---|---|
 | temperature / top_p | ✅ | ✅ | ✅ |
 | top_k | — | — | ✅ |
-| 输出上限 | `max_tokens` | `max_output_tokens` | `max_tokens`（协议必填，留空兜底 4096） |
+| 输出上限 | `max_tokens` | `max_output_tokens` | `max_tokens`（协议必填；留空兜底 4096，非模型默认值） |
 | stop | `stop` | — | `stop_sequences` |
 | penalty / seed / logit_bias | ✅ | — | — |
 | 工具调用 | `tool_calls` | `function_call` items | `tool_use` blocks |

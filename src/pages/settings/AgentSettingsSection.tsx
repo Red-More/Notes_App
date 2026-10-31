@@ -245,7 +245,11 @@ function ParamsEditor(props: {
             min={1}
             max={32768}
             value={params.contextWindowOutput ?? ''}
-            placeholder="留空使用模型默认"
+            placeholder={
+              draft.format === 'anthropic-messages'
+                ? '留空按协议兜底 4096'
+                : '留空使用模型默认'
+            }
             onChange={(e) =>
               patchParams({
                 contextWindowOutput:
@@ -259,6 +263,11 @@ function ParamsEditor(props: {
             onPick={(contextWindowOutput) => patchParams({ contextWindowOutput })}
           />
         </div>
+        {draft.format === 'anthropic-messages' && (
+          <p className="settings-note">
+            Anthropic 协议要求 max_tokens；输出留空时按协议兜底 4096，这不是模型默认值。
+          </p>
+        )}
       </div>
 
       <div className="form-field">

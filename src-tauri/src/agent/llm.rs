@@ -33,7 +33,8 @@ const MAX_MESSAGES: usize = 200;
 const MAX_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MODEL_CHARS: usize = 100;
 /// Anthropic rejects requests without `max_tokens`; used only when the user
-/// left both `max_tokens` and the output context window empty.
+/// left both `max_tokens` and the output context window empty. This is a
+/// protocol-required fallback, not a model default for other protocols.
 const ANTHROPIC_REQUIRED_MAX_TOKENS: u32 = 4096;
 
 // ---------------------------------------------------------------------------
@@ -1428,7 +1429,8 @@ fn anthropic_body(
     let mut body = Map::new();
     body.insert("model".into(), json!(model));
     // Anthropic requires `max_tokens`; an explicit user budget wins, otherwise
-    // the protocol minimum keeps the request valid.
+    // a protocol fallback keeps the request valid. This is not a default for
+    // any other protocol and is documented as an Anthropic-only requirement.
     body.insert(
         "max_tokens".into(),
         json!(options.max_tokens.unwrap_or(ANTHROPIC_REQUIRED_MAX_TOKENS)),

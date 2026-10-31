@@ -45,7 +45,8 @@
 
 约束：任何未编辑的字段都以 `Option::None` 落库，序列化时直接省略；`cargo test` 中的
 `unset_params_are_never_written_into_the_body` 专门守护「不得携带默认值」。
-Anthropic 的 `max_tokens` 是协议必填字段：用户留空时由协议最小值 4096 兜底，这不属于用户高级参数。
+Anthropic 的 `max_tokens` 是协议必填字段：用户留空时由协议兜底 4096，这是协议要求，
+不是模型默认值，也不影响其他协议「留空不写入请求体」的规则。
 
 ### 1.2 协议字段映射
 
