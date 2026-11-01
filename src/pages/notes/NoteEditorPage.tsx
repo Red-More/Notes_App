@@ -12,7 +12,7 @@ import {
   friendlyError,
   safeFileName,
 } from '../../utils'
-import type { AgentModelInfo, Folder, MediaJob, NoteVersion } from '../../types'
+import type { AgentModelInfo, Folder, MediaJob, MediaJobEvent, NoteVersion } from '../../types'
 import { ConfirmDialog, Modal } from '../../components/ui'
 import { toast } from '../../toast'
 import { getSaveStrategy } from '../../saveStrategy'
@@ -76,19 +76,47 @@ const keepFieldFocus = (e: React.PointerEvent<HTMLButtonElement>) => e.preventDe
 /** How long a programmatic scroll suppresses the other pane's scroll events. */
 const SYNC_GUARD_MS = 160
 
-/** Media jobs run in Rust; poll briefly until they reach a terminal state. */
-const JOB_POLL_MS = 1200
-const JOB_POLL_LIMIT = 600
+/** Media jobs push status through a Channel; wait for the terminal snapshot. */
+const JOB_TIMEOUT_MS = 10 * 60 * 1000
 
-async function waitForJob(id: number): Promise<MediaJob> {
-  for (let i = 0; i < JOB_POLL_LIMIT; i += 1) {
-    const job = await mediaApi.get(id)
-    if (job.status === 'succeeded' || job.status === 'failed' || job.status === 'cancelled') {
-      return job
+function submitAndWatch(
+  input: Parameters<typeof mediaApi.submit>[0],
+  onEvent?: (event: MediaJobEvent) => void,
+  onSubmitted?: (job: MediaJob) => void,
+): Promise<MediaJob> {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true
+        reject(new Error('媒体作业超时，请稍后重试'))
+      }
+    }, JOB_TIMEOUT_MS)
+    const finish = (job: MediaJob) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(job)
     }
-    await new Promise((resolve) => setTimeout(resolve, JOB_POLL_MS))
-  }
-  throw new Error('媒体作业超时，请稍后在设置中检查模型状态')
+    mediaApi
+      .submit(input, (event) => {
+        onEvent?.(event)
+        if (
+          event.status === 'succeeded' ||
+          event.status === 'failed' ||
+          event.status === 'cancelled'
+        ) {
+          mediaApi.get(event.jobId).then(finish).catch(reject)
+        }
+      })
+      .then((job) => onSubmitted?.(job))
+      .catch((error) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        reject(error)
+      })
+  })
 }
 
 /** OpenAI accepts 25MB per transcription request. */
@@ -732,12 +760,11 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     }
     setImageBusy(true)
     try {
-      const job = await mediaApi.submit({
+      const done = await submitAndWatch({
         kind: 'image',
         modelEntry: imageModelId,
         params: { prompt },
       })
-      const done = await waitForJob(job.id)
       if (done.status !== 'succeeded' || done.assetId == null) {
         toast(done.error || '图像生成失败')
         return
@@ -792,12 +819,11 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     }
     setTtsBusy(true)
     try {
-      const job = await mediaApi.submit({
+      const done = await submitAndWatch({
         kind: 'tts',
         modelEntry: ttsModelId,
         params: { text },
       })
-      const done = await waitForJob(job.id)
       if (done.status !== 'succeeded' || done.assetId == null) {
         toast(done.error || '语音生成失败')
         return
@@ -839,28 +865,18 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     setVideoProgress(0)
     setVideoStatus('pending')
     try {
-      const job = await mediaApi.submit({
-        kind: 'video',
-        modelEntry: videoModelId,
-        params: { prompt },
-      })
-      setVideoJobId(job.id)
-      let done: MediaJob | null = null
-      for (let i = 0; i < JOB_POLL_LIMIT; i += 1) {
-        const current = await mediaApi.get(job.id)
-        setVideoStatus(current.status)
-        setVideoProgress(current.progress)
-        if (
-          current.status === 'succeeded' ||
-          current.status === 'failed' ||
-          current.status === 'cancelled'
-        ) {
-          done = current
-          break
-        }
-        await new Promise((resolve) => setTimeout(resolve, JOB_POLL_MS))
-      }
-      if (!done) throw new Error('视频生成超时，请稍后重试')
+      const done = await submitAndWatch(
+        {
+          kind: 'video',
+          modelEntry: videoModelId,
+          params: { prompt },
+        },
+        (event) => {
+          setVideoStatus(event.status)
+          setVideoProgress(event.progress)
+        },
+        (job) => setVideoJobId(job.id),
+      )
       if (done.status === 'cancelled') {
         toast('视频生成已取消')
         return
@@ -945,12 +961,11 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
       const params: Record<string, unknown> = { assetId: asset.id }
       const language = asrLanguage.trim()
       if (language) params.language = language
-      const job = await mediaApi.submit({
+      const done = await submitAndWatch({
         kind: 'asr',
         modelEntry: asrModelId,
         params,
       })
-      const done = await waitForJob(job.id)
       if (done.status !== 'succeeded' || !done.result) {
         toast(done.error || '语音转写失败')
         return

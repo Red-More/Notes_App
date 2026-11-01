@@ -119,6 +119,32 @@ pub struct Job {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobEvent {
+    pub job_id: i64,
+    pub status: JobStatus,
+    pub progress: u32,
+    pub asset_id: Option<i64>,
+    pub error: Option<String>,
+    pub units: Option<f64>,
+    pub cost_usd: Option<f64>,
+}
+
+impl From<&Job> for JobEvent {
+    fn from(job: &Job) -> Self {
+        Self {
+            job_id: job.id,
+            status: job.status,
+            progress: job.progress,
+            asset_id: job.asset_id,
+            error: job.error.clone(),
+            units: job.units,
+            cost_usd: job.cost_usd,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewJob {

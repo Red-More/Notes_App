@@ -16,10 +16,15 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
-/// Tauri 管理的媒体状态：资产根目录 + 每个作业的取消标记。
+use tauri::ipc::Channel;
+
+use crate::media::jobs::JobEvent;
+
+/// Tauri 管理的媒体状态：资产根目录 + 每个作业的取消标记与进度通道。
 pub struct MediaState {
     pub root: PathBuf,
     cancels: Mutex<HashMap<i64, Arc<AtomicBool>>>,
+    events: Mutex<HashMap<i64, Channel<JobEvent>>>,
 }
 
 impl MediaState {
@@ -27,6 +32,7 @@ impl MediaState {
         Self {
             root,
             cancels: Mutex::new(HashMap::new()),
+            events: Mutex::new(HashMap::new()),
         }
     }
 
@@ -44,5 +50,21 @@ impl MediaState {
     /// Drop the flag once the job reached a terminal state.
     pub fn release(&self, id: i64) {
         self.cancels.lock().unwrap().remove(&id);
+    }
+
+    /// Attach a Channel used to push status/progress to the UI.
+    pub fn watch(&self, id: i64, channel: Channel<JobEvent>) {
+        self.events.lock().unwrap().insert(id, channel);
+    }
+
+    /// Push one snapshot; terminal events also release the channel.
+    pub fn emit(&self, id: i64, event: JobEvent) {
+        let terminal = event.status.is_terminal();
+        if let Some(channel) = self.events.lock().unwrap().get(&id) {
+            let _ = channel.send(event);
+        }
+        if terminal {
+            self.events.lock().unwrap().remove(&id);
+        }
     }
 }

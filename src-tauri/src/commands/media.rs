@@ -6,6 +6,7 @@ use std::sync::atomic::Ordering;
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use tauri::ipc::Channel;
 use tauri::{AppHandle, State};
 
 use crate::media::{assets, exec, jobs, MediaState};
@@ -18,12 +19,15 @@ pub fn media_job_submit(
     vfs_state: State<'_, VfsState>,
     media: State<'_, MediaState>,
     input: jobs::NewJob,
+    on_event: Channel<jobs::JobEvent>,
 ) -> Result<jobs::Job, ToolError> {
     let job = {
         let vfs = vfs_state.0.lock().unwrap();
         jobs::submit(vfs.conn(), input)?
     };
     media.register_cancel(job.id);
+    // Push status/progress through the channel instead of UI polling.
+    media.watch(job.id, on_event);
     // Run outside this command so the UI gets the queue id immediately.
     let job_id = job.id;
     tauri::async_runtime::spawn(async move {
@@ -55,12 +59,13 @@ pub fn media_job_cancel(
 ) -> Result<jobs::Job, ToolError> {
     // Signal the runner first, then persist the terminal state.
     media.cancel_flag(id).store(true, Ordering::SeqCst);
-    let vfs = vfs_state.0.lock().unwrap();
-    let result = jobs::cancel(vfs.conn(), id);
-    if result.is_err() {
-        media.release(id);
-    }
-    Ok(result?)
+    let job = {
+        let vfs = vfs_state.0.lock().unwrap();
+        jobs::cancel(vfs.conn(), id)?
+    };
+    media.emit(id, jobs::JobEvent::from(&job));
+    media.release(id);
+    Ok(job)
 }
 
 #[tauri::command]

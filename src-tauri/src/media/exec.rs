@@ -92,9 +92,16 @@ pub async fn run(app: AppHandle, job_id: i64) {
     {
         let vfs = app.state::<VfsState>();
         let db = vfs.0.lock().unwrap();
-        if let Err(e) = jobs::mark_running(db.conn(), job_id) {
-            log::warn!("media job {job_id} cannot start: {e}");
-            return;
+        match jobs::mark_running(db.conn(), job_id) {
+            Ok(job) => {
+                let event = jobs::JobEvent::from(&job);
+                drop(db);
+                app.state::<MediaState>().emit(job_id, event);
+            }
+            Err(e) => {
+                log::warn!("media job {job_id} cannot start: {e}");
+                return;
+            }
         }
     }
     let key = {
@@ -692,11 +699,20 @@ fn video_progress(payload: &Value) -> Option<u32> {
 }
 
 fn update_progress(app: &AppHandle, job_id: i64, percent: u32) {
-    let vfs = app.state::<VfsState>();
-    let db = vfs.0.lock().unwrap();
-    if let Err(e) = jobs::set_progress(db.conn(), job_id, percent) {
-        // Cancelled or already finished jobs reject progress updates.
-        log::debug!("media job {job_id} progress skipped: {e}");
+    let event = {
+        let vfs = app.state::<VfsState>();
+        let db = vfs.0.lock().unwrap();
+        match jobs::set_progress(db.conn(), job_id, percent) {
+            Ok(job) => Some(jobs::JobEvent::from(&job)),
+            Err(e) => {
+                // Cancelled or already finished jobs reject progress updates.
+                log::debug!("media job {job_id} progress skipped: {e}");
+                None
+            }
+        }
+    };
+    if let Some(event) = event {
+        app.state::<MediaState>().emit(job_id, event);
     }
 }
 
@@ -767,12 +783,20 @@ fn finish_with_cost(
     units: Option<f64>,
     cost_usd: Option<f64>,
 ) {
-    let vfs = app.state::<VfsState>();
-    let db = vfs.0.lock().unwrap();
-    if let Err(e) = jobs::finish(db.conn(), job_id, status, asset_id, result, error, units, cost_usd)
-    {
-        // A cancelled job is already terminal; nothing to persist.
-        log::debug!("media job {job_id} finish skipped: {e}");
+    let event = {
+        let vfs = app.state::<VfsState>();
+        let db = vfs.0.lock().unwrap();
+        match jobs::finish(db.conn(), job_id, status, asset_id, result, error, units, cost_usd) {
+            Ok(job) => Some(jobs::JobEvent::from(&job)),
+            Err(e) => {
+                // A cancelled job is already terminal; nothing to persist.
+                log::debug!("media job {job_id} finish skipped: {e}");
+                None
+            }
+        }
+    };
+    if let Some(event) = event {
+        app.state::<MediaState>().emit(job_id, event);
     }
 }
 

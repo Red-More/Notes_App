@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import { Channel, invoke } from '@tauri-apps/api/core'
 import type {
   AgentModelInfo,
   AgentSettings,
@@ -18,6 +18,7 @@ import type {
   MediaAsset,
   MediaGcReport,
   MediaJob,
+  MediaJobEvent,
   MediaJobKind,
   ModelApiFormat,
   ModelKind,
@@ -590,8 +591,15 @@ export const chatApi = {
  * 媒体作业 API：提交后排入 Rust 队列，结果落在 job 或 asset 上。
  */
 export const mediaApi = {
-  submit: (input: { kind: MediaJobKind; modelEntry: string; params?: Record<string, unknown> }) =>
-    invoke<MediaJob>('media_job_submit', { input }),
+  /** Submit a job; `onEvent` receives status/progress through a Tauri Channel. */
+  submit: (
+    input: { kind: MediaJobKind; modelEntry: string; params?: Record<string, unknown> },
+    onEvent?: (event: MediaJobEvent) => void,
+  ) => {
+    const channel = new Channel<MediaJobEvent>()
+    if (onEvent) channel.onmessage = onEvent
+    return invoke<MediaJob>('media_job_submit', { input, onEvent: channel })
+  },
   list: (limit?: number) => invoke<MediaJob[]>('media_job_list', { limit }),
   get: (id: number) => invoke<MediaJob>('media_job_get', { id }),
   cancel: (id: number) => invoke<MediaJob>('media_job_cancel', { id }),

@@ -473,8 +473,9 @@
 | 远程 MCP | 新增 [mcp/mod.rs](../src-tauri/src/mcp/mod.rs)（JSON-RPC over Streamable HTTP、Session 复用、SSE 解析）；设置页 [McpSection.tsx](../src/pages/settings/McpSection.tsx) 管理服务器与令牌；启用后工具以 `mcp_*` 前缀动态挂到 Agent，调用前重新校验服务器声明 |
 | 媒体成本账本（6.4.4） | schema v10 为 `media_jobs` 增加 `units`/`cost_usd`；[exec.rs](../src-tauri/src/media/exec.rs) 按张/秒/千字符/分钟换算；设置页 [MediaUsageSection.tsx](../src/pages/settings/MediaUsageSection.tsx) 汇总最近 200 个作业 |
 | 资产 GC（6.4.3） | [assets.rs](../src-tauri/src/media/assets.rs) 的 `gc()` 保留笔记正文引用、聊天附图与 30 天内作业产物，其余文件删除并解除作业引用；设置页提供手动清理入口 |
+| 媒体作业 Channel 进度（6.4.2） | [MediaState](../src-tauri/src/media/mod.rs) 维护每作业通道；`exec.rs` 在开始/进度/终态推送 `JobEvent`，[NoteEditorPage.tsx](../src/pages/notes/NoteEditorPage.tsx) 改为 `submitAndWatch`，移除轮询 |
 
-剩余未落地：6.4.2 的 Channel 进度事件（当前用轮询）、6.4.6 的厂商私有媒体协议（仅 OpenAI 兼容）。
+剩余未落地：6.4.6 的厂商私有媒体协议（当前仅 OpenAI 兼容）。
 
 ---
 
@@ -542,7 +543,7 @@
 |---|---|
 | `jobs` 表 | `id/kind/model_entry_id/params/status/progress/asset_id/error/created_at/updated_at` |
 | Tauri 命令 | `job_submit`、`job_get`、`job_list`、`job_cancel` |
-| Channel 事件 | 状态变更、进度、完成/失败，复用现有 Tauri Channel |
+| Channel 事件 | 已实现：`media_job_submit` 接收 `Channel<JobEvent>`，推送 running/progress/终态（含 assetId、成本）；取消也推送终态。前端不再轮询 |
 | 执行器 | tokio 任务；异步厂商按固定间隔轮询；429/超时退避重试 |
 | 恢复 | 启动时扫描 `pending`/`running` 作业，重新接管或标记失败 |
 | 取消 | `AtomicBool` + 远端 cancel 接口（厂商支持时） |

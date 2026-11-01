@@ -427,6 +427,17 @@ export interface MediaGcReport {
   kept: number
 }
 
+/** Progress snapshot pushed by Rust over a Tauri Channel. */
+export interface MediaJobEvent {
+  jobId: number
+  status: MediaJobStatus
+  progress: number
+  assetId?: number | null
+  error?: string | null
+  units?: number | null
+  costUsd?: number | null
+}
+
 /** Stored media file; the binary lives under app data, not in SQLite. */
 export interface MediaAsset {
   id: number
