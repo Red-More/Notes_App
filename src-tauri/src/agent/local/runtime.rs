@@ -20,10 +20,12 @@ use crate::vfs::error::ToolError;
 const KEY_LOCAL: &str = "agent.local.v1";
 const MAX_FILE_CHARS: usize = 120;
 const MAX_THREADS: u32 = 8;
-const MIN_CONTEXT: u32 = 512;
+const MIN_CONTEXT: u32 = 2048;
 const MAX_CONTEXT: u32 = 8192;
 const MIN_MAX_TOKENS: u32 = 32;
 const MAX_MAX_TOKENS: u32 = 4096;
+/// Prompt budget kept free when the output limit is checked against context.
+const MIN_INPUT_TOKENS: u32 = 512;
 /// 手动导入上限；阶段 D 的下载链路会做 sha256 与白名单校验。
 pub const MAX_MODEL_BYTES: u64 = 3 * 1024 * 1024 * 1024;
 
@@ -103,6 +105,18 @@ fn sanitize(mut config: LocalConfig) -> Result<LocalConfig, ToolError> {
             "输出上限必须在 {MIN_MAX_TOKENS}–{MAX_MAX_TOKENS} 之间"
         )));
     }
+    if config.context_size != 0 {
+        // The output limit is carved out of the same window, so it must leave
+        // room for the prompt. Without this check a 512/512 pair only fails at
+        // inference time with an opaque "context exceeded" error.
+        let needed = config.max_tokens.saturating_add(MIN_INPUT_TOKENS);
+        if config.context_size < needed {
+            return Err(ToolError::invalid(format!(
+                "上下文长度至少需要 {needed}（输出上限 {} + 预留输入 {MIN_INPUT_TOKENS}）",
+                config.max_tokens
+            )));
+        }
+    }
     Ok(config)
 }
 
@@ -111,7 +125,18 @@ pub fn load_config(conn: &Connection) -> LocalConfig {
         return LocalConfig::default();
     };
     match serde_json::from_str::<LocalConfig>(&raw) {
-        Ok(config) => sanitize(config).unwrap_or_default(),
+        Ok(mut config) => match sanitize(config.clone()) {
+            Ok(clean) => clean,
+            Err(_) => {
+                // Older configs may store a context smaller than the output limit.
+                // Widen it instead of dropping the user's model choice and switches.
+                config.context_size = config
+                    .context_size
+                    .max(config.max_tokens.saturating_add(MIN_INPUT_TOKENS))
+                    .clamp(MIN_CONTEXT, MAX_CONTEXT);
+                sanitize(config).unwrap_or_default()
+            }
+        },
         Err(e) => {
             log::warn!("local model config JSON is invalid, using defaults: {e}");
             LocalConfig::default()

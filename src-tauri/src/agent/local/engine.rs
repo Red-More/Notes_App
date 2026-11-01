@@ -38,6 +38,8 @@ impl Engine {
         let trained = model.n_ctx_train();
         Ok(Self {
             model,
+            // The floor only keeps `NonZeroU32` valid for stale or hand-edited
+            // configs; the real minimum is enforced by `runtime::sanitize`.
             context_size: context_size.min(trained).max(512),
             threads: threads.max(1),
         })
@@ -59,10 +61,11 @@ impl Engine {
             .chat_template(None)
             .map_err(|e| format!("模型缺少聊天模板：{e}"))?;
         let vocab = self.model.vocab();
-        let budget = (self.context_size as usize)
-            .saturating_sub(params.max_tokens as usize)
-            .saturating_sub(32)
-            .max(128);
+        let ctx_window = self.context_size as usize;
+        // The output limit is carved out of the same window, so cap it at half
+        // the window; otherwise a large `max_tokens` leaves no room for the prompt.
+        let output_budget = (params.max_tokens as usize).min(ctx_window / 2).max(1);
+        let budget = ctx_window.saturating_sub(output_budget + 32).max(64);
 
         // 超预算时从最旧的非 system 消息开始丢弃，system 与最后一轮始终保留。
         let mut kept: Vec<&LocalTurn> = turns.iter().collect();
@@ -142,7 +145,7 @@ impl Engine {
             }
 
             generated += 1;
-            if generated >= params.max_tokens {
+            if generated as usize >= output_budget {
                 length_limited = true;
                 break;
             }

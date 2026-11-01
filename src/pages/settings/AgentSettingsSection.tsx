@@ -621,7 +621,8 @@ function ParamsEditor(props: {
   )
 }
 
-export default function AgentSettingsSection() {
+/** Parent bumps `reloadToken` when another section changes the model list. */
+export default function AgentSettingsSection({ reloadToken = 0 }: { reloadToken?: number }) {
   const [settings, setSettings] = useState<AgentSettings | null>(null)
   const [draft, setDraft] = useState<Draft | null>(null)
   const [busy, setBusy] = useState(false)
@@ -634,7 +635,7 @@ export default function AgentSettingsSection() {
       .settings()
       .then((value) => setSettings(value))
       .catch((e) => console.error('读取模型列表失败', e))
-  }, [])
+  }, [reloadToken])
 
   const patchDraft = (patch: Partial<Draft>) =>
     setDraft((current) => (current ? { ...current, ...patch } : current))

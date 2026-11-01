@@ -2687,6 +2687,26 @@ fn local_config_persists_and_rejects_path_traversal() {
 }
 
 #[test]
+fn local_config_requires_prompt_room() {
+    let vfs = test_vfs();
+    // The output limit is carved out of the same window, so it must leave room
+    // for the prompt instead of failing only at inference time.
+    let no_room = runtime::LocalConfig {
+        context_size: 2048,
+        max_tokens: 4096,
+        ..Default::default()
+    };
+    assert!(runtime::save_config(vfs.conn(), &no_room).is_err());
+
+    let roomy = runtime::LocalConfig {
+        context_size: 2048,
+        max_tokens: 512,
+        ..Default::default()
+    };
+    assert!(runtime::save_config(vfs.conn(), &roomy).is_ok());
+}
+
+#[test]
 fn local_file_names_are_directory_safe() {
     assert!(runtime::is_valid_file_name("qwen3-0.6b-iq4_xs.GGUF"));
     for name in ["", "model", "a/b.gguf", "a b.gguf", "a\\b.gguf", "../x.gguf"] {

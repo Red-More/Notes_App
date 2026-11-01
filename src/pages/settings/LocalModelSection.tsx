@@ -36,7 +36,7 @@ function tierText(tier: string): string {
   }
 }
 
-export default function LocalModelSection() {
+export default function LocalModelSection({ onModelsChanged }: { onModelsChanged?: () => void }) {
   const [snapshot, setSnapshot] = useState<LocalModelSnapshot | null>(null)
   const [config, setConfig] = useState<LocalModelConfig | null>(null)
   const [busy, setBusy] = useState(false)
@@ -131,7 +131,11 @@ export default function LocalModelSection() {
   const unload = () => run(() => localApi.unload(), '本地模型已卸载')
 
   const activate = (file: string) =>
-    run(() => localApi.activate(file), '已切换为本地对话模型')
+    run(async () => {
+      await localApi.activate(file)
+      // The local entry is created and set active on the Rust side.
+      onModelsChanged?.()
+    }, '已切换为本地对话模型')
 
   const remove = () => {
     if (!removeTarget) return
@@ -289,7 +293,7 @@ export default function LocalModelSection() {
               <input
                 className="param-number wide"
                 type="number"
-                min={512}
+                min={2048}
                 max={8192}
                 step={512}
                 value={config.contextSize || ''}

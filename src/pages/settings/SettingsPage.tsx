@@ -143,6 +143,8 @@ export default function SettingsPage({ onBack }: Props) {
   const [hintFor, setHintFor] = useState<SaveStrategyKey | null>(null)
   const [tipFor, setTipFor] = useState<SaveStrategyKey | null>(null)
   const [reindexing, setReindexing] = useState(false)
+  // Bumped when the local model section creates or switches the local chat entry.
+  const [modelsReloadToken, setModelsReloadToken] = useState(0)
   const mermaidEnhance = useSyncExternalStore(
     subscribeMermaidEnhance,
     getMermaidEnhance,
@@ -247,9 +249,9 @@ export default function SettingsPage({ onBack }: Props) {
           <ChipRow items={THEME_OPTIONS} value={theme} onChange={handleTheme} />
         </div>
 
-        <AgentSettingsSection />
+        <AgentSettingsSection reloadToken={modelsReloadToken} />
 
-        <LocalModelSection />
+        <LocalModelSection onModelsChanged={() => setModelsReloadToken((n) => n + 1)} />
 
         <PrivacySection />
 
