@@ -16,6 +16,7 @@ import type {
   McpServerInfo,
   McpToolInfo,
   MediaAsset,
+  MediaGcReport,
   MediaJob,
   MediaJobKind,
   ModelApiFormat,
@@ -601,6 +602,9 @@ export const mediaApi = {
   /** Persist a WebView-supplied audio payload before an ASR job. */
   storeAsset: (input: { mime: string; data: string }) =>
     invoke<MediaAsset>('media_asset_store', { input }),
+  /** Reclaim assets not referenced by notes, messages or recent jobs. */
+  gcAssets: (retentionDays?: number) =>
+    invoke<MediaGcReport>('media_asset_gc', { retentionDays }),
 }
 
 /**

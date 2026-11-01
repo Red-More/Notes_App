@@ -471,8 +471,10 @@
 | `continue()` | 「重试」改为：按被点消息定位到上一条 user 记录 → `chat_truncate` 删除其后消息 → 重建 Agent → `continue()`；不再重复插入 user 消息 |
 | `StringEnum` / `prepareArguments` | `fs_grep.type` 改为 `StringEnum`；新增 [args.ts](../src/agent/args.ts) 归一化器，6 个工具都接入 `prepareArguments`（含中文枚举别名与数字/布尔字符串） |
 | 远程 MCP | 新增 [mcp/mod.rs](../src-tauri/src/mcp/mod.rs)（JSON-RPC over Streamable HTTP、Session 复用、SSE 解析）；设置页 [McpSection.tsx](../src/pages/settings/McpSection.tsx) 管理服务器与令牌；启用后工具以 `mcp_*` 前缀动态挂到 Agent，调用前重新校验服务器声明 |
+| 媒体成本账本（6.4.4） | schema v10 为 `media_jobs` 增加 `units`/`cost_usd`；[exec.rs](../src-tauri/src/media/exec.rs) 按张/秒/千字符/分钟换算；设置页 [MediaUsageSection.tsx](../src/pages/settings/MediaUsageSection.tsx) 汇总最近 200 个作业 |
+| 资产 GC（6.4.3） | [assets.rs](../src-tauri/src/media/assets.rs) 的 `gc()` 保留笔记正文引用、聊天附图与 30 天内作业产物，其余文件删除并解除作业引用；设置页提供手动清理入口 |
 
-剩余未落地：无（6.1/6.2 全部完成）。
+剩余未落地：6.4.2 的 Channel 进度事件（当前用轮询）、6.4.6 的厂商私有媒体协议（仅 OpenAI 兼容）。
 
 ---
 
@@ -503,7 +505,7 @@
 | `continue()` | 想修「重试会重复插入 user 消息」 | 需要处理已取消的 assistant 消息作为上下文 |
 | `StringEnum` / `prepareArguments` | 弱模型经常给错枚举值或参数形状 | 只改工具 schema/兼容层，收益有限 |
 
-以上六项全部纳入实现，落地完成：`thinking_*`、图片输入、队列交互、缓存、`continue()` 与 `StringEnum`/`prepareArguments`。远程 MCP 亦已按扩展边界完成（仅 HTTPS Streamable HTTP）。
+以上六项全部纳入实现，落地完成：`thinking_*`、图片输入、队列交互、缓存、`continue()` 与 `StringEnum`/`prepareArguments`。远程 MCP 亦已按扩展边界完成（仅 HTTPS Streamable HTTP）。6.4 中成本账本与资产 GC 已补齐。
 
 ### 6.3 明确不建议（扩展后仍不采纳）
 
@@ -554,7 +556,7 @@
 | 存储位置 | 磁盘 `appdata/media/{sha256}.{ext}`；SQLite 只存元数据与引用 |
 | 元数据 | `assets(id, sha256, mime, size, width/height, duration, source_job_id, created_at)` |
 | 去重 | 内容哈希去重，同图多次生成只留一份 |
-| 生命周期 | 笔记删除不立即删资产，由定期 GC 或引用计数回收 |
+| 生命周期 | 已实现引用扫描：笔记正文（sha256 文件名）、聊天 `image_asset_ids`、30 天内作业产物均保留；其余由手动 GC 删除 |
 | 传输 | 返回本地路径/asset URL，不用 base64 走 IPC |
 | 临时 URL | 厂商签名 URL 立即下载落地，并校验 mime 与大小 |
 
@@ -570,6 +572,8 @@
 | 千字符 | TTS 输入长度 |
 
 同一张账覆盖全部 `kind`，UI 按会话/按天聚合；历史消息还原时保留 usage，不再统一归零。
+
+落实现状：聊天 token 记在 `messages`（v7）；媒体作业在 `media_jobs.units/cost_usd`（v10），按张/秒/千字符/分钟换算，`classify` 暂记 0；设置页展示最近 200 个作业的汇总。
 
 #### 6.4.5 Agent 暴露策略
 
@@ -628,6 +632,7 @@
 | `src-tauri/src/media/assets.rs` | 资产哈希、落盘、引用与 GC |
 | `src-tauri/src/media/exec.rs` | 图像/视频/TTS/分类/转写的 Rust 执行器 |
 | `src-tauri/src/mcp/mod.rs` | 远程 MCP（Streamable HTTP、工具发现/调用） |
+| `src/pages/settings/MediaUsageSection.tsx` | 媒体成本汇总与资产清理入口 |
 
 ---
 

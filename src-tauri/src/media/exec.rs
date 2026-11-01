@@ -133,14 +133,19 @@ pub async fn run(app: AppHandle, job_id: i64) {
         return;
     }
     match outcome {
-        Ok(Outcome::Text(text)) => finish(
-            &app,
-            job_id,
-            jobs::JobStatus::Succeeded,
-            None,
-            Some(&text),
-            None,
-        ),
+        Ok(Outcome::Text(text)) => {
+            let (units, cost) = job_usage(&app, kind, &params, &job_params);
+            finish_with_cost(
+                &app,
+                job_id,
+                jobs::JobStatus::Succeeded,
+                None,
+                Some(&text),
+                None,
+                Some(units),
+                Some(cost),
+            )
+        }
         Ok(Outcome::Asset { bytes, mime, meta }) => {
             let root = app.state::<MediaState>().root.clone();
             let stored = {
@@ -149,14 +154,19 @@ pub async fn run(app: AppHandle, job_id: i64) {
                 assets::store(db.conn(), &root, &bytes, mime, meta)
             };
             match stored {
-                Ok(asset) => finish(
-                    &app,
-                    job_id,
-                    jobs::JobStatus::Succeeded,
-                    Some(asset.id),
-                    None,
-                    None,
-                ),
+                Ok(asset) => {
+                    let (units, cost) = job_usage(&app, kind, &params, &job_params);
+                    finish_with_cost(
+                        &app,
+                        job_id,
+                        jobs::JobStatus::Succeeded,
+                        Some(asset.id),
+                        None,
+                        None,
+                        Some(units),
+                        Some(cost),
+                    )
+                }
                 Err(e) => finish(
                     &app,
                     job_id,
@@ -175,6 +185,50 @@ pub async fn run(app: AppHandle, job_id: i64) {
             None,
             Some(&message),
         ),
+    }
+}
+
+/// Billable units and USD cost for one successful job.
+fn job_usage(
+    app: &AppHandle,
+    kind: jobs::JobKind,
+    params: &LlmParams,
+    job: &Value,
+) -> (f64, f64) {
+    match kind {
+        jobs::JobKind::Image => {
+            let units = 1.0;
+            (units, units * params.image_price.unwrap_or(0.0))
+        }
+        jobs::JobKind::Video => {
+            let units = job.get("seconds").and_then(Value::as_u64).unwrap_or(0) as f64;
+            (units, units * params.video_second_price.unwrap_or(0.0))
+        }
+        jobs::JobKind::Tts => {
+            let chars = job
+                .get("text")
+                .and_then(Value::as_str)
+                .map(|text| text.chars().count())
+                .unwrap_or(0);
+            let units = chars as f64 / 1000.0;
+            (units, units * params.tts_kchar_price.unwrap_or(0.0))
+        }
+        jobs::JobKind::Asr => {
+            // Duration comes from the source asset metadata when available.
+            let minutes = job
+                .get("assetId")
+                .and_then(Value::as_i64)
+                .and_then(|id| {
+                    let vfs = app.state::<VfsState>();
+                    let db = vfs.0.lock().unwrap();
+                    assets::get(db.conn(), id).ok()
+                })
+                .and_then(|asset| asset.duration_ms)
+                .map(|ms| ms as f64 / 60_000.0)
+                .unwrap_or(0.0);
+            (minutes, minutes * params.asr_minute_price.unwrap_or(0.0))
+        }
+        jobs::JobKind::Classify => (0.0, 0.0),
     }
 }
 
@@ -700,9 +754,23 @@ fn finish(
     result: Option<&str>,
     error: Option<&str>,
 ) {
+    finish_with_cost(app, job_id, status, asset_id, result, error, None, None);
+}
+
+fn finish_with_cost(
+    app: &AppHandle,
+    job_id: i64,
+    status: jobs::JobStatus,
+    asset_id: Option<i64>,
+    result: Option<&str>,
+    error: Option<&str>,
+    units: Option<f64>,
+    cost_usd: Option<f64>,
+) {
     let vfs = app.state::<VfsState>();
     let db = vfs.0.lock().unwrap();
-    if let Err(e) = jobs::finish(db.conn(), job_id, status, asset_id, result, error) {
+    if let Err(e) = jobs::finish(db.conn(), job_id, status, asset_id, result, error, units, cost_usd)
+    {
         // A cancelled job is already terminal; nothing to persist.
         log::debug!("media job {job_id} finish skipped: {e}");
     }

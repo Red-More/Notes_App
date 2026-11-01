@@ -109,6 +109,17 @@ pub fn media_asset_data(
     })
 }
 
+/// Remove media assets no longer referenced by notes, messages or recent jobs.
+#[tauri::command]
+pub fn media_asset_gc(
+    vfs_state: State<'_, VfsState>,
+    media: State<'_, MediaState>,
+    retention_days: Option<i64>,
+) -> Result<assets::GcReport, ToolError> {
+    let vfs = vfs_state.0.lock().unwrap();
+    assets::gc(vfs.conn(), &media.root, retention_days.unwrap_or(30))
+}
+
 /// Import a WebView-supplied audio payload into the asset library.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]

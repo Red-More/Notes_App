@@ -111,6 +111,10 @@ pub struct Job {
     pub error: Option<String>,
     /// JSON answer for classification jobs; `None` for binary outputs.
     pub result: Option<String>,
+    /// Billable units: images / seconds / kchar / minutes depending on `kind`.
+    pub units: Option<f64>,
+    /// USD cost computed from the model entry's price settings.
+    pub cost_usd: Option<f64>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -134,12 +138,14 @@ struct RawJob {
     asset_id: Option<i64>,
     error: Option<String>,
     result: Option<String>,
+    units: Option<f64>,
+    cost_usd: Option<f64>,
     created_at: String,
     updated_at: String,
 }
 
 const SELECT_JOB: &str = "SELECT id, kind, model_entry, status, progress, asset_id, error, result, \
-                          created_at, updated_at FROM media_jobs";
+                          units, cost_usd, created_at, updated_at FROM media_jobs";
 
 pub fn submit(conn: &Connection, input: NewJob) -> Result<Job, ToolError> {
     let entry = model_store::resolve(conn, &input.model_entry)?;
@@ -232,6 +238,8 @@ pub fn finish(
     asset_id: Option<i64>,
     result: Option<&str>,
     error: Option<&str>,
+    units: Option<f64>,
+    cost_usd: Option<f64>,
 ) -> Result<Job, ToolError> {
     let job = get(conn, id)?;
     if job.status.is_terminal() {
@@ -245,9 +253,10 @@ pub fn finish(
          SET status = ?2,
              progress = CASE WHEN ?2 = 'succeeded' THEN 100 ELSE progress END,
              asset_id = ?3, result = ?4, error = ?5,
+             units = ?6, cost_usd = ?7,
              updated_at = datetime('now','localtime')
          WHERE id = ?1",
-        params![id, status.as_str(), asset_id, result, error],
+        params![id, status.as_str(), asset_id, result, error, units, cost_usd],
     )?;
     get(conn, id)
 }
@@ -304,8 +313,10 @@ fn row_to_raw(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawJob> {
         asset_id: row.get(5)?,
         error: row.get(6)?,
         result: row.get(7)?,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
+        units: row.get(8)?,
+        cost_usd: row.get(9)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
     })
 }
 
@@ -319,6 +330,8 @@ fn job_from_raw(raw: RawJob) -> Result<Job, ToolError> {
         asset_id: raw.asset_id,
         error: raw.error,
         result: raw.result,
+        units: raw.units,
+        cost_usd: raw.cost_usd,
         created_at: raw.created_at,
         updated_at: raw.updated_at,
     })

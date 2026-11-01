@@ -412,8 +412,19 @@ export interface MediaJob {
   error?: string | null
   /** JSON answer for classification jobs. */
   result?: string | null
+  /** Billable units (images / seconds / kchar / minutes) for successful jobs. */
+  units?: number | null
+  /** USD cost derived from the model entry's prices. */
+  costUsd?: number | null
   createdAt: string
   updatedAt: string
+}
+
+/** Result of reclaiming unreferenced media assets. */
+export interface MediaGcReport {
+  removed: number
+  freedBytes: number
+  kept: number
 }
 
 /** Stored media file; the binary lives under app data, not in SQLite. */

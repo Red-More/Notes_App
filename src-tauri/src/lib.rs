@@ -149,6 +149,7 @@ pub fn run() {
             commands::media::media_asset_get,
             commands::media::media_asset_path,
             commands::media::media_asset_data,
+            commands::media::media_asset_gc,
             commands::media::media_asset_store,
             commands::mcp::mcp_server_list,
             commands::mcp::mcp_server_save,

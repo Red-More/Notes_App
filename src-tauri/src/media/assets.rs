@@ -3,6 +3,7 @@
 //! 视频/音频不进笔记库：大文件会放大 WAL 与备份体积。文件名为
 //! `{sha256}.{ext}`，同一内容重复生成只保留一份。
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -96,6 +97,99 @@ pub fn get(conn: &Connection, id: i64) -> Result<Asset, ToolError> {
         )
         .optional()?;
     asset.ok_or_else(|| ToolError::invalid(format!("未找到资产：{id}")))
+}
+
+/// Every asset row, newest first; used by the GC pass.
+pub fn all(conn: &Connection) -> Result<Vec<Asset>, ToolError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, sha256, mime, size, width, height, duration_ms, source_job, created_at
+         FROM media_assets ORDER BY id DESC",
+    )?;
+    let rows = stmt.query_map([], row_to_asset)?;
+    let mut assets = Vec::new();
+    for row in rows {
+        assets.push(row?);
+    }
+    Ok(assets)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GcReport {
+    pub removed: i64,
+    pub freed_bytes: i64,
+    pub kept: i64,
+}
+
+/// Delete unreferenced assets: messages, recent jobs and note bodies are keepers.
+/// Old jobs (beyond `retention_days`) stop protecting their output.
+pub fn gc(conn: &Connection, root: &Path, retention_days: i64) -> Result<GcReport, ToolError> {
+    let retention = retention_days.clamp(0, 3650);
+    let assets = all(conn)?;
+
+    // 1) Recent jobs and chat attachments protect their assets.
+    let mut keep: HashSet<i64> = HashSet::new();
+    let mut stmt = conn.prepare(
+        "SELECT asset_id FROM media_jobs
+         WHERE asset_id IS NOT NULL AND created_at >= datetime('now','localtime', ?1)",
+    )?;
+    let rows = stmt.query_map(params![format!("-{retention} days")], |row| {
+        row.get::<_, i64>(0)
+    })?;
+    for row in rows {
+        keep.insert(row?);
+    }
+    let mut stmt =
+        conn.prepare("SELECT image_asset_ids FROM messages WHERE image_asset_ids IS NOT NULL")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    for row in rows {
+        let raw = row?;
+        if let Ok(ids) = serde_json::from_str::<Vec<i64>>(&raw) {
+            keep.extend(ids);
+        }
+    }
+
+    // 2) Notes embed the asset file name (`{sha256}.ext`); scan current bodies once.
+    let mut contents = Vec::new();
+    let mut stmt = conn.prepare(
+        "SELECT b.content FROM blobs b
+         JOIN inodes i ON i.inode = b.inode AND i.head_rev = b.rev
+         WHERE i.deleted = 0",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    for row in rows {
+        contents.push(row?);
+    }
+
+    let mut removed = 0i64;
+    let mut freed_bytes = 0i64;
+    let mut kept = 0i64;
+    for asset in &assets {
+        if keep.contains(&asset.id) {
+            kept += 1;
+            continue;
+        }
+        if contents.iter().any(|body| body.contains(&asset.sha256)) {
+            kept += 1;
+            continue;
+        }
+        let path = path(root, asset);
+        if let Ok(metadata) = fs::metadata(&path) {
+            freed_bytes += metadata.len() as i64;
+        }
+        let _ = fs::remove_file(&path);
+        conn.execute("DELETE FROM media_assets WHERE id = ?1", params![asset.id])?;
+        conn.execute(
+            "UPDATE media_jobs SET asset_id = NULL WHERE asset_id = ?1",
+            params![asset.id],
+        )?;
+        removed += 1;
+    }
+    Ok(GcReport {
+        removed,
+        freed_bytes,
+        kept,
+    })
 }
 
 /// Filesystem path for one asset; the row is the authority for the name.

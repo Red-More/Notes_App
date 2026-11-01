@@ -516,7 +516,7 @@ fn schema_creates_agent_and_media_tables() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 9, "image asset columns require schema v9");
+    assert_eq!(version, 10, "media job cost columns require schema v10");
     for table in [
         "conversations",
         "messages",
@@ -889,10 +889,14 @@ fn media_jobs_persist_cancel_and_recover() {
         None,
         None,
         None,
+        Some(1.0),
+        Some(0.04),
     )
     .unwrap();
     assert_eq!(done.status, jobs::JobStatus::Succeeded);
     assert_eq!(done.progress, 100);
+    assert_eq!(done.units, Some(1.0));
+    assert_eq!(done.cost_usd, Some(0.04));
     // Terminal jobs are never touched by restart recovery.
     assert_eq!(jobs::recover(vfs.conn()).unwrap(), 0);
 }
@@ -948,6 +952,49 @@ fn media_assets_dedupe_by_content_hash() {
         assets::AssetMeta::default()
     )
     .is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn asset_gc_keeps_chat_attachments_until_unreferenced() {
+    let vfs = test_vfs();
+    let dir = std::env::temp_dir().join(format!("notes-gc-{}", std::process::id()));
+    let asset = assets::store(
+        vfs.conn(),
+        &dir,
+        b"gc-image",
+        "image/png",
+        assets::AssetMeta::default(),
+    )
+    .unwrap();
+    let entry = add_model(&vfs, "GC 模型", "gc-model");
+    let conv = conversations::create(&vfs, None, entry.id.clone(), entry.model_id.clone()).unwrap();
+    conversations::append(
+        &vfs,
+        conv.id,
+        vec![conversations::NewMessage {
+            role: "user".into(),
+            content: "看图".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            tool_name: None,
+            is_error: false,
+            usage: None,
+            thinking: None,
+            thinking_signature: None,
+            image_asset_ids: Some(format!("[{}]", asset.id)),
+        }],
+    )
+    .unwrap();
+
+    let kept = assets::gc(vfs.conn(), &dir, 30).unwrap();
+    assert_eq!(kept.removed, 0, "attached images must survive GC");
+    assert_eq!(kept.kept, 1);
+
+    conversations::delete(&vfs, conv.id).unwrap();
+    let removed = assets::gc(vfs.conn(), &dir, 30).unwrap();
+    assert_eq!(removed.removed, 1, "orphan images are reclaimed");
+    assert!(!assets::path(&dir, &asset).exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
