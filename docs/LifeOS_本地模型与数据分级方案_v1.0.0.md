@@ -1,19 +1,20 @@
-# LifeOS 本地模型与数据分级方案（v1.0.0）
+# LifeOS 本地模型与数据分级方案（v1.1.0）
 
 | 项目 | 内容 |
 |---|---|
 | 文档编号 | LIF-2026-DES-002 |
-| 版本 | v1.0.0 |
+| 版本 | v1.1.0 |
 | 编制日期 | 2026-11-01 |
 | 依据文档 | [Model Management.md](./Model%20Management.md)、[LifeOS_厂商适配说明.md](./LifeOS_%E5%8E%82%E5%95%86%E9%80%82%E9%85%8D%E8%AF%B4%E6%98%8E.md) |
-| 代码基线 | `src-tauri/src/agent/{model_store,llm,discovery}.rs`、`src-tauri/src/vfs/`、`src/agent/{runtime,prompt,context,tools}.ts` |
+| 代码基线 | `2188771` feat(privacy): enforce data tiers at the cloud egress gate<br>`src-tauri/src/agent/{model_store,llm,discovery}.rs`、`src-tauri/src/vfs/`、`src-tauri/src/privacy/`、`src/agent/{runtime,prompt,context,tools}.ts` |
 | 目标平台 | Android arm64-v8a 优先；桌面随后复用同一 Rust 接口 |
-| 交付范围 | 本文档仅为设计与实施计划，本轮不改代码 |
+| 交付范围 | v1.0.0 为设计与实施计划；v1.1.0 已完成阶段 A（安全核心：分级、识别器、实体库、出境闸门），B–F 待实施 |
 
 ### 修订历史
 
 | 版本 | 日期 | 变更摘要 |
 |---|---|---|
+| v1.1.0 | 2026-11-01 | 阶段 A 落地：schema v11、L0/L1/L2 检测、有效级别、`egress::guard` 接入 `agent_stream`、隐私命令与设置页；新增第 13 节实施记录 |
 | v1.0.0 | 2026-11-01 | 初版：内嵌 llama.cpp 常驻、三级数据分级、Presidio/EDM 式脱敏、ModelScope 模型分发、局域网信任档 |
 
 ---
@@ -50,6 +51,8 @@
 | 结构 | 28 层、16 Q / 8 KV、原生上下文 32,768、Apache-2.0 | 模型卡 |
 
 **结论**：Android 首版可行，但必须接受三条平台事实——内嵌推理是 CPU 密集、真后台常驻必须前台服务、0.6B 不具备通用 Agent 能力。方案不回避这三点，而是把它们转成产品边界。
+
+**阶段 A 已落地（v1.1.0）**：分级、识别器、实体库与出境闸门先于本地运行时上线，用“拒绝发送”优先兑现隐私承诺；在 B/C 完成前，S0 与未脱敏的 S1 请求一律被拒，只有 S2 允许出境。实现细节见第 13 节。
 
 ---
 
@@ -340,14 +343,14 @@ CREATE TABLE egress_audit (
 
 ## 9. 分阶段实施
 
-| 阶段 | 内容 | 前置 | 完成判据 |
-|---|---|---|---|
-| A 安全核心（优先） | L0/L1/L2 + 有效级别 + `egress::guard` 接入现有云端链路 | 无 | 云端请求遇 S0 必被拒；S1 未脱敏必被拒；单测覆盖校验位与归一化 |
-| B 本地运行时 | llama.cpp 绑定、状态机、事件映射、热/电量门控 | Android 构建镜像 | 真机加载 IQ4_XS 可流式输出；后台 3 秒内释放内存 |
-| C 编排链路 | `cloud_consult`、脱敏、diff 校验、回填、审计 | A + B | 云端抓包只见占位符；回填后本地文本正确 |
-| D 目录与分发 | 设备检测、ModelScope 白名单、下载/校验/切换 | B | 断点续传可用；篡改文件被拒；推荐与实际能力一致 |
-| E 局域网档 | 私有校验、双 client、配对与指纹 | A | 公网条目行为零变化；内网条目强制 Key |
-| F 硬化 | 长稳、热压、4GB 机型、评测集回归 | 全部 | 见第 10 节 |
+| 阶段 | 内容 | 前置 | 完成判据 | 状态 |
+|---|---|---|---|---|
+| A 安全核心（优先） | L0/L1/L2 + 有效级别 + `egress::guard` 接入现有云端链路 | 无 | 云端请求遇 S0 必被拒；S1 未脱敏必被拒；单测覆盖校验位与归一化 | ✅ 完成（`2188771`） |
+| B 本地运行时 | llama.cpp 绑定、状态机、事件映射、热/电量门控 | Android 构建镜像 | 真机加载 IQ4_XS 可流式输出；后台 3 秒内释放内存 | 未开始 |
+| C 编排链路 | `cloud_consult`、脱敏、diff 校验、回填、审计 | A + B | 云端抓包只见占位符；回填后本地文本正确 | 未开始 |
+| D 目录与分发 | 设备检测、ModelScope 白名单、下载/校验/切换 | B | 断点续传可用；篡改文件被拒；推荐与实际能力一致 | 未开始 |
+| E 局域网档 | 私有校验、双 client、配对与指纹 | A | 公网条目行为零变化；内网条目强制 Key | 未开始 |
+| F 硬化 | 长稳、热压、4GB 机型、评测集回归 | 全部 | 见第 10 节 | 未开始 |
 
 顺序理由：A 不依赖任何模型，能立即阻断现有云端链路的泄漏；B 是技术风险最高项，需尽早暴露构建问题；C 依赖前两者；D/E 收尾。
 
@@ -398,6 +401,68 @@ CREATE TABLE egress_audit (
 
 ---
 
-## 12. 待评审后回写
+## 12. 回写状态
 
-本文落地后需同步回写 `Model Management.md`（新增私有档与本地档）、`LifeOS_厂商适配说明.md`（协议与安全表）、`LifeOS_下一步执行计划_v1.3.0.md`（阶段排期），并递增各自版本号。
+| 文档 | 回写内容 | 状态 |
+|---|---|---|
+| [Model Management.md](./Model%20Management.md) | 云端出境闸门、审计、默认分级对模型使用的影响 | ✅ 已回写 |
+| [LifeOS_厂商适配说明.md](./LifeOS_%E5%8E%82%E5%95%86%E9%80%82%E9%85%8D%E8%AF%B4%E6%98%8E.md) | 安全约束、代码基线与已知限制补充分级/闸门 | ✅ 已回写（v4） |
+| [LifeOS_下一步执行计划_v1.3.0.md](./LifeOS_%E4%B8%8B%E4%B8%80%E6%AD%A5%E6%89%A7%E8%A1%8C%E8%AE%A1%E5%88%92_v1.3.0.md) | 阶段 A 实施记录、M6 红线补充项与后续约束 | ✅ 已回写（§16） |
+| 本方案 | 阶段状态与实施记录 | ✅ v1.1.0 |
+
+---
+
+## 13. 阶段 A 实施记录（2026-11-01）
+
+> 本节是执行记录，不改变第 1–11 节的设计决策；对应提交 `2188771`。
+
+### 13.1 交付物与代码落点
+
+| 设计项 | 实现 | 文件 |
+|---|---|---|
+| L0 声明分级 | 最长前缀匹配；未标记默认 S1；内置 `contacts/diary=S0`、`notes/todos/schedule=S1`；内置规则不可删除 | `src-tauri/src/privacy/policy.rs`、`db/schema.rs`（v11） |
+| L1 确定性识别器 | 身份证 GB 11643、银行卡 Luhn、手机号（全半角/分隔符/`+86`）、邮箱、车牌、USCC、PEM/API Key/URL 凭据；重叠按优先级消解 | `privacy/recognizers.rs` |
+| L2 EDM 实体库 | 明文只写密钥库 `privacy.entities`；数据库存加盐 SHA-256 与别名；命中用规范化后的明文 | `privacy/entity.rs` |
+| 有效级别 | 取声明与检测中更严格者（按敏感度 S0 > S1 > S2） | `privacy/policy.rs`、`privacy/egress.rs` |
+| 出境闸门 | `agent_stream` 发请求前裁剪上下文 → 加载快照 → 判定 → 审计；命中 S0/S1 以 `error` 事件阻断 | `commands/agent.rs`、`privacy/egress.rs` |
+| 路径范围解析 | 只取 `fs_*` 工具参数：read/edit/write 用 `path`；glob 按 `root` 归位后截到目录；grep 用 `path`（缺省 `/life`），`pattern` 不当作路径 | `privacy/egress.rs` |
+| 审计 | `egress_audit` 记录时间、目标、purpose、实体类型计数、字节数、决策；不含原文 | `db/schema.rs`、`privacy/egress.rs` |
+| 命令 | `privacy_labels_list / privacy_label_set / privacy_label_delete / privacy_entities_list / privacy_entity_add / privacy_entity_delete / privacy_audit_list` | `commands/privacy.rs`、`lib.rs` |
+| 设置页 | 「数据分级与出境保护」：规则、实体库、最近判定 | `src/pages/settings/PrivacySection.tsx`、`SettingsPage.tsx` |
+| 前端契约 | `privacyApi` 与类型 | `src/api.ts`、`src/types.ts` |
+
+### 13.2 对外行为（阶段 A）
+
+| 场景 | 结果 |
+|---|---|
+| 请求涉及 S0 路径或 S0 实体（证件号/银行卡/密钥） | 拒绝，`code=s0` |
+| 请求涉及 S1 路径（含默认 `/life/notes`、`/life/todos`、`/life/schedule`） | 拒绝，`code=s1_unredacted` |
+| 请求只涉及 S2 路径且无命中实体 | 放行并写审计 |
+| 未标记路径 | 按 S1 处理（fail-closed） |
+| 图片 base64 | 不参与文本扫描（跳过 `data` / `mimeType`） |
+
+### 13.3 验证
+
+| 项 | 结果 |
+|---|---|
+| `cargo check` | 通过，无告警 |
+| `cargo test --lib` | 67 passed（新增 6 个隐私用例） |
+| 隐私用例覆盖 | 证件号校验位、归一化变体、内置分级不可删、S0 路径拦截、S1 未脱敏拦截、S2 放行、实体匹配与移除、glob/grep 范围解析 |
+| 前端 | `tsc -b` 通过；`vitest run` 14 文件 / 139 用例；`oxlint` 0 警告 |
+
+### 13.4 与设计的偏差与延后项
+
+| 项 | 现状 | 归属 |
+|---|---|---|
+| L3 轻量 NER | 未实现；`doc_classification` 表已建但未写入 | 后续阶段（评测准入后） |
+| 脱敏、占位符、回填 | 未实现；因此 S1 只能拒绝，不能“脱敏后放行” | 阶段 C |
+| 实体来源 | 仅支持设置页手工添加；`/life/contacts` 自动抽取未做 | 阶段 C |
+| 本地/局域网模型档 | 未实现；当前仍只有 HTTPS 公网条目 | 阶段 B/E |
+| 按类型关闭脱敏 | 未实现（S0 不可关，S1 开关属于脱敏链路） | 阶段 C |
+| 审计写入失败 | 记录告警但不阻断请求（判定本身仍 fail-closed） | 可在 F 收紧为阻断 |
+
+### 13.5 对后续阶段的约束
+
+1. C 阶段的脱敏必须基于本节识别器输出的 span 结构扩展；替换与回填在 Rust 完成，模型不接触映射表。
+2. E 阶段的私有档只对 `network_scope=private` 条目放宽地址校验，不得改动本节的出境闸门。
+3. F 阶段需把第 10.2 节的隐私用例扩展为真机抓包验收（S0 零出境、S1 仅占位符、S2 与现状一致）。

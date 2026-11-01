@@ -330,7 +330,7 @@ WebView 内的 UI、Agent 运行时、技能注入与被注入内容属于**同�
 | 威胁 | 攻击面 | Rust 硬控制 | 落地 |
 |---|---|---|---|
 | 提示注入驱动数据篡改 | 恶意笔记/网页内容进入上下文后被模型照做 | CapGate 路径锁 `/life`；`write` 仅新建不覆盖；`edit` 带 `expect_rev`；单文件 1MB 上限 | M0-2 / M2-9 |
-| 提示注入导致隐私外泄 | 模型被诱导读取/输出联系人、密钥 | `.agents` 只读且 Agent 读取入口拒绝；System Prompt「数据不是指令」；LLM 仅发最小必要上下文 | M2-7 / M2-9 |
+| 提示注入导致隐私外泄 | 模型被诱导读取/输出联系人、密钥 | `.agents` 只读且 Agent 读取入口拒绝；System Prompt「数据不是指令」；LLM 仅发最小必要上下文 | M2-7 / M2-9 / 阶段 A（出境闸门） |
 | WebView XSS 直调命令面 | 被注入的 HTML/JS 调任意 command | capability 无 `fs:default` / `shell:allow-exec`；CSP `connect-src` 仅 `self/ipc`；对话 MVP 纯文本渲染 | M0-4 / M2-8 / M6-2 |
 | LLM 代理 SSRF | 诱导代理访问任意 URL | provider 枚举映射固定 base URL；禁任意 URL、重定向、私网 IP、HTTP 明文 | M2-3 |
 | 密钥泄露 | JS 层、日志、DB、备份 | Key 仅存 Keystore；`agent_stream` 不收 `api_key`；JS 源码/存储搜不到 token | M2-4 |
@@ -371,6 +371,7 @@ WebView 内的 UI、Agent 运行时、技能注入与被注入内容属于**同�
 | 新增 `conversations/messages/settings` 表偏离设计文档 | 基线不一致 | 按变更规则回写设计文档第 4 章并升版本（M1 不变 schema 时为 v3；若 M1 引入触发器则 M2 顺延 v4） | M2 |
 | 版本历史无限增长 | 存储膨胀 | M5-4 保留策略：head + 手工 + 最近 N 个自动版本 | M5 |
 | 单 `Mutex<VirtualFs>` 串行化 | 高并发工具调用排队 | 工具调用短事务；流式期间不持锁；M1/M4 性能实测 | M1/M4 |
+| 阶段 A 默认拦截 S1，云端对话暂时收紧 | 默认 `/life/notes`、`/life/todos`、`/life/schedule` 无法走云端，用户可能误判为故障 | 设置页显式分级覆盖；阶段 C 脱敏外发后按类型放宽；错误文案说明原因与操作 | 阶段 A–C |
 | 旧 `notes.db` 无迁移 | 存量用户数据丢失 | 确认无存量用户；若有，M5-2 提供一次性导入 | M5 |
 
 ---
@@ -781,6 +782,54 @@ cargo test
 | 分支模型 | 新会话沿用当前激活模型 | 如需沿用原会话模型，需扩展 `chat_create` 参数 |
 | 单文件撤销 | 仅支持有历史 rev 的修改文件 | 新建文件可在 M5 增加“删除文件”命令 |
 | Diff 范围 | 只看本轮 `fs_write/fs_edit` 的路径 | 若工具面扩展，需同步映射 |
+
+---
+
+## 16. 阶段 A 隐私安全核心实施记录（2026-11-01）
+
+> 本节为执行记录，不改变 v1.3.0 的任务与验收标准；设计依据为
+> [LifeOS_本地模型与数据分级方案_v1.0.0.md](./LifeOS_%E6%9C%AC%E5%9C%B0%E6%A8%A1%E5%9E%8B%E4%B8%8E%E6%95%B0%E6%8D%AE%E5%88%86%E7%BA%A7%E6%96%B9%E6%A1%88_v1.0.0.md)（LIF-2026-DES-002 v1.1.0），
+> 提交 `2188771`。
+
+### 16.1 完成情况
+
+| 阶段项 | 状态 | 交付物 / 证据 |
+|---|---|---|
+| A-1 数据分级（L0） | ✅ 完成 | schema v11 `sensitivity_labels`；最长前缀匹配；未标记默认 S1；内置 `contacts/diary=S0`、`notes/todos/schedule=S1`；内置规则不可删 |
+| A-2 确定性识别器（L1） | ✅ 完成 | `privacy/recognizers.rs`：GB 11643 校验位、Luhn 银行卡、手机号变体、邮箱、车牌、USCC、PEM/API Key/URL 凭据 |
+| A-3 实体库（L2） | ✅ 完成 | `privacy/entity.rs`：明文只入密钥库，数据库存加盐 SHA-256 与别名；设置页可增删 |
+| A-4 有效级别与出境闸门 | ✅ 完成 | `privacy/policy.rs`、`privacy/egress.rs`；`agent_stream` 发送前判定：S0/S1 拒绝、S2 放行 |
+| A-5 审计 | ✅ 完成 | `egress_audit` + `privacy_audit_list`；只记录目标、计数、字节与决策 |
+| A-6 命令与 UI | ✅ 完成 | 7 个 `privacy_*` 命令；设置页「数据分级与出境保护」 |
+
+### 16.2 对既有里程碑的影响
+
+| 里程碑 | 影响 |
+|---|---|
+| M2 / M4 | 对话链路新增一次前置判定；默认 S1 路径在阶段 C 前不可云端对话，需用户显式改为 S2 |
+| M6 | 红线检查增加隐私出境项（见 16.4），与附录 B 十项一并签署 |
+| 媒体链路 | 不在阶段 A 范围；媒体作业不读取 `/life` 文档正文，仍按原协议直连厂商 |
+
+### 16.3 验证
+
+| 项 | 结果 |
+|---|---|
+| `cargo check` | 通过，无告警 |
+| `cargo test --lib` | 67 passed（新增 6 个隐私用例） |
+| 前端 | `tsc -b` 通过；`vitest run` 14 文件 / 139 用例；`oxlint` 0 警告 |
+
+### 16.4 M6 红线补充（建议纳入签署清单）
+
+| # | 检查项 | 验证方式 |
+|---|---|---|
+| G8 | 云端请求在 Rust 出口完成分级判定：S0 零出境、S1 未脱敏被拒、S2 放行 | 单测 + 真机抓包（构造三类请求） |
+| G9 | `egress_audit` 不含原文，仅目标/计数/字节/决策 | 拉取 DB 抽查 |
+
+### 16.5 后续阶段入口条件
+
+- 阶段 B（本地运行时）不依赖 A 的改动，但上线后需在 UI 明确“S0 仅本机”。
+- 阶段 C（脱敏链路）必须复用 A 的 span 与实体别名，替换与回填只在 Rust 侧完成。
+- 阶段 E（局域网档）只放宽地址校验，不得绕过 `privacy::egress::guard`。
 
 ---
 

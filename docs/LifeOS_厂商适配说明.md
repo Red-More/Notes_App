@@ -1,15 +1,18 @@
-# LifeOS 模型接入说明（v3）
+# LifeOS 模型接入说明（v4）
 
 | 项目 | 内容 |
 |---|---|
-| 代码基线 | `src-tauri/src/agent/{model_store,params,discovery,llm}.rs`、`commands/agent.rs`、`src/pages/settings/AgentSettingsSection.tsx` |
-| 设计参考 | [Model Management.md](./Model%20Management.md)（模型管理模块） |
+| 代码基线 | `src-tauri/src/agent/{model_store,params,discovery,llm}.rs`、`commands/agent.rs`、`src-tauri/src/privacy/`、`commands/privacy.rs`、`src/pages/settings/{AgentSettingsSection,PrivacySection}.tsx` |
+| 设计参考 | [Model Management.md](./Model%20Management.md)（模型管理模块）、[LifeOS_本地模型与数据分级方案_v1.0.0.md](./LifeOS_%E6%9C%AC%E5%9C%B0%E6%A8%A1%E5%9E%8B%E4%B8%8E%E6%95%B0%E6%8D%AE%E5%88%86%E7%BA%A7%E6%96%B9%E6%A1%88_v1.0.0.md)（LIF-2026-DES-002，v1.1.0） |
 | 协议范围 | OpenAI Chat Completions（`<baseUrl>/chat/completions`）、OpenAI Responses（`<baseUrl>/responses`）、Anthropic Messages（`<baseUrl>/v1/messages`） |
 | 目标平台 | Tauri 2（Android ARM64 + 桌面） |
-| 安全模块 | `url`（MIT/Apache-2.0）、`keyring-core` + `android-native-keyring-store`（MIT）、`rusqlite`（MIT） |
+| 安全模块 | `url`（MIT/Apache-2.0）、`keyring-core` + `android-native-keyring-store`（MIT）、`rusqlite`（MIT）、`sha2`（MIT/Apache-2.0）、`getrandom`（MIT/Apache-2.0） |
 
 > 本版按用户确认的最终规范落地：**系统不提供任何预置模型**，模型全部由用户添加；
 > 下拉列表里只保留 Base URL 预设，协议固定为上述三种，不再提供 Gemini 与 Model Series。
+>
+> v4 补充：云端请求统一经过 Rust 侧数据分级出境闸门（S0/S1 拒绝、S2 放行）并写入审计；
+> 本地 llama.cpp 档与局域网私有档仍未实现，地址规则保持“仅 HTTPS 公网”。
 
 ---
 
@@ -74,6 +77,10 @@ Anthropic 的 `max_tokens` 是协议必填字段：用户留空时由协议兜�
 | 透传保护 | 保留键拒绝覆盖；JSON ≤16KB |
 | 禁重定向 | `reqwest::redirect::Policy::none()`，连接 10s / 读 120s（可按模型 `timeoutSeconds` 收紧） |
 | 密钥不外泄 | Key 只存 Keystore（Android）或 0600 文件（桌面），不进 DB / JS / 日志；设置接口只返回布尔 |
+| 数据分级出境闸门 | `agent_stream` 在发出 HTTP 前依次：裁剪上下文 → 读取分级标签与实体库快照 → 判定 → 写审计；S0 一律拒绝，S1 未脱敏拒绝，S2 放行 |
+| 判定依据 | L0 路径前缀声明（未标记默认 S1）、L1 校验位识别（证件号/银行卡/密钥等）、L2 实体库命中；有效级别取最严格者；图片 base64 不参与扫描 |
+| 失败策略 | fail-closed：分级/实体库读取失败或载荷命中 S0/S1 时直接阻断，以前端可见的结构化 `error` 事件返回原因 |
+| 审计 | `egress_audit` 仅记录目标模型、purpose、实体类型计数、字节数与决策；不含任何原文 |
 
 残留风险：未做 DNS 重绑定固定；用户仍可把 Base URL 指向任意**公网** HTTPS 服务（自定义端点的产品代价）。
 
@@ -119,7 +126,7 @@ Anthropic 的 `max_tokens` 是协议必填字段：用户留空时由协议兜�
 
 ### 5.1 自动化
 
-`src-tauri/src/tests.rs` 当前包含 25 个 `#[test]`，模型管理相关用例：
+`src-tauri/src/tests.rs` 当前包含 67 个 `#[test]`，模型管理与隐私相关用例：
 
 | 用例 | 覆盖点 |
 |---|---|
@@ -135,9 +142,15 @@ Anthropic 的 `max_tokens` 是协议必填字段：用户留空时由协议兜�
 | `model_list_parsers_handle_known_shapes` | `/models` 响应解析、去重排序、空响应报错 |
 | `params_output_capability_maps_to_max_tokens` | 输出上下文上限映射为输出预算 |
 | `secret_store_roundtrip_survives_reload_and_delete` | 密钥跨进程重载、删除 |
+| `privacy_recognizers_validate_checksums_and_normalize_variants` | 证件号/银行卡校验位、手机号与邮箱归一化变体 |
+| `privacy_labels_apply_longest_prefix_and_keep_defaults` | 最长前缀匹配、未标记默认 S1、内置 S0 不可删除 |
+| `privacy_egress_blocks_s0_paths_and_s1_text` | S0 路径与未脱敏 S1 文本被拒 |
+| `privacy_egress_allows_s2_and_records_audit` | S2 放行、审计落库、无路径普通对话放行 |
+| `privacy_entity_vault_matches_normalized_values` | 实体库规范化匹配、明文不落库 |
+| `privacy_egress_scopes_glob_and_grep_arguments` | glob 按 root 归位、grep pattern 不当作路径 |
 
-前端门禁（本轮已复跑）：`pnpm lint` 0 警告 0 错误；`pnpm test` 11 文件 / 122 用例；`pnpm build`（含 `tsc -b`）成功。
-Rust 门禁（`cargo fmt/clippy/check/test`）需在具备 Tauri 桌面依赖（webkit2gtk/GTK）或 Windows 的机器上复跑。
+前端门禁（阶段 A 复跑）：`pnpm lint` 0 警告 0 错误；`pnpm test` 14 文件 / 139 用例；`pnpm build`（含 `tsc -b`）成功。
+Rust 门禁（`cargo fmt/clippy/check/test`）需在具备 Tauri 桌面依赖（webkit2gtk/GTK）或 Windows 的机器上复跑；阶段 A 已在 Windows 上通过 `cargo check` 与 `cargo test --lib`（67 passed）。
 
 ### 5.2 手工验证
 
@@ -155,8 +168,9 @@ Rust 门禁（`cargo fmt/clippy/check/test`）需在具备 Tauri 桌面依赖（
 
 ## 6. 已知限制
 
-1. Base URL 只允许 HTTPS；本地 Ollama / 局域网地址与 SSRF 硬约束冲突，暂不支持。
+1. Base URL 只允许 HTTPS；本地 Ollama / 局域网地址与 SSRF 硬约束冲突，暂不支持。私有档设计见 LIF-2026-DES-002 §7，计划在阶段 E 实现。
 2. 未做 DNS 重绑定防护；可在保存时解析并固定 IP。
 3. Full URL 模式无法自动发现模型，必须手填 Model ID。
 4. Anthropic 未设置输出上限时使用协议兜底 `max_tokens=4096`。
 5. 模型列表分页差异可能导致拉取不完整，失败时可用手填 Model ID 兜底。
+6. 数据分级会拦截默认敏感路径（S0：`/life/contacts`、`/life/diary`；S1：`/life/notes`、`/life/todos`、`/life/schedule`）；阶段 A 尚无脱敏外发，需在设置页把确认非敏感的路径改为 S2。
