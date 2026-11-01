@@ -537,6 +537,24 @@ CREATE TABLE egress_audit (
 
 > 性能数据取自 debug 未优化构建，不能作为发布版本指标；release + 线程/上下文调优后的基线归阶段 F。
 
+#### 14.4.1 三段耗时实测
+
+设备 Redmi Note 12 Turbo，Qwen3-0.6B IQ4_XS，context 4096、线程 3、debug 构建；数据来自 `local perf` 打点：
+
+| 轮次 | prompt_tokens | prompt_ms | output_tokens | decode_ms | prefill tok/s | decode tok/s | prefill 占比 |
+|---|---|---|---|---|---|---|---|
+| 1（新会话） | 666 | 30,237 | 123 | 26,090 | 22.0 | 4.7 | 53.7% |
+| 2 | 806 | 27,740 | 103 | 17,284 | 29.1 | 6.0 | 61.4% |
+| 3 | 931 | 33,419 | 85 | 18,823 | 27.9 | 4.5 | 63.5% |
+
+模型加载 `load_ms = 1217`：mmap 命中页缓存，加载不是瓶颈。
+
+结论：
+
+1. prompt 从 666 涨到 931（+265 token），prefill 仅从 30.2s 涨到 33.4s（+11%），说明成本主要来自**每轮重复 prefill 的固定 system 提示（约 600 token）**，而不是历史增量；
+2. prefill 占端到端 54%–64%，超过 §14.6 第 5 条的 30% 阈值，B 计划具备实施条件；
+3. 收益点应优先落在「持久 context + 增量 prefill」，单纯裁剪窗口的收益有限。
+
 ### 14.5 与设计的偏差与延后项
 
 | 项 | 现状 | 归属 |
