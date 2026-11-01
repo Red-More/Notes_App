@@ -1,9 +1,9 @@
-# LifeOS 下一步执行计划（v1.3.0 · Agent 优先）
+# LifeOS 下一步执行计划（v1.3.1 · Agent 优先）
 
 | 项目 | 内容 |
 |---|---|
 | 文档编号 | LIF-2026-PLAN-001 |
-| 版本 | v1.3.0 |
+| 版本 | v1.3.1 |
 | 编制日期 | 2026-10-29 |
 | 依据文档 | `LifeOS_数据库重构与Agent能力扩展设计文档_v1.0.0.pdf`（LIF-2026-DES-001）、`refactoring-sqlite-vfs-pi-agent.md`（PRD） |
 | 代码基线 | `b3ea410` feat(vfs): rebuild domain features on generic document layer<br>`da56090` refactor(storage): replace relational notes.db with VirtualFs-backed life.db |
@@ -14,6 +14,7 @@
 
 | 版本 | 日期 | 变更摘要 |
 |---|---|---|
+| v1.3.1 | 2026-11-01 | 追加第 16 节「阶段 A 隐私安全核心实施记录」：schema v11 分级表、L0/L1/L2 检测、`agent_stream` 出境闸门、G8/G9 红线；任务与验收标准不变 |
 | v1.3.0 | 2026-10-29 | 补充「Agent 安全模型与上线门禁」：信任边界、威胁–硬控制表、7 条上线门禁及其 M0/M2/M3/M6 落地映射；原第 7/8/9 节顺延为 8/9/10 |
 | v1.2.0 | 2026-10-29 | 完成 `pi-agent-core@1.4.0` 运行时审查：内置 `streamProxy` 改为自研 `streamFn` + `invoke` 桥接；`fs:default` 提升为 M2 前置门禁（导出不受影响）；补充 Agent 打包体积基线、对话渲染策略与风险项 |
 | v1.1.0 | 2026-10-29 | **调整为 Agent 优先**：M2 Agent 闭环前置到 M1 检索之前；FTS 顺延为 Agent MVP 后的检索升级；发布节点保持 12/22 |
@@ -833,4 +834,4 @@ cargo test
 
 ---
 
-— LifeOS · LIF-2026-PLAN-001 v1.3.0 · Agent 优先执行基线 —
+— LifeOS · LIF-2026-PLAN-001 v1.3.1 · Agent 优先执行基线 —
