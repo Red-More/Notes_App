@@ -3,17 +3,18 @@
 | 项目 | 内容 |
 |---|---|
 | 文档编号 | LIF-2026-DES-002 |
-| 版本 | v1.2.0 |
+| 版本 | v1.2.1 |
 | 编制日期 | 2026-11-01 |
 | 依据文档 | [Model Management.md](./Model%20Management.md)、[LifeOS_厂商适配说明.md](./LifeOS_%E5%8E%82%E5%95%86%E9%80%82%E9%85%8D%E8%AF%B4%E6%98%8E.md) |
 | 代码基线 | `2188771` feat(privacy): enforce data tiers at the cloud egress gate<br>`src-tauri/src/agent/{model_store,llm,discovery}.rs`、`src-tauri/src/vfs/`、`src-tauri/src/privacy/`、`src-tauri/src/agent/local/`、`src/agent/{runtime,prompt,context,tools}.ts` |
 | 目标平台 | Android arm64-v8a 优先；桌面随后复用同一 Rust 接口 |
-| 交付范围 | v1.0.0 为设计与实施计划；v1.1.0 完成阶段 A（安全核心）；v1.2.0 完成阶段 B（本地运行时），C–F 待实施 |
+| 交付范围 | v1.0.0 为设计与实施计划；v1.1.0 完成阶段 A（安全核心）；v1.2.0 完成阶段 B（本地运行时）；v1.2.1 为阶段 B 修补（列表刷新、预算校验、真机记录），C–F 待实施 |
 
 ### 修订历史
 
 | 版本 | 日期 | 变更摘要 |
 |---|---|---|
+| v1.2.1 | 2026-11-01 | 修复模型列表不刷新；上下文与输出预算校验（`MIN_CONTEXT` 2048、旧配置自动放大、输出预算不超过窗口一半）；记录 Android 真机加载/推理/列表刷新；幂等构建脚本；KV 滑动窗口写入阶段 F 计划 |
 | v1.2.0 | 2026-11-01 | 阶段 B 落地：`local-llm` feature、llama.cpp 引擎、生命周期状态机、`LocalLlama` 模型条目、本地命令与设置页、sysfs 热/电量门控；新增第 14 节实施记录 |
 | v1.1.0 | 2026-11-01 | 阶段 A 落地：schema v11、L0/L1/L2 检测、有效级别、`egress::guard` 接入 `agent_stream`、隐私命令与设置页；新增第 13 节实施记录 |
 | v1.0.0 | 2026-11-01 | 初版：内嵌 llama.cpp 常驻、三级数据分级、Presidio/EDM 式脱敏、ModelScope 模型分发、局域网信任档 |
@@ -511,7 +512,7 @@ CREATE TABLE egress_audit (
 ### 14.3 构建前置与已知风险
 
 1. **Windows 桌面构建已验证（2026-11-01）**：VS Build Tools 18 自带 CMake 4.3.1、Ninja 1.13.2 与 MSVC 14.51；bindgen 所需的 libclang 通过 PyPI `libclang 18.1.1` 提供（`C:\Users\16412\miniconda3\Lib\site-packages\clang\native`）。已把 VS 的 CMake/Ninja 目录写入用户 `PATH`，并设置用户级 `LIBCLANG_PATH`。首次 `cargo check --features local-llm` 用时 15m40s（含 llama.cpp 全量编译），增量 10s。
-2. **Android 构建仍需独立环境**：NDK 的 `android.toolchain.cmake`、`-DANDROID_ABI=arm64-v8a`、`-DANDROID_PLATFORM=26`、`-DGGML_NATIVE=OFF`，并需在固定 CI 镜像内预装 clang/cmake；桌面验证不代表 Android 可直接产出。
+2. **Android 交叉编译已验证（2026-11-01）**：NDK 26.2.11394342（API 24 的 `aarch64-linux-android24-clang.cmd` / `clang++.cmd`，AR 用 `llvm-ar`）、`CMAKE_GENERATOR=Ninja`、`LIBCLANG_PATH` 指向 PyPI libclang 18.1.1，并把 `ANDROID_NDK` / `CARGO_NDK_ANDROID_NDK` 固定到该 NDK（否则 llama-cpp-sys 会自动选中版本号更大但缺 `android.toolchain.cmake` 的 NDK 30 并 panic）。这些探测与固定逻辑已固化在 `scripts/build-android.mjs`，入口为 `pnpm android:build:local`；该脚本同时负责清理下列生成物。构建环境另有两项约束：`tauri-plugin-*` 的 build script 复制 `.tauri/tauri-api` 非幂等（`os error 183`），以及 `tauri-cli` 在 `jniLibs/<abi>/` 重建 `.so` 符号链接需要 `SeCreateSymbolicLinkPrivilege`（UAC 受限令牌没有该特权时会报 `os error 5`，须以管理员终端构建或由管理员一次性授予该权限）。
 3. **llama-cpp-2 API 版本**：已按锁定版本 `0.1.160` 完整编译通过（`chat_template/apply_chat_template`、`LlamaVocab::tokenize/token_to_piece`、`LlamaSampler` 均匹配）；升级版本时仍需重新验证 `engine.rs`。
 4. **后台常驻**：Android 真正的后台常驻仍需要前台服务与通知；本轮只实现“默认后台卸载 / 用户可选保持”，前台服务归阶段 F。
 5. **小模型能力**：本地分支不注入工具声明，模型不会调用 `fs_*`；system 提示裁到 1200 字符，历史按 token 预算丢弃最旧轮次。
@@ -522,11 +523,19 @@ CREATE TABLE egress_audit (
 |---|---|
 | `cargo check`（默认 feature） | 通过，无告警 |
 | `cargo check --features local-llm` | 通过，无告警（首次 15m40s，增量 10s） |
-| `cargo test --lib` | 73 passed（新增 6 个本地运行时用例：门控、设备分档、配置校验、文件名安全、本地条目校验、无 feature 状态） |
-| `cargo test --lib --features local-llm` | 73 passed，含 llama.cpp 链接 |
+| `cargo test --lib` | 74 passed（新增 6 个本地运行时用例 + 1 个上下文/输出预算校验用例） |
+| `cargo test --lib --features local-llm` | 74 passed，含 llama.cpp 链接 |
 | `tsc -b` | 通过 |
 | `vitest run` | 14 文件 / 139 用例通过 |
-| `oxlint` | 0 errors；2 个既有 `set-state-in-effect` 警告（`McpSection`、`MediaUsageSection`），与本节改动无关 |
+| `oxlint` | 0 errors；2 个既有 `state-in-effect` 警告（`McpSection`、`MediaUsageSection`），与本节改动无关 |
+| Android 交叉编译 | `cargo check --target aarch64-linux-android --features local-llm` 通过（12m18s）；APK 构建通过 |
+| Android 真机加载 | 设备 Redmi Note 12 Turbo（`22101317C`，Android 14，arm64-v8a，7.6GB RAM）；导入 `Qwen3-0.6B-IQ4_XS.gguf`（367,804,096 B）后状态转 `ready`，线程 3、上下文 4096、`CPU_Mapped` 345.09 MiB |
+| Android 真机推理 | 中文流式输出正常（含 `<think>` 段），token 统计 `876↑ 99↓` 与前端显示一致；冷启动首 token 30.8s，99 输出 token 约 20s（≈5 tok/s，debug 构建 + CPU 3 线程） |
+| Android 后台释放 | 应用切后台后模型权重释放，回到前台再发送会重新加载（默认 `keepAlive=false`） |
+| Android 模型列表刷新 | 删除 `local_llama` 条目后列表回到空状态；点「设为当前」后列表**立即**重新出现「本地模型 · Qwen3-0.6B-IQ4_XS」，无需退出设置页（`reloadToken` 修复） |
+| Android 参数下限 | 上下文误设为 512 时每个请求都被拒（system 提示 + 历史即超限）；改回推荐值（3 线程 / 4096）后恢复，首 token 23.7s、`670↑ 143↓`、总 47.2s |
+
+> 性能数据取自 debug 未优化构建，不能作为发布版本指标；release + 线程/上下文调优后的基线归阶段 F。
 
 ### 14.5 与设计的偏差与延后项
 
@@ -538,6 +547,8 @@ CREATE TABLE egress_audit (
 | 本地 prompt 档位 | 前端未新增紧凑 prompt；Rust 侧裁剪 system 与历史 | C/F |
 | `cloud_consult` 脱敏链路 | 未实现；本地模型仍只处理本会话 | C |
 | 预编译产物 | 未接入预编译 llama.cpp，仍走源码构建 | F（风险处置） |
+| 上下文与输出预算 | **已修**：`MIN_CONTEXT` 提到 2048；`save_config` 拒绝 `context < max_tokens + 512`；`engine.rs` 把输出预算压到窗口一半；读取旧配置时自动放大上下文而不是整份重置 | 已完成 |
+| KV 跨轮复用（滑动窗口） | 每轮 `new_context` 全量 prefill，长会话首 token 随历史增长；未使用 `kv_cache_seq_rm` | F（见 14.6 第 5 条） |
 
 ### 14.6 对后续阶段的约束
 
@@ -545,3 +556,4 @@ CREATE TABLE egress_audit (
 2. D 阶段的下载必须写同一模型目录、复用 `is_valid_file_name` 与 `MAX_MODEL_BYTES`，并补 sha256 与断点续传。
 3. E 阶段的局域网档不得改动 `ApiFormat::LocalLlama` 的零网络语义；本地条目永远跳过出境闸门。
 4. F 阶段需补齐真机验收：IQ4_XS 流式输出、后台 3 秒内释放、4GB 机型 30 分钟无 OOM。
+5. KV 滑动窗口（跨轮 KV 复用）排在 F：实施前必须先量化「模型加载 / prefill / decode」三段耗时，只有长会话中 prefill 占比超过 30% 才启动；采用 `kv_cache_seq_rm` 做窗口位移时，需同时补「裁剪后回答仍然连贯」的回归用例，避免以性能换取正确性。
