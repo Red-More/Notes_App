@@ -516,7 +516,7 @@ fn schema_creates_agent_and_media_tables() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 7, "message usage columns require schema v7");
+    assert_eq!(version, 8, "thinking columns require schema v8");
     for table in [
         "conversations",
         "messages",
@@ -560,6 +560,8 @@ fn conversation_lifecycle_persists_messages() {
                 tool_name: None,
                 is_error: false,
                 usage: None,
+                thinking: None,
+                thinking_signature: None,
             },
             conversations::NewMessage {
                 role: "assistant".into(),
@@ -578,6 +580,8 @@ fn conversation_lifecycle_persists_messages() {
                     cache_read: 20,
                     cache_write: 0,
                 }),
+                thinking: Some("先确认日期再写入".into()),
+                thinking_signature: Some("sig-1".into()),
             },
         ],
     )
@@ -592,6 +596,8 @@ fn conversation_lifecycle_persists_messages() {
     assert_eq!(usage.input, 120);
     assert_eq!(usage.output, 45);
     assert_eq!(usage.total_tokens, 165);
+    assert_eq!(messages[1].thinking.as_deref(), Some("先确认日期再写入"));
+    assert_eq!(messages[1].thinking_signature.as_deref(), Some("sig-1"));
 
     let list = conversations::list(&vfs).unwrap();
     assert_eq!(list.len(), 1);
@@ -625,6 +631,8 @@ fn conversation_rejects_unknown_roles_and_bad_titles() {
             tool_name: None,
             is_error: false,
             usage: None,
+            thinking: None,
+            thinking_signature: None,
         }],
     );
     assert!(bad_role.is_err(), "system role must not be accepted");

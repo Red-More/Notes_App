@@ -60,6 +60,21 @@ describe('agent protocol bridge', () => {
     expect(end?.type).toBe('toolcall_end')
   })
 
+  it('rebuilds thinking blocks and keeps the provider signature', () => {
+    const message = partial()
+    processEvent({ type: 'thinking_start', contentIndex: 0 }, message)
+    processEvent({ type: 'thinking_delta', contentIndex: 0, delta: '先想' }, message)
+    processEvent({ type: 'thinking_delta', contentIndex: 0, delta: '一下' }, message)
+    processEvent({ type: 'thinking_end', contentIndex: 0, signature: 'sig-1' }, message)
+
+    const block = message.content[0]
+    expect(block?.type).toBe('thinking')
+    if (block && block.type === 'thinking') {
+      expect(block.thinking).toBe('先想一下')
+      expect(block.thinkingSignature).toBe('sig-1')
+    }
+  })
+
   it('marks the partial message terminal on done and error', () => {
     const message = partial()
     const done = processEvent({ type: 'done', reason: 'toolUse', usage: zeroUsage() }, message)

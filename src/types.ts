@@ -275,6 +275,10 @@ export interface ChatMessageRecord {
   isError: boolean
   /** Token usage of this assistant reply; null on older rows. */
   usage: MessageUsage | null
+  /** Reasoning text exposed by the model, if any. */
+  thinking: string | null
+  /** Provider signature required to replay Anthropic thinking blocks. */
+  thinkingSignature: string | null
   createdAt: string
 }
 
@@ -287,6 +291,8 @@ export interface NewChatMessage {
   toolName?: string | null
   isError?: boolean
   usage?: MessageUsage | null
+  thinking?: string | null
+  thinkingSignature?: string | null
 }
 
 /** Wire protocol used by one user-defined model entry. */

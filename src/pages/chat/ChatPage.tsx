@@ -42,6 +42,9 @@ interface Bubble {
   streaming?: boolean
   /** Token usage of a settled assistant reply. */
   usage?: MessageUsage | null
+  /** Reasoning text streamed before the visible answer. */
+  thinking?: string | null
+  thinkingSignature?: string | null
 }
 
 interface ToolCard {
@@ -79,6 +82,8 @@ function recordsToItems(records: ChatMessageRecord[]): Item[] {
         text: record.content,
         isError: record.isError,
         usage: record.usage,
+        thinking: record.thinking,
+        thinkingSignature: record.thinkingSignature,
       })
     } else {
       items.push({
@@ -311,6 +316,7 @@ export default function ChatPage({ isActive }: Props) {
   const [renameText, setRenameText] = useState('')
   const [loading, setLoading] = useState(true)
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set())
+  const [expandedThinking, setExpandedThinking] = useState<Set<string>>(new Set())
   const [docPreview, setDocPreview] = useState<DocPreview | null>(null)
   const [online, setOnline] = useState(() => navigator.onLine)
   // Set after a network-looking failure; WebView's online flag is unreliable.
@@ -376,14 +382,23 @@ export default function ChatPage({ isActive }: Props) {
   }, [])
 
   const persistAssistant = useCallback(
-    (text: string, toolCalls: string | null, isError = false, usage: MessageUsage | null = null) => {
+    (
+      text: string,
+      toolCalls: string | null,
+      isError = false,
+      usage: MessageUsage | null = null,
+      thinking: string | null = null,
+      thinkingSignature: string | null = null,
+    ) => {
       const convId = conversationRef.current?.id
       if (!convId) return
       if (text.trim() === '' && toolCalls === null) return
       void enqueuePersist(() =>
         chatApi.append({
           conversationId: convId,
-          messages: [{ role: 'assistant', content: text, toolCalls, isError, usage }],
+          messages: [
+            { role: 'assistant', content: text, toolCalls, isError, usage, thinking, thinkingSignature },
+          ],
         }),
       )
     },
@@ -430,6 +445,36 @@ export default function ChatPage({ isActive }: Props) {
             scrollToBottom()
             return
           }
+          // Reasoning streams before the visible answer; keep it collapsible.
+          if (
+            update.type === 'thinking_start' ||
+            update.type === 'thinking_delta' ||
+            update.type === 'thinking_end'
+          ) {
+            const id = streamingIdRef.current
+            if (!id) return
+            if (update.type === 'thinking_delta') {
+              setItems((prev) =>
+                prev.map((item) =>
+                  item.id === id && item.kind === 'assistant'
+                    ? { ...item, thinking: (item.thinking ?? '') + update.delta }
+                    : item,
+                ),
+              )
+            } else if (update.type === 'thinking_end') {
+              const block = update.partial.content[update.contentIndex]
+              const signature = block?.type === 'thinking' ? (block.thinkingSignature ?? null) : null
+              setItems((prev) =>
+                prev.map((item) =>
+                  item.id === id && item.kind === 'assistant' && item.thinking
+                    ? { ...item, thinkingSignature: signature }
+                    : item,
+                ),
+              )
+            }
+            scrollToBottom()
+            return
+          }
           // Stream tool arguments ahead of execution so the card shows real params.
           if (
             update.type === 'toolcall_start' ||
@@ -468,7 +513,7 @@ export default function ChatPage({ isActive }: Props) {
           if (event.message.role !== 'assistant') return
           const message = event.message
           const id = streamingIdRef.current
-          const { text, toolCalls } = extractAssistant(message)
+          const { text, toolCalls, thinking, thinkingSignature } = extractAssistant(message)
           const failed = message.stopReason === 'error' || message.stopReason === 'aborted'
           const usage = failed ? null : usageFromMessage(message)
           const shown = failed
@@ -480,7 +525,15 @@ export default function ChatPage({ isActive }: Props) {
             if (shown.trim() === '') return prev.filter((item) => item.id !== id)
             return prev.map((item) =>
               item.id === id && item.kind === 'assistant'
-                ? { ...item, text: shown, streaming: false, isError: failed, usage }
+                ? {
+                    ...item,
+                    text: shown,
+                    streaming: false,
+                    isError: failed,
+                    usage,
+                    thinking: thinking ?? item.thinking ?? null,
+                    thinkingSignature: thinkingSignature ?? item.thinkingSignature ?? null,
+                  }
                 : item,
             )
           })
@@ -489,7 +542,14 @@ export default function ChatPage({ isActive }: Props) {
           if (failed) setNetworkIssue(networkFailure(message.errorMessage ?? ''))
           else setNetworkIssue(false)
           // Failure/cancel bubbles are persisted too, so reloads keep the last state.
-          persistAssistant(failed ? shown : text, failed ? null : toolCalls, failed, usage)
+          persistAssistant(
+            failed ? shown : text,
+            failed ? null : toolCalls,
+            failed,
+            usage,
+            thinking,
+            failed ? null : thinkingSignature,
+          )
           scrollToBottom()
           break
         }
@@ -752,6 +812,15 @@ export default function ChatPage({ isActive }: Props) {
     })
   }, [])
 
+  const toggleThinking = useCallback((id: string) => {
+    setExpandedThinking((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
+
   const openDocPreview = useCallback(async (path: string) => {
     setDocPreview({ path, html: '' })
     try {
@@ -824,6 +893,8 @@ export default function ChatPage({ isActive }: Props) {
               toolName: record.toolName,
               isError: record.isError,
               usage: record.usage,
+              thinking: record.thinking,
+              thinkingSignature: record.thinkingSignature,
             })),
           })
         }
@@ -987,6 +1058,21 @@ export default function ChatPage({ isActive }: Props) {
                     />
                   ) : (
                     <>
+                      {item.kind === 'assistant' && item.thinking && (
+                        <div className="chat-thinking">
+                          <button
+                            type="button"
+                            className="chat-thinking-toggle"
+                            aria-expanded={expandedThinking.has(item.id)}
+                            onClick={() => toggleThinking(item.id)}
+                          >
+                            {expandedThinking.has(item.id) ? '收起思考' : '思考'}
+                          </button>
+                          {expandedThinking.has(item.id) && (
+                            <div className="chat-thinking-body">{item.thinking}</div>
+                          )}
+                        </div>
+                      )}
                       <div
                         className={`chat-bubble ${item.kind} ${item.isError ? 'error' : ''}`}
                       >

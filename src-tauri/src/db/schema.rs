@@ -11,12 +11,13 @@
 //! v5：媒体作业结果列（media_jobs.result）。
 //! v6：媒体作业支持 `asr` 类型（重建 CHECK 约束）。
 //! v7：消息表记录 token 用量（usage_* / cache_*）。
+//! v8：消息表保存思考内容与签名（thinking / thinking_signature）。
 //! FTS5 索引在应用层与 blobs 同事务维护（无触发器），schema 版本保持不变。
 
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// 当前 life.db schema 版本。
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// 虚拟文件系统的根路径，与 `vfs::cap_gate::ROOT` 保持一致。
 const ROOT: &str = "/life";
@@ -323,6 +324,21 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
             if !table_has_column(&tx, "messages", column)? {
                 tx.execute_batch(&format!(
                     "ALTER TABLE messages ADD COLUMN {column} INTEGER;"
+                ))?;
+            }
+        }
+        tx.pragma_update(None, "user_version", 7)?;
+        tx.commit()?;
+        version = 7;
+    }
+
+    if version < 8 {
+        let tx = conn.transaction()?;
+        // Thinking text and provider signature; NULL when the model did not reason.
+        for column in ["thinking", "thinking_signature"] {
+            if !table_has_column(&tx, "messages", column)? {
+                tx.execute_batch(&format!(
+                    "ALTER TABLE messages ADD COLUMN {column} TEXT;"
                 ))?;
             }
         }

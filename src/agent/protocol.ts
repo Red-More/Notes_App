@@ -16,6 +16,9 @@ export type ProxyEvent =
   | { type: 'text_start'; contentIndex: number }
   | { type: 'text_delta'; contentIndex: number; delta: string }
   | { type: 'text_end'; contentIndex: number; contentSignature?: string }
+  | { type: 'thinking_start'; contentIndex: number }
+  | { type: 'thinking_delta'; contentIndex: number; delta: string }
+  | { type: 'thinking_end'; contentIndex: number; signature?: string }
   | { type: 'toolcall_start'; contentIndex: number; id: string; toolName: string }
   | { type: 'toolcall_delta'; contentIndex: number; delta: string }
   | { type: 'toolcall_end'; contentIndex: number; toolCall: ToolCall }
@@ -83,6 +86,32 @@ export function processEvent(
         type: 'text_end',
         contentIndex: event.contentIndex,
         content: block.text,
+        partial,
+      }
+    }
+    case 'thinking_start': {
+      partial.content[event.contentIndex] = { type: 'thinking', thinking: '' }
+      return { type: 'thinking_start', contentIndex: event.contentIndex, partial }
+    }
+    case 'thinking_delta': {
+      const block = partial.content[event.contentIndex]
+      if (block?.type !== 'thinking') return undefined
+      block.thinking += event.delta
+      return {
+        type: 'thinking_delta',
+        contentIndex: event.contentIndex,
+        delta: event.delta,
+        partial,
+      }
+    }
+    case 'thinking_end': {
+      const block = partial.content[event.contentIndex]
+      if (block?.type !== 'thinking') return undefined
+      block.thinkingSignature = event.signature
+      return {
+        type: 'thinking_end',
+        contentIndex: event.contentIndex,
+        content: block.thinking,
         partial,
       }
     }

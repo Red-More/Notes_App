@@ -57,6 +57,7 @@ export const nativeStreamFn: StreamFn = (
             temperature: options?.temperature,
             maxTokens: options?.maxTokens,
             toolChoice: options?.toolChoice,
+            thinkingLevel: options?.reasoning,
           },
         },
         onEvent: channel,

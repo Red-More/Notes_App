@@ -301,8 +301,8 @@
 | 工具参数校验 | `validateToolCall()`、`validateToolArguments()` | 部分接入 | 未直接调用，由 `pi-agent-core` 内部调用 |
 | 约束采样 | `constrainedSampling`（JSON Schema / grammar） | 未接入 | 6 个工具均未声明 |
 | 流式参数解析 | `parseStreamingJson()`、`parseToolCallArguments()` | 部分接入 | 只用 `parseStreamingJson`；完整参数由 Rust `ToolCallPayload` 解析 |
-| 思考/推理 | `thinking_*` 事件、`reasoning`、`thinkingBudgets`、`providerThinkingLevel` | 未接入 | Rust 不解析、前端不消费、持久化不保存 |
-| 思考档位探测 | `getSupportedThinkingLevels()` | 未接入 | `thinkingLevel` 固定 `off` |
+| 思考/推理 | `thinking_*` 事件、`reasoning`、`thinkingBudgets`、`providerThinkingLevel` | 已接入 | 三种协议解析思考流；前端折叠展示；`thinking`/`thinking_signature` 落库（schema v8）；Anthropic 重放带签名的思考块 |
+| 思考档位探测 | `getSupportedThinkingLevels()` | 未接入 | 未按 Provider 探测可用档位，统一使用 `medium` |
 | 图片输入 | `ImageContent`、多模态消息 | 未接入 | UI 无图片入口；Rust `text_of()` 丢弃图片 |
 | 图像生成 | `generateImages()`、`ImageModel` | 未接入 | 无调用 |
 | 结构化分类 | `classify()`、`ClassifierModel` | 未接入 | 无调用 |
@@ -346,7 +346,7 @@
 | 会话 ID | `sessionId` | 未接入 | 无 prompt cache/会话亲和 |
 | 请求身份 | `identity` | 未接入 | 无 |
 | 请求调试回调 | `onPayload`、`onResponse`、`onProviderStreamEvent` | 未接入 | Agent 选项未配置 |
-| 思考档位 | `thinkingLevel`、`thinkingBudgets` | 未接入 | 固定 `off` |
+| 思考档位 | `thinkingLevel`、`thinkingBudgets` | 已接入 | `thinking_mode=on` 时 `thinkingLevel='medium'`；Rust 映射为 Anthropic `budget_tokens`、OpenAI `reasoning_effort` / `reasoning.effort` |
 | 传输选择 | `transport` | 未接入 | 由 Rust 决定 HTTP/SSE |
 | 重试延迟上限 | `maxRetryDelayMs` | 未接入 | 无重试 |
 | Steering 队列 | `steer()`、`steeringMode`、`clearSteeringQueue()` | 未接入 | UI 只能停止后重发 |
@@ -357,7 +357,7 @@
 | 运行信号 | `agent.signal` | 未接入 | 只依赖 `abort()` |
 | 重置 | `reset()` | 未接入 | 通过销毁/重建 Agent 实现 |
 | 事件订阅 | `subscribe()` | 部分接入 | 10 种事件消费 7 种；新增 `toolcall_*` 流式参数展示；忽略 `agent_start`、`turn_start`、`turn_end`、`tool_execution_update` |
-| 思考事件 | `message_update.assistantMessageEvent.thinking_*` | 未接入 | 前端只处理 `text_delta` |
+| 思考事件 | `message_update.assistantMessageEvent.thinking_*` | 已接入 | 前端消费 `thinking_start/delta/end`，默认折叠展示并随消息落库 |
 | 图片提示 | `prompt(text, images)` | 未接入 | 只支持纯文本 |
 | 自定义消息类型 | `declare module` 扩展 `CustomAgentMessages` | 未接入 | 历史只有标准三角色 |
 | 低层循环 | `agentLoop`、`agentLoopContinue`、`runAgentLoop`、`runAgentLoopContinue` | 未接入 | 只用高层 `Agent` |
@@ -409,12 +409,12 @@
 
 | 功能点 | 当前落点 | 缺口 |
 |---|---|---|
-| 思考流全链路 | 类型与事件协议已预留 | Rust 不解析 `thinking_*`；前端不消费；持久化不保存；`thinkingLevel` 固定 `off` |
-| 用量/成本展示 | `Usage` 类型、Rust 部分 token 统计 | 成本恒 0；UI 不展示；历史消息用量丢失 |
-| 模型能力接线 | `withCapabilities()` 读取 `thinkingMode`、`contextWindow` | `thinkingMode` 未驱动请求；`contextWindow` 只写入描述性 `Model` |
-| 超长会话策略 | Rust `trim_messages()` 200 条 | 未使用 pi-ai overflow/estimate；裁剪粒度是消息条数而非 token |
+| 思考流全链路 | 类型与事件协议已预留 | 本轮已闭环：Rust 三协议解析 → 前端折叠展示 → schema v8 持久化 → Anthropic 带签名重放 |
+| 用量/成本展示 | `Usage` 类型、Rust token 统计 | 已落库并展示；Rust `cost` 仍为 0，成本由前端按价格换算 |
+| 模型能力接线 | `withCapabilities()` 读取 `thinkingMode`、`contextWindow` | `thinkingMode` 已驱动请求档位；`contextWindow` 用于 `transformContext` 预算 |
+| 超长会话策略 | Rust `trim_messages()` 200 条 | `transformContext` 已按 token 预算裁剪；未使用 pi-ai 官方 overflow/estimate |
 | 错误分类与重试 | 自研 `error` 事件 | 无 `utils/retry`、无 `maxRetryDelayMs`、无错误类型分层 |
-| 工具参数展示 | 工具卡片只在 start/end 更新 | 未消费 `toolcall_delta`，看不到参数流式生成 |
+| 工具参数展示 | 工具卡片只在 start/end 更新 | 已消费 `toolcall_delta`，参数实时可见 |
 
 ### 5.2 P1：官方能力可直接增强体验
 
@@ -464,9 +464,9 @@
 | `toolcall_delta` 工具参数流式展示 | [ChatPage.tsx](../src/pages/chat/ChatPage.tsx) 消费 `toolcall_start/delta/end`，工具卡片在 `tool_execution_start` 前即可显示参数，并按 `toolCallId` 去重 |
 | `Usage` 全链路持久化与展示 | schema v7 为 `messages` 增加 usage 列；[conversations.rs](../src-tauri/src/agent/conversations.rs) 读写；气泡展示输入/输出与按价格计算的成本；[runtime.ts](../src/agent/runtime.ts) 历史还原保留 usage |
 | `estimateContextTokens` + `transformContext` | 新增 [context.ts](../src/agent/context.ts) 本地估算器（CJK 1 字≈1 token，ASCII 3 字符≈1 token），[runtime.ts](../src/agent/runtime.ts) 按 `contextWindow` 的 75% 裁剪到 user 回合边界 |
-| 6.1 其余两项 | 同属本轮：toolcall_delta 与 usage 均已落库/展示 |
+| `thinking_*` 全链路 | [llm.rs](../src-tauri/src/agent/llm.rs) 解析三协议思考流（含 Anthropic 签名）；[protocol.ts](../src/agent/protocol.ts) 重建思考块；[ChatPage.tsx](../src/pages/chat/ChatPage.tsx) 折叠展示；schema v8 保存 `thinking`/`thinking_signature` |
 
-剩余未落地：思考流全链路、图片输入、`sessionId`/`cacheRetention`、`steer()`/`followUp()`、`continue()`、`StringEnum`/`prepareArguments`、远程 MCP。
+剩余未落地：图片输入、`sessionId`/`cacheRetention`、`steer()`/`followUp()`、`continue()`、`StringEnum`/`prepareArguments`、远程 MCP。
 
 ---
 
@@ -497,7 +497,7 @@
 | `continue()` | 想修「重试会重复插入 user 消息」 | 需要处理已取消的 assistant 消息作为上下文 |
 | `StringEnum` / `prepareArguments` | 弱模型经常给错枚举值或参数形状 | 只改工具 schema/兼容层，收益有限 |
 
-以上六项全部纳入实现：`thinking_*` 全链路落地（默认折叠展示），图片输入与 `sessionId`/`cacheRetention` 在媒体管线打通后落地。当前进度：六项尚未开始，下一批按「思考流 → 图片输入 → 队列交互 → 缓存」顺序推进。
+以上六项全部纳入实现：`thinking_*` 全链路已落地（默认折叠展示）；图片输入与 `sessionId`/`cacheRetention` 在媒体管线打通后落地。当前进度：思考流已完成，下一批按「图片输入 → 队列交互 → 缓存」顺序推进。
 
 ### 6.3 明确不建议（扩展后仍不采纳）
 

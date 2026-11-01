@@ -3039,6 +3039,28 @@ body.split-resizing {
   white-space: nowrap;
 }
 
+.chat-thinking {
+  margin: 0 0 6px;
+}
+
+.chat-thinking-toggle {
+  padding: 2px 8px;
+  border-radius: 8px;
+  color: var(--text-3);
+  font-size: 11.5px;
+  background: var(--surface-2);
+}
+
+.chat-thinking-body {
+  margin-top: 4px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--border);
+  color: var(--text-2);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .chat-context-ring {
   width: 34px;
   height: 34px;

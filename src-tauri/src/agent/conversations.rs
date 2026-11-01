@@ -49,6 +49,9 @@ pub struct ChatMessage {
     pub tool_name: Option<String>,
     pub is_error: bool,
     pub usage: Option<MessageUsage>,
+    /// Reasoning text and provider signature, when the model exposed them.
+    pub thinking: Option<String>,
+    pub thinking_signature: Option<String>,
     pub created_at: String,
 }
 
@@ -69,6 +72,10 @@ pub struct NewMessage {
     pub is_error: bool,
     #[serde(default)]
     pub usage: Option<MessageUsage>,
+    #[serde(default)]
+    pub thinking: Option<String>,
+    #[serde(default)]
+    pub thinking_signature: Option<String>,
 }
 
 fn now(conn: &Connection) -> Result<String, ToolError> {
@@ -199,7 +206,8 @@ pub fn messages(vfs: &VirtualFs, conversation_id: i64) -> Result<Vec<ChatMessage
     ensure_exists(conn, conversation_id)?;
     let mut stmt = conn.prepare(
         "SELECT id, role, content, tool_calls, tool_call_id, tool_name, is_error, created_at,
-                usage_input, usage_output, usage_total, usage_cache_read, usage_cache_write
+                usage_input, usage_output, usage_total, usage_cache_read, usage_cache_write,
+                thinking, thinking_signature
          FROM messages WHERE conversation_id = ?1 ORDER BY id ASC",
     )?;
     let rows = stmt.query_map(params![conversation_id], row_to_message)?;
@@ -244,8 +252,8 @@ pub fn append(
             "INSERT INTO messages
                  (conversation_id, role, content, tool_calls, tool_call_id, tool_name, is_error,
                   usage_input, usage_output, usage_total, usage_cache_read, usage_cache_write,
-                  created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                  thinking, thinking_signature, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 conversation_id,
                 item.role,
@@ -259,6 +267,8 @@ pub fn append(
                 item.usage.map(|usage| usage.total_tokens),
                 item.usage.map(|usage| usage.cache_read),
                 item.usage.map(|usage| usage.cache_write),
+                item.thinking,
+                item.thinking_signature,
                 at
             ],
         )?;
@@ -271,6 +281,8 @@ pub fn append(
             tool_name: item.tool_name,
             is_error: item.is_error,
             usage: item.usage,
+            thinking: item.thinking,
+            thinking_signature: item.thinking_signature,
             created_at: at.clone(),
         });
     }
@@ -319,6 +331,8 @@ fn row_to_message(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
             cache_read: cache_read.unwrap_or(0),
             cache_write: cache_write.unwrap_or(0),
         }),
+        thinking: r.get(13)?,
+        thinking_signature: r.get(14)?,
         created_at: r.get(7)?,
     })
 }

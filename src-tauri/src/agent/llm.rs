@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use super::model_store::{self, ApiFormat, ModelEntry};
-use super::params::LlmParams;
+use super::params::{LlmParams, ThinkingMode};
 use super::{AgentState, TOOL_ALLOWLIST};
 use crate::vfs::error::ToolError;
 
@@ -79,6 +79,9 @@ pub struct Options {
     pub max_tokens: Option<u32>,
     #[serde(default)]
     pub tool_choice: Option<String>,
+    /// pi thinking level (`off` / `minimal` / `low` / `medium` / `high`).
+    #[serde(default)]
+    pub thinking_level: Option<String>,
 }
 
 /// 工具声明，直接取自 pi 的 `Tool`（`parameters` 是 TypeBox 生成的 JSON Schema）。
@@ -207,6 +210,25 @@ pub enum StreamEvent {
         #[serde(rename = "contentIndex")]
         content_index: usize,
     },
+    #[serde(rename = "thinking_start")]
+    ThinkingStart {
+        #[serde(rename = "contentIndex")]
+        content_index: usize,
+    },
+    #[serde(rename = "thinking_delta")]
+    ThinkingDelta {
+        #[serde(rename = "contentIndex")]
+        content_index: usize,
+        delta: String,
+    },
+    #[serde(rename = "thinking_end")]
+    ThinkingEnd {
+        #[serde(rename = "contentIndex")]
+        content_index: usize,
+        /// Anthropic thinking blocks carry a signature required for replay.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
     #[serde(rename = "toolcall_start")]
     ToolCallStart {
         #[serde(rename = "contentIndex")]
@@ -262,6 +284,9 @@ enum Role {
 struct Turn {
     role: Role,
     text: String,
+    /// Reasoning text; only replayed for Anthropic, which requires signatures.
+    thinking: String,
+    thinking_signature: Option<String>,
     tool_calls: Vec<ToolCallSpec>,
     tool_call_id: Option<String>,
     is_error: bool,
@@ -345,12 +370,16 @@ fn to_turns(messages: &[Value]) -> Vec<Turn> {
             "user" => turns.push(Turn {
                 role: Role::User,
                 text: message.get("content").map(text_of).unwrap_or_default(),
+                thinking: String::new(),
+                thinking_signature: None,
                 tool_calls: Vec::new(),
                 tool_call_id: None,
                 is_error: false,
             }),
             "assistant" => {
                 let mut text = String::new();
+                let mut thinking = String::new();
+                let mut thinking_signature = None;
                 let mut calls = Vec::new();
                 if let Some(items) = message.get("content").and_then(Value::as_array) {
                     for item in items {
@@ -362,6 +391,15 @@ fn to_turns(messages: &[Value]) -> Vec<Turn> {
                                     }
                                     text.push_str(t);
                                 }
+                            }
+                            "thinking" => {
+                                if let Some(t) = item.get("thinking").and_then(Value::as_str) {
+                                    thinking.push_str(t);
+                                }
+                                thinking_signature = item
+                                    .get("thinkingSignature")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string);
                             }
                             "toolCall" => {
                                 if let Some(spec) = parse_tool_call(item) {
@@ -375,6 +413,8 @@ fn to_turns(messages: &[Value]) -> Vec<Turn> {
                 turns.push(Turn {
                     role: Role::Assistant,
                     text,
+                    thinking,
+                    thinking_signature,
                     tool_calls: calls,
                     tool_call_id: None,
                     is_error: false,
@@ -392,6 +432,8 @@ fn to_turns(messages: &[Value]) -> Vec<Turn> {
                 turns.push(Turn {
                     role: Role::Tool,
                     text,
+                    thinking: String::new(),
+                    thinking_signature: None,
                     tool_calls: Vec::new(),
                     tool_call_id: message
                         .get("toolCallId")
@@ -660,6 +702,37 @@ struct Prepared<'a> {
     params: &'a LlmParams,
 }
 
+/// Map the pi thinking level (or the stored `thinking_mode`) to an effort hint.
+/// `None` means reasoning must stay off for this request.
+fn reasoning_effort(req: &Prepared<'_>) -> Option<&'static str> {
+    let level = req.options.thinking_level.as_deref();
+    let enabled = match level {
+        Some("off") => false,
+        Some(_) => true,
+        None => matches!(req.params.thinking_mode, Some(ThinkingMode::On)),
+    };
+    if !enabled {
+        return None;
+    }
+    Some(match level {
+        Some("minimal") | Some("low") => "low",
+        Some("high") => "high",
+        _ => "medium",
+    })
+}
+
+/// Anthropic thinking budget: half of the output limit, never below 1024.
+fn thinking_budget(req: &Prepared<'_>) -> Option<u32> {
+    reasoning_effort(req)?;
+    let max = req
+        .options
+        .max_tokens
+        .or(req.params.output_limit())
+        .unwrap_or(ANTHROPIC_REQUIRED_MAX_TOKENS);
+    let budget = (max / 2).max(1024);
+    (max > budget + 1).then_some(budget)
+}
+
 // ---------------------------------------------------------------------------
 // OpenAI（/v1/chat/completions）
 // ---------------------------------------------------------------------------
@@ -760,6 +833,9 @@ fn prepare_openai_body(req: &Prepared<'_>) -> Result<Value, ToolError> {
     };
     let stream = req.params.stream_enabled();
     req.params.apply_openai(map);
+    if let Some(effort) = reasoning_effort(req) {
+        map.insert("reasoning_effort".into(), json!(effort));
+    }
     map.insert("stream".into(), json!(stream));
     if !stream {
         map.remove("stream_options");
@@ -793,6 +869,7 @@ async fn openai_stream(
     let resp = send_json(state, req.endpoint, &headers, &body, req.params.timeout()).await?;
 
     let mut next_index = 0usize;
+    let mut thinking_index: Option<usize> = None;
     let mut text_index: Option<usize> = None;
     let mut tool_states: Vec<OpenAiToolState> = Vec::new();
     let mut finish: Option<String> = None;
@@ -826,6 +903,28 @@ async fn openai_stream(
         let Some(delta) = choice.get("delta") else {
             return;
         };
+        // Reasoning models on OpenAI-compatible gateways stream `reasoning_content`
+        // (DeepSeek) or `reasoning`; both precede the visible answer.
+        let reasoning = delta
+            .get("reasoning_content")
+            .or_else(|| delta.get("reasoning"))
+            .and_then(Value::as_str);
+        if let Some(reasoning) = reasoning {
+            if !reasoning.is_empty() {
+                let index = *thinking_index.get_or_insert_with(|| {
+                    let index = next_index;
+                    next_index += 1;
+                    emit(StreamEvent::ThinkingStart {
+                        content_index: index,
+                    });
+                    index
+                });
+                emit(StreamEvent::ThinkingDelta {
+                    content_index: index,
+                    delta: reasoning.to_string(),
+                });
+            }
+        }
         if let Some(text) = delta.get("content").and_then(Value::as_str) {
             if !text.is_empty() {
                 let index = *text_index.get_or_insert_with(|| {
@@ -916,6 +1015,12 @@ async fn openai_stream(
         return Ok(());
     }
 
+    if let Some(index) = thinking_index {
+        emit(StreamEvent::ThinkingEnd {
+            content_index: index,
+            signature: None,
+        });
+    }
     if let Some(index) = text_index {
         emit(StreamEvent::TextEnd {
             content_index: index,
@@ -1028,6 +1133,9 @@ fn prepare_responses_body(req: &Prepared<'_>) -> Result<Value, ToolError> {
         unreachable!("responses body is always an object")
     };
     req.params.apply_openai_responses(map);
+    if let Some(effort) = reasoning_effort(req) {
+        map.insert("reasoning".into(), json!({ "effort": effort }));
+    }
     map.insert("stream".into(), json!(req.params.stream_enabled()));
     req.params.merge_extra(map)?;
     Ok(body)
@@ -1040,6 +1148,23 @@ struct ResponsesToolState {
     name: String,
     args: String,
     done: bool,
+}
+
+/// Flatten an OpenAI Responses `reasoning` item into plain text.
+fn reasoning_summary_text(item: &Value) -> String {
+    for key in ["summary", "content"] {
+        if let Some(parts) = item.get(key).and_then(Value::as_array) {
+            let text = parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !text.trim().is_empty() {
+                return text;
+            }
+        }
+    }
+    String::new()
 }
 
 fn responses_usage(response: &Value) -> Usage {
@@ -1075,6 +1200,8 @@ async fn responses_stream(
     let resp = send_json(state, req.endpoint, &headers, &body, req.params.timeout()).await?;
 
     let mut next_index = 0usize;
+    let mut thinking_index: Option<usize> = None;
+    let mut thinking_ended = false;
     let mut text_index: Option<usize> = None;
     let mut text_ended = false;
     let mut tool_states: Vec<ResponsesToolState> = Vec::new();
@@ -1149,6 +1276,29 @@ async fn responses_stream(
                     delta: delta.to_string(),
                 });
             }
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                if thinking_ended {
+                    return;
+                }
+                let Some(delta) = event.get("delta").and_then(Value::as_str) else {
+                    return;
+                };
+                if delta.is_empty() {
+                    return;
+                }
+                let index = *thinking_index.get_or_insert_with(|| {
+                    let index = next_index;
+                    next_index += 1;
+                    emit(StreamEvent::ThinkingStart {
+                        content_index: index,
+                    });
+                    index
+                });
+                emit(StreamEvent::ThinkingDelta {
+                    content_index: index,
+                    delta: delta.to_string(),
+                });
+            }
             "response.function_call_arguments.delta" => {
                 let output_index = event
                     .get("output_index")
@@ -1216,6 +1366,17 @@ async fn responses_stream(
                             }
                         }
                     }
+                    "reasoning" => {
+                        if let Some(index) = thinking_index {
+                            if !thinking_ended {
+                                emit(StreamEvent::ThinkingEnd {
+                                    content_index: index,
+                                    signature: None,
+                                });
+                                thinking_ended = true;
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1264,6 +1425,14 @@ async fn responses_stream(
         return Ok(());
     }
 
+    if let Some(index) = thinking_index {
+        if !thinking_ended {
+            emit(StreamEvent::ThinkingEnd {
+                content_index: index,
+                signature: None,
+            });
+        }
+    }
     if let Some(index) = text_index {
         if !text_ended {
             emit(StreamEvent::TextEnd {
@@ -1361,6 +1530,13 @@ async fn responses_json(
                     index += 1;
                     has_tools = true;
                 }
+                "reasoning" => {
+                    let text = reasoning_summary_text(item);
+                    if !text.trim().is_empty() {
+                        emit_thinking_block(emit, index, &text, None);
+                        index += 1;
+                    }
+                }
                 _ => {}
             }
         }
@@ -1400,6 +1576,17 @@ fn anthropic_body(
         match turn.role {
             Role::Assistant => {
                 let mut blocks: Vec<Value> = Vec::new();
+                // Anthropic requires previous thinking blocks (with signatures)
+                // when extended thinking is combined with tool use.
+                if !turn.thinking.is_empty() {
+                    if let Some(signature) = &turn.thinking_signature {
+                        blocks.push(json!({
+                            "type": "thinking",
+                            "thinking": turn.thinking,
+                            "signature": signature,
+                        }));
+                    }
+                }
                 if !turn.text.is_empty() {
                     blocks.push(json!({ "type": "text", "text": turn.text }));
                 }
@@ -1487,6 +1674,13 @@ fn prepare_anthropic_body(req: &Prepared<'_>) -> Result<Value, ToolError> {
     // `apply_anthropic` overwrites the protocol fallback whenever the user set
     // an output budget; otherwise the fallback keeps the request valid.
     req.params.apply_anthropic(map);
+    // Extended thinking needs a budget strictly below `max_tokens`.
+    if let Some(budget) = thinking_budget(req) {
+        map.insert(
+            "thinking".into(),
+            json!({ "type": "enabled", "budget_tokens": budget }),
+        );
+    }
     map.insert("stream".into(), json!(req.params.stream_enabled()));
     req.params.merge_extra(map)?;
     Ok(body)
@@ -1516,6 +1710,8 @@ async fn anthropic_stream(
 
     let mut usage = Usage::default();
     let mut text_blocks: Vec<usize> = Vec::new();
+    let mut thinking_blocks: Vec<usize> = Vec::new();
+    let mut thinking_signatures: BTreeMap<usize, String> = BTreeMap::new();
     let mut tool_states: Vec<AnthropicToolState> = Vec::new();
     let mut stop_reason: Option<String> = None;
 
@@ -1546,6 +1742,12 @@ async fn anthropic_stream(
                     "text" => {
                         text_blocks.push(index);
                         emit(StreamEvent::TextStart {
+                            content_index: index,
+                        });
+                    }
+                    "thinking" => {
+                        thinking_blocks.push(index);
+                        emit(StreamEvent::ThinkingStart {
                             content_index: index,
                         });
                     }
@@ -1589,6 +1791,22 @@ async fn anthropic_stream(
                             });
                         }
                     }
+                    "thinking_delta" => {
+                        if let Some(text) = delta.get("thinking").and_then(Value::as_str) {
+                            emit(StreamEvent::ThinkingDelta {
+                                content_index: index,
+                                delta: text.to_string(),
+                            });
+                        }
+                    }
+                    "signature_delta" => {
+                        if let Some(signature) = delta.get("signature").and_then(Value::as_str) {
+                            thinking_signatures
+                                .entry(index)
+                                .or_default()
+                                .push_str(signature);
+                        }
+                    }
                     "input_json_delta" => {
                         if let Some(partial) = delta.get("partial_json").and_then(Value::as_str) {
                             if let Some(tool) = tool_states.iter_mut().find(|t| t.block == index) {
@@ -1608,6 +1826,12 @@ async fn anthropic_stream(
                 if text_blocks.contains(&index) {
                     emit(StreamEvent::TextEnd {
                         content_index: index,
+                    });
+                }
+                if thinking_blocks.contains(&index) {
+                    emit(StreamEvent::ThinkingEnd {
+                        content_index: index,
+                        signature: thinking_signatures.remove(&index),
                     });
                 }
                 if let Some(tool) = tool_states.iter().find(|t| t.block == index) {
@@ -1684,6 +1908,23 @@ fn emit_text_block(emit: Emit<'_>, index: usize, text: &str) {
     });
 }
 
+fn emit_thinking_block(emit: Emit<'_>, index: usize, text: &str, signature: Option<String>) {
+    if text.trim().is_empty() {
+        return;
+    }
+    emit(StreamEvent::ThinkingStart {
+        content_index: index,
+    });
+    emit(StreamEvent::ThinkingDelta {
+        content_index: index,
+        delta: text.to_string(),
+    });
+    emit(StreamEvent::ThinkingEnd {
+        content_index: index,
+        signature,
+    });
+}
+
 fn emit_tool_block(emit: Emit<'_>, index: usize, id: String, name: String, arguments: &Value) {
     let args = serde_json::to_string(arguments).unwrap_or_else(|_| "{}".to_string());
     emit_raw_tool_block(emit, index, id, name, &args);
@@ -1754,6 +1995,14 @@ async fn openai_json(
         .and_then(|items| items.first());
     let mut index = 0usize;
     if let Some(message) = choice.and_then(|c| c.get("message")) {
+        if let Some(reasoning) = message
+            .get("reasoning_content")
+            .or_else(|| message.get("reasoning"))
+            .and_then(Value::as_str)
+        {
+            emit_thinking_block(emit, index, reasoning, None);
+            index += 1;
+        }
         if let Some(text) = message.get("content").and_then(Value::as_str) {
             emit_text_block(emit, index, text);
             index += 1;
@@ -1835,6 +2084,16 @@ async fn anthropic_json(
                 "text" => {
                     if let Some(text) = block.get("text").and_then(Value::as_str) {
                         emit_text_block(emit, index, text);
+                        index += 1;
+                    }
+                }
+                "thinking" => {
+                    if let Some(text) = block.get("thinking").and_then(Value::as_str) {
+                        let signature = block
+                            .get("signature")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                        emit_thinking_block(emit, index, text, signature);
                         index += 1;
                     }
                 }

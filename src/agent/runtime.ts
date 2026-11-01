@@ -101,6 +101,13 @@ export function createAppModel(profile: AgentProfile): Model<string> {
 /** 把一条已落库的 assistant 消息还原成 pi 的 AssistantMessage。 */
 function toAssistantMessage(record: ChatMessageRecord, profile: AgentProfile): AssistantMessage {
   const content: AssistantMessage['content'] = []
+  if (record.thinking) {
+    content.push({
+      type: 'thinking',
+      thinking: record.thinking,
+      thinkingSignature: record.thinkingSignature ?? undefined,
+    })
+  }
   if (record.content.trim() !== '') {
     content.push({ type: 'text', text: record.content })
   }
@@ -176,7 +183,7 @@ export function createAgent(
     initialState: {
       systemPrompt: buildSystemPrompt(skillsIndex),
       model: createAppModel(profile),
-      thinkingLevel: 'off',
+      thinkingLevel: profile.reasoning ? 'medium' : 'off',
       tools: createTools(skills),
       messages: history,
     },
@@ -223,19 +230,28 @@ export function createAgent(
   })
 }
 
-/** 从 assistant 消息里抽出可落库的文本与工具调用 JSON。 */
+/** 从 assistant 消息里抽出可落库的文本、思考与工具调用 JSON。 */
 export function extractAssistant(message: AssistantMessage): {
   text: string
   toolCalls: string | null
+  thinking: string | null
+  thinkingSignature: string | null
 } {
   const texts: string[] = []
+  const thoughts: string[] = []
   const calls: ToolCall[] = []
+  let thinkingSignature: string | null = null
   for (const block of message.content) {
     if (block.type === 'text') texts.push(block.text)
-    else if (block.type === 'toolCall') calls.push(block)
+    else if (block.type === 'thinking') {
+      thoughts.push(block.thinking)
+      if (block.thinkingSignature) thinkingSignature = block.thinkingSignature
+    } else if (block.type === 'toolCall') calls.push(block)
   }
   return {
     text: texts.join('\n'),
     toolCalls: calls.length > 0 ? JSON.stringify(calls) : null,
+    thinking: thoughts.length > 0 ? thoughts.join('\n') : null,
+    thinkingSignature,
   }
 }
