@@ -9,7 +9,7 @@ import { createAgent, extractAssistant, profileFromSettings, toAgentMessages } f
 import type { AgentProfile } from '../../agent/runtime'
 import { buildSkillsIndex } from '../../agent/skills'
 import type { AgentEvent } from '@earendil-works/pi-agent-core'
-import type { AgentSettings, ChatConversation, ChatMessageRecord, SkillSummary } from '../../types'
+import type { AgentSettings, ChatConversation, ChatMessageRecord, MessageUsage, SkillSummary } from '../../types'
 import { friendlyError } from '../../utils'
 import { toast } from '../../toast'
 import { Modal } from '../../components/ui'
@@ -40,6 +40,8 @@ interface Bubble {
   text: string
   isError?: boolean
   streaming?: boolean
+  /** Token usage of a settled assistant reply. */
+  usage?: MessageUsage | null
 }
 
 interface ToolCard {
@@ -76,6 +78,7 @@ function recordsToItems(records: ChatMessageRecord[]): Item[] {
         kind: 'assistant',
         text: record.content,
         isError: record.isError,
+        usage: record.usage,
       })
     } else {
       items.push({
@@ -173,6 +176,32 @@ const TOOL_META: Record<
 
 function formatDuration(ms: number): string {
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`
+}
+
+/** Read the token usage of a settled assistant message (zeros mean "unreported"). */
+function usageFromMessage(message: {
+  usage: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number }
+}): MessageUsage | null {
+  const usage = message.usage
+  if (usage.totalTokens <= 0) return null
+  return {
+    input: usage.input,
+    output: usage.output,
+    totalTokens: usage.totalTokens,
+    cacheRead: usage.cacheRead,
+    cacheWrite: usage.cacheWrite,
+  }
+}
+
+function formatTokens(tokens: number): string {
+  return tokens < 1000 ? String(tokens) : `${(tokens / 1000).toFixed(1)}k`
+}
+
+/** USD cost from prices stored as "per million tokens". */
+function usageCost(usage: MessageUsage, model: { inputPrice?: number; outputPrice?: number } | null) {
+  if (!model || model.inputPrice === undefined || model.outputPrice === undefined) return null
+  const billedInput = usage.input + usage.cacheRead + usage.cacheWrite
+  return (billedInput * model.inputPrice + usage.output * model.outputPrice) / 1_000_000
 }
 
 interface ToolCardViewProps {
@@ -347,14 +376,14 @@ export default function ChatPage({ isActive }: Props) {
   }, [])
 
   const persistAssistant = useCallback(
-    (text: string, toolCalls: string | null, isError = false) => {
+    (text: string, toolCalls: string | null, isError = false, usage: MessageUsage | null = null) => {
       const convId = conversationRef.current?.id
       if (!convId) return
       if (text.trim() === '' && toolCalls === null) return
       void enqueuePersist(() =>
         chatApi.append({
           conversationId: convId,
-          messages: [{ role: 'assistant', content: text, toolCalls, isError }],
+          messages: [{ role: 'assistant', content: text, toolCalls, isError, usage }],
         }),
       )
     },
@@ -387,18 +416,52 @@ export default function ChatPage({ isActive }: Props) {
           break
         }
         case 'message_update': {
-          if (event.assistantMessageEvent.type !== 'text_delta') return
-          const id = streamingIdRef.current
-          const delta = event.assistantMessageEvent.delta
-          if (!id) return
-          setItems((prev) =>
-            prev.map((item) =>
-              item.id === id && item.kind === 'assistant'
-                ? { ...item, text: item.text + delta }
-                : item,
-            ),
-          )
-          scrollToBottom()
+          const update = event.assistantMessageEvent
+          if (update.type === 'text_delta') {
+            const id = streamingIdRef.current
+            if (!id) return
+            setItems((prev) =>
+              prev.map((item) =>
+                item.id === id && item.kind === 'assistant'
+                  ? { ...item, text: item.text + update.delta }
+                  : item,
+              ),
+            )
+            scrollToBottom()
+            return
+          }
+          // Stream tool arguments ahead of execution so the card shows real params.
+          if (
+            update.type === 'toolcall_start' ||
+            update.type === 'toolcall_delta' ||
+            update.type === 'toolcall_end'
+          ) {
+            const block = update.partial.content[update.contentIndex]
+            if (block?.type !== 'toolCall') return
+            const args = JSON.stringify(block.arguments ?? {})
+            setItems((prev) => {
+              const exists = prev.some((item) => item.id === block.id && item.kind === 'tool')
+              if (!exists) {
+                return [
+                  ...prev,
+                  {
+                    id: block.id,
+                    kind: 'tool',
+                    toolName: block.name,
+                    args,
+                    status: 'running',
+                    text: '',
+                  },
+                ]
+              }
+              return prev.map((item) =>
+                item.id === block.id && item.kind === 'tool'
+                  ? { ...item, toolName: block.name, args }
+                  : item,
+              )
+            })
+            scrollToBottom()
+          }
           break
         }
         case 'message_end': {
@@ -407,6 +470,7 @@ export default function ChatPage({ isActive }: Props) {
           const id = streamingIdRef.current
           const { text, toolCalls } = extractAssistant(message)
           const failed = message.stopReason === 'error' || message.stopReason === 'aborted'
+          const usage = failed ? null : usageFromMessage(message)
           const shown = failed
             ? message.stopReason === 'aborted'
               ? '已取消'
@@ -416,7 +480,7 @@ export default function ChatPage({ isActive }: Props) {
             if (shown.trim() === '') return prev.filter((item) => item.id !== id)
             return prev.map((item) =>
               item.id === id && item.kind === 'assistant'
-                ? { ...item, text: shown, streaming: false, isError: failed }
+                ? { ...item, text: shown, streaming: false, isError: failed, usage }
                 : item,
             )
           })
@@ -425,23 +489,35 @@ export default function ChatPage({ isActive }: Props) {
           if (failed) setNetworkIssue(networkFailure(message.errorMessage ?? ''))
           else setNetworkIssue(false)
           // Failure/cancel bubbles are persisted too, so reloads keep the last state.
-          persistAssistant(failed ? shown : text, failed ? null : toolCalls, failed)
+          persistAssistant(failed ? shown : text, failed ? null : toolCalls, failed, usage)
           scrollToBottom()
           break
         }
         case 'tool_execution_start': {
           toolStartRef.current.set(event.toolCallId, performance.now())
-          setItems((prev) => [
-            ...prev,
-            {
-              id: event.toolCallId,
-              kind: 'tool',
-              toolName: event.toolName,
-              args: JSON.stringify(event.args ?? {}),
-              status: 'running',
-              text: '',
-            },
-          ])
+          const args = JSON.stringify(event.args ?? {})
+          setItems((prev) => {
+            // The streaming `toolcall_*` events already inserted this card.
+            const exists = prev.some((item) => item.id === event.toolCallId && item.kind === 'tool')
+            if (exists) {
+              return prev.map((item) =>
+                item.id === event.toolCallId && item.kind === 'tool'
+                  ? { ...item, toolName: event.toolName, args, status: 'running' }
+                  : item,
+              )
+            }
+            return [
+              ...prev,
+              {
+                id: event.toolCallId,
+                kind: 'tool',
+                toolName: event.toolName,
+                args,
+                status: 'running',
+                text: '',
+              },
+            ]
+          })
           scrollToBottom()
           break
         }
@@ -747,6 +823,7 @@ export default function ChatPage({ isActive }: Props) {
               toolCallId: record.toolCallId,
               toolName: record.toolName,
               isError: record.isError,
+              usage: record.usage,
             })),
           })
         }
@@ -878,6 +955,8 @@ export default function ChatPage({ isActive }: Props) {
           items.map((item, index) => {
             const changes =
               item.kind === 'assistant' && !item.streaming ? turnChanges(items, index) : []
+            const usage = item.kind === 'assistant' ? item.usage : null
+            const cost = usage ? usageCost(usage, activeModel) : null
             return (
               <div
                 key={item.id}
@@ -949,6 +1028,15 @@ export default function ChatPage({ isActive }: Props) {
                           >
                             变更{changes.length > 0 ? ` ${changes.length}` : ''}
                           </button>
+                          {usage && (
+                            <span
+                              className="chat-usage"
+                              title={`输入 ${usage.input} · 输出 ${usage.output} · 缓存读 ${usage.cacheRead}`}
+                            >
+                              {formatTokens(usage.input)}↑ {formatTokens(usage.output)}↓
+                              {cost !== null && ` · $${cost.toFixed(4)}`}
+                            </span>
+                          )}
                           <span
                             className="chat-context-ring"
                             style={{

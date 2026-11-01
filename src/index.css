@@ -3031,6 +3031,14 @@ body.split-resizing {
   opacity: 0.35;
 }
 
+.chat-usage {
+  padding: 0 4px;
+  color: var(--text-3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .chat-context-ring {
   width: 34px;
   height: 34px;

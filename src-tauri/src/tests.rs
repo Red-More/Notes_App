@@ -516,7 +516,7 @@ fn schema_creates_agent_and_media_tables() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 6, "ASR jobs require schema v6");
+    assert_eq!(version, 7, "message usage columns require schema v7");
     for table in [
         "conversations",
         "messages",
@@ -559,6 +559,7 @@ fn conversation_lifecycle_persists_messages() {
                 tool_call_id: None,
                 tool_name: None,
                 is_error: false,
+                usage: None,
             },
             conversations::NewMessage {
                 role: "assistant".into(),
@@ -570,6 +571,13 @@ fn conversation_lifecycle_persists_messages() {
                 tool_call_id: None,
                 tool_name: None,
                 is_error: false,
+                usage: Some(conversations::MessageUsage {
+                    input: 120,
+                    output: 45,
+                    total_tokens: 165,
+                    cache_read: 20,
+                    cache_write: 0,
+                }),
             },
         ],
     )
@@ -580,6 +588,10 @@ fn conversation_lifecycle_persists_messages() {
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0].role, "user");
     assert!(messages[1].tool_calls.is_some());
+    let usage = messages[1].usage.expect("usage must survive the round trip");
+    assert_eq!(usage.input, 120);
+    assert_eq!(usage.output, 45);
+    assert_eq!(usage.total_tokens, 165);
 
     let list = conversations::list(&vfs).unwrap();
     assert_eq!(list.len(), 1);
@@ -612,6 +624,7 @@ fn conversation_rejects_unknown_roles_and_bad_titles() {
             tool_call_id: None,
             tool_name: None,
             is_error: false,
+            usage: None,
         }],
     );
     assert!(bad_role.is_err(), "system role must not be accepted");

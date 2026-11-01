@@ -7,6 +7,7 @@ import { Agent } from '@earendil-works/pi-agent-core'
 import type { AgentMessage } from '@earendil-works/pi-agent-core'
 import type { AssistantMessage, Model, ToolCall, Usage } from '@earendil-works/pi-ai'
 import { buildSystemPrompt } from './prompt'
+import { trimContext } from './context'
 import { nativeStreamFn } from './stream'
 import { createTools } from './tools'
 import type { ChatMessageRecord, AgentSettings, ModelApiFormat, SkillSummary } from '../types'
@@ -121,7 +122,16 @@ function toAssistantMessage(record: ChatMessageRecord, profile: AgentProfile): A
     api: profile.api,
     provider: profile.provider,
     model: profile.model,
-    usage: zeroUsage(),
+    usage: record.usage
+      ? {
+          input: record.usage.input,
+          output: record.usage.output,
+          cacheRead: record.usage.cacheRead,
+          cacheWrite: record.usage.cacheWrite,
+          totalTokens: record.usage.totalTokens,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        }
+      : zeroUsage(),
     stopReason: 'stop',
     timestamp: parseDbTime(record.createdAt).getTime(),
   }
@@ -171,6 +181,9 @@ export function createAgent(
       messages: history,
     },
     streamFn: nativeStreamFn,
+    // 按 token 预算裁剪：Rust 的 200 条上限只作兜底，避免长会话撑爆上下文。
+    transformContext: async (messages) =>
+      trimContext(messages, profile.contextWindow ?? 128000),
     // 读并行、写串行：写工具自身声明 executionMode: 'sequential'。
     toolExecution: 'parallel',
     // 配额硬限额：按“最近一条 user 消息之后”统计，避免模型循环调用拖垮设备。

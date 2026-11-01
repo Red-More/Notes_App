@@ -26,6 +26,17 @@ pub struct Conversation {
     pub message_count: i64,
 }
 
+/// Token usage for one assistant reply; `None` on older rows.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageUsage {
+    pub input: i64,
+    pub output: i64,
+    pub total_tokens: i64,
+    pub cache_read: i64,
+    pub cache_write: i64,
+}
+
 /// 一条已落库的消息。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,6 +48,7 @@ pub struct ChatMessage {
     pub tool_call_id: Option<String>,
     pub tool_name: Option<String>,
     pub is_error: bool,
+    pub usage: Option<MessageUsage>,
     pub created_at: String,
 }
 
@@ -55,6 +67,8 @@ pub struct NewMessage {
     pub tool_name: Option<String>,
     #[serde(default)]
     pub is_error: bool,
+    #[serde(default)]
+    pub usage: Option<MessageUsage>,
 }
 
 fn now(conn: &Connection) -> Result<String, ToolError> {
@@ -184,7 +198,8 @@ pub fn messages(vfs: &VirtualFs, conversation_id: i64) -> Result<Vec<ChatMessage
     let conn = vfs.conn();
     ensure_exists(conn, conversation_id)?;
     let mut stmt = conn.prepare(
-        "SELECT id, role, content, tool_calls, tool_call_id, tool_name, is_error, created_at
+        "SELECT id, role, content, tool_calls, tool_call_id, tool_name, is_error, created_at,
+                usage_input, usage_output, usage_total, usage_cache_read, usage_cache_write
          FROM messages WHERE conversation_id = ?1 ORDER BY id ASC",
     )?;
     let rows = stmt.query_map(params![conversation_id], row_to_message)?;
@@ -227,8 +242,10 @@ pub fn append(
     for item in items {
         tx.execute(
             "INSERT INTO messages
-                 (conversation_id, role, content, tool_calls, tool_call_id, tool_name, is_error, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 (conversation_id, role, content, tool_calls, tool_call_id, tool_name, is_error,
+                  usage_input, usage_output, usage_total, usage_cache_read, usage_cache_write,
+                  created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 conversation_id,
                 item.role,
@@ -237,6 +254,11 @@ pub fn append(
                 item.tool_call_id,
                 item.tool_name,
                 if item.is_error { 1 } else { 0 },
+                item.usage.map(|usage| usage.input),
+                item.usage.map(|usage| usage.output),
+                item.usage.map(|usage| usage.total_tokens),
+                item.usage.map(|usage| usage.cache_read),
+                item.usage.map(|usage| usage.cache_write),
                 at
             ],
         )?;
@@ -248,6 +270,7 @@ pub fn append(
             tool_call_id: item.tool_call_id,
             tool_name: item.tool_name,
             is_error: item.is_error,
+            usage: item.usage,
             created_at: at.clone(),
         });
     }
@@ -276,6 +299,11 @@ fn ensure_exists(conn: &Connection, id: i64) -> Result<(), ToolError> {
 }
 
 fn row_to_message(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
+    let input: Option<i64> = r.get(8)?;
+    let output: Option<i64> = r.get(9)?;
+    let total_tokens: Option<i64> = r.get(10)?;
+    let cache_read: Option<i64> = r.get(11)?;
+    let cache_write: Option<i64> = r.get(12)?;
     Ok(ChatMessage {
         id: r.get(0)?,
         role: r.get(1)?,
@@ -284,6 +312,13 @@ fn row_to_message(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
         tool_call_id: r.get(4)?,
         tool_name: r.get(5)?,
         is_error: r.get::<_, i64>(6)? != 0,
+        usage: input.map(|input| MessageUsage {
+            input,
+            output: output.unwrap_or(0),
+            total_tokens: total_tokens.unwrap_or(0),
+            cache_read: cache_read.unwrap_or(0),
+            cache_write: cache_write.unwrap_or(0),
+        }),
         created_at: r.get(7)?,
     })
 }

@@ -306,7 +306,7 @@
 | 图片输入 | `ImageContent`、多模态消息 | 未接入 | UI 无图片入口；Rust `text_of()` 丢弃图片 |
 | 图像生成 | `generateImages()`、`ImageModel` | 未接入 | 无调用 |
 | 结构化分类 | `classify()`、`ClassifierModel` | 未接入 | 无调用 |
-| 用量与成本 | `Usage`、`model.cost`、`cost.total` | 部分接入 | 类型存在；Rust 只统计部分协议 token，成本恒 0，UI 不展示 |
+| 用量与成本 | `Usage`、`model.cost`、`cost.total` | 已接入 | token 用量随 assistant 消息落库（schema v7）；气泡展示输入/输出与按价格计算的成本；Rust `cost` 仍为 0，成本由前端按 `pricing` 换算 |
 | Stop Reason | `pending/stop/length/toolUse/error/aborted/deferred` | 部分接入 | 前 6 种可出现；`deferred` 未接入 |
 | 错误处理 | 流内 `error` 事件、setup 错误 | 部分接入 | 自研错误事件可用；缺少官方错误分类/诊断 |
 | 中止请求 | `signal`、`abort()` | 部分接入 | 通过 `agent_cancel` 可用 |
@@ -317,7 +317,7 @@
 | 跨 Provider 交接 | 自动丢弃异模型思考、保留工具调用 | 未接入 | 手工重放 transcript；思考始终被丢弃 |
 | 会话中 system 消息 | `SystemMessage.sections/toolsAdded/toolsRemoved` | 部分接入 | Rust `replay_system()` 支持，前端从不追加 |
 | 上下文序列化 | `Context` JSON 持久化 | 部分接入 | 自研 SQLite 表结构，不是 `Context` JSON |
-| 上下文溢出 | `utils/overflow`、`estimate` | 未接入 | Rust 只做 200 条消息裁剪 |
+| 上下文溢出 | `utils/overflow`、`estimate` | 部分接入 | 未从子路径导入官方估算器；`Agent.transformContext` 用本地等价估算按 `contextWindow` 的 75% 裁剪，Rust 的 200 条保留为兜底 |
 | 诊断工具 | `utils/diagnostics` | 未接入 | 无 |
 | 会话资源清理 | `cleanupSessionResources()` | 未接入 | 无 WebSocket/会话缓存 |
 | 文本/transcript 工具 | `contentText`、`renderSystemMessageUpdate`、`getCurrentTools` 等 | 未接入 | Rust 自行重放 |
@@ -338,7 +338,7 @@
 | 工具预检 | `beforeToolCall` | 部分接入 | 只做步数/写入配额，不使用 `toolCall`/`args` |
 | 工具后处理 | `afterToolCall` | 未接入 | 无审计/覆盖结果 |
 | 消息转换 | `convertToLlm` | 未接入 | 使用默认实现 |
-| 上下文变换 | `transformContext` | 未接入 | 裁剪在 Rust 侧 |
+| 上下文变换 | `transformContext` | 已接入 | [runtime.ts](../src/agent/runtime.ts) 用 `trimContext` 按 token 预算裁剪；Rust 的 200 条仍作兜底 |
 | 动态 API Key | `getApiKey` | 未接入 | 不适用（Key 在 Rust） |
 | 请求前重放 | `prepareRequest` | 未接入 | 无 |
 | 下一轮准备 | `prepareNextTurn`、`prepareNextTurnWithContext` | 未接入 | 无 |
@@ -356,7 +356,7 @@
 | 状态读取 | `agent.state.isStreaming/streamingMessage/pendingToolCalls/errorMessage` | 未接入 | UI 自己维护流式状态 |
 | 运行信号 | `agent.signal` | 未接入 | 只依赖 `abort()` |
 | 重置 | `reset()` | 未接入 | 通过销毁/重建 Agent 实现 |
-| 事件订阅 | `subscribe()` | 部分接入 | 10 种事件只消费 6 种；忽略 `agent_start`、`turn_start`、`turn_end`、`tool_execution_update` |
+| 事件订阅 | `subscribe()` | 部分接入 | 10 种事件消费 7 种；新增 `toolcall_*` 流式参数展示；忽略 `agent_start`、`turn_start`、`turn_end`、`tool_execution_update` |
 | 思考事件 | `message_update.assistantMessageEvent.thinking_*` | 未接入 | 前端只处理 `text_delta` |
 | 图片提示 | `prompt(text, images)` | 未接入 | 只支持纯文本 |
 | 自定义消息类型 | `declare module` 扩展 `CustomAgentMessages` | 未接入 | 历史只有标准三角色 |
@@ -457,6 +457,17 @@
 | 视频生成 | 复用作业队列，轮询/取消/恢复 | P2 |
 | 远程 MCP | 仅 HTTP/SSE + 白名单 | P2（可选） |
 
+### 5.5 本轮已落地（2026-11-01）
+
+| 功能点 | 落地证据 |
+|---|---|
+| `toolcall_delta` 工具参数流式展示 | [ChatPage.tsx](../src/pages/chat/ChatPage.tsx) 消费 `toolcall_start/delta/end`，工具卡片在 `tool_execution_start` 前即可显示参数，并按 `toolCallId` 去重 |
+| `Usage` 全链路持久化与展示 | schema v7 为 `messages` 增加 usage 列；[conversations.rs](../src-tauri/src/agent/conversations.rs) 读写；气泡展示输入/输出与按价格计算的成本；[runtime.ts](../src/agent/runtime.ts) 历史还原保留 usage |
+| `estimateContextTokens` + `transformContext` | 新增 [context.ts](../src/agent/context.ts) 本地估算器（CJK 1 字≈1 token，ASCII 3 字符≈1 token），[runtime.ts](../src/agent/runtime.ts) 按 `contextWindow` 的 75% 裁剪到 user 回合边界 |
+| 6.1 其余两项 | 同属本轮：toolcall_delta 与 usage 均已落库/展示 |
+
+剩余未落地：思考流全链路、图片输入、`sessionId`/`cacheRetention`、`steer()`/`followUp()`、`continue()`、`StringEnum`/`prepareArguments`、远程 MCP。
+
 ---
 
 ## 6. 引入建议与扩展范围
@@ -473,7 +484,7 @@
 | 强烈建议 | `Usage` 全链路持久化与展示 | 现在 Rust 已统计 token，但 [runtime.ts](../src/agent/runtime.ts) 历史还原时归零，UI 也不展示；至少展示 input/output/total | 消息表加字段 + 气泡/工具卡展示；成本由 6.4.1 的 `pricing` 驱动，随能力矩阵一起落地 |
 | 强烈建议 | `estimateContextTokens` + `Agent.transformContext` | 当前 Rust 只按 200 条消息裁剪，长消息仍可能爆上下文；用 token 预算裁剪到 `contextWindow` 的 70–80%，Rust 的 200 条保留为兜底 | `createAgent()` 增加 `transformContext` |
 
-以上三项全部纳入本轮实现。
+以上三项已落地（见 5.5）。
 
 ### 6.2 按需引入（已全部采纳，按序落地）
 
@@ -486,7 +497,7 @@
 | `continue()` | 想修「重试会重复插入 user 消息」 | 需要处理已取消的 assistant 消息作为上下文 |
 | `StringEnum` / `prepareArguments` | 弱模型经常给错枚举值或参数形状 | 只改工具 schema/兼容层，收益有限 |
 
-以上六项全部纳入实现：`thinking_*` 全链路落地（默认折叠展示），图片输入与 `sessionId`/`cacheRetention` 在媒体管线打通后落地。
+以上六项全部纳入实现：`thinking_*` 全链路落地（默认折叠展示），图片输入与 `sessionId`/`cacheRetention` 在媒体管线打通后落地。当前进度：六项尚未开始，下一批按「思考流 → 图片输入 → 队列交互 → 缓存」顺序推进。
 
 ### 6.3 明确不建议（扩展后仍不采纳）
 

@@ -254,6 +254,15 @@ export interface ChatConversation {
   messageCount: number
 }
 
+/** Token usage recorded for one assistant reply. */
+export interface MessageUsage {
+  input: number
+  output: number
+  totalTokens: number
+  cacheRead: number
+  cacheWrite: number
+}
+
 /** 已落库的一条消息。 */
 export interface ChatMessageRecord {
   id: number
@@ -264,6 +273,8 @@ export interface ChatMessageRecord {
   toolCallId: string | null
   toolName: string | null
   isError: boolean
+  /** Token usage of this assistant reply; null on older rows. */
+  usage: MessageUsage | null
   createdAt: string
 }
 
@@ -275,6 +286,7 @@ export interface NewChatMessage {
   toolCallId?: string | null
   toolName?: string | null
   isError?: boolean
+  usage?: MessageUsage | null
 }
 
 /** Wire protocol used by one user-defined model entry. */
