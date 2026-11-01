@@ -9,6 +9,7 @@ import { createAgent, extractAssistant, parseImageAssetIds, profileFromSettings,
 import type { AgentProfile } from '../../agent/runtime'
 import { buildSkillsIndex } from '../../agent/skills'
 import type { AgentEvent } from '@earendil-works/pi-agent-core'
+import type { AgentMessage } from '@earendil-works/pi-agent-core'
 import type { AgentSettings, ChatConversation, ChatMessageRecord, MessageUsage, SkillSummary } from '../../types'
 import { friendlyError, normalizeImage } from '../../utils'
 import type { ImageContent } from '@earendil-works/pi-ai'
@@ -165,6 +166,19 @@ function toolResultText(result: unknown): string {
   const value = result as { content?: Array<{ text?: string }> } | null
   if (!value?.content) return ''
   return value.content.map((block) => block.text ?? '').join('\n')
+}
+
+/** Plain text of a user message (string or content blocks). */
+function userText(message: AgentMessage): string {
+  const content = (message as { content?: unknown }).content
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .filter((block): block is { type: 'text'; text: string } => block?.type === 'text')
+      .map((block) => block.text)
+      .join('\n')
+  }
+  return ''
 }
 
 /** Remove the YAML frontmatter so previews match what the editor renders. */
@@ -380,6 +394,9 @@ export default function ChatPage({ isActive }: Props) {
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set())
   const [expandedThinking, setExpandedThinking] = useState<Set<string>>(new Set())
   const [attachments, setAttachments] = useState<Attachment[]>([])
+  // While a run is active, the composer enqueues instead of prompting.
+  const [queueMode, setQueueMode] = useState<'steer' | 'followUp'>('steer')
+  const [queuedCount, setQueuedCount] = useState(0)
   const [docPreview, setDocPreview] = useState<DocPreview | null>(null)
   const [online, setOnline] = useState(() => navigator.onLine)
   // Set after a network-looking failure; WebView's online flag is unreliable.
@@ -399,6 +416,9 @@ export default function ChatPage({ isActive }: Props) {
   // True once `message_end` rendered this turn, so `send` must not duplicate it.
   const settledRef = useRef(true)
   const streamingIdRef = useRef<string | null>(null)
+  // True until the first user event pair of a freshly submitted prompt is consumed,
+  // so its already-persisted bubble is not duplicated.
+  const pendingInitialUserRef = useRef(false)
   // Tool start timestamps for the trace duration badge.
   const toolStartRef = useRef(new Map<string, number>())
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -486,6 +506,15 @@ export default function ChatPage({ isActive }: Props) {
     (event: AgentEvent) => {
       switch (event.type) {
         case 'message_start': {
+          if (event.message.role === 'user') {
+            // The initial prompt already has a bubble; queued messages appear here.
+            if (pendingInitialUserRef.current) return
+            const text = userText(event.message)
+            if (text.trim() === '') return
+            setItems((prev) => [...prev, { id: messageKey('u'), kind: 'user', text }])
+            scrollToBottom()
+            return
+          }
           if (event.message.role !== 'assistant') return
           const id = messageKey('a')
           streamingIdRef.current = id
@@ -573,6 +602,24 @@ export default function ChatPage({ isActive }: Props) {
           break
         }
         case 'message_end': {
+          if (event.message.role === 'user') {
+            if (pendingInitialUserRef.current) {
+              // This pair belongs to the prompt persisted in submitPrompt.
+              pendingInitialUserRef.current = false
+              return
+            }
+            // Queued steer/follow-up messages are persisted when injected.
+            const text = userText(event.message)
+            const convId = conversationRef.current?.id
+            if (text.trim() === '' || !convId) return
+            void enqueuePersist(() =>
+              chatApi.append({
+                conversationId: convId,
+                messages: [{ role: 'user', content: text }],
+              }),
+            )
+            return
+          }
           if (event.message.role !== 'assistant') return
           const message = event.message
           const id = streamingIdRef.current
@@ -662,13 +709,15 @@ export default function ChatPage({ isActive }: Props) {
         }
         case 'agent_end': {
           setStreaming(false)
+          setQueuedCount(0)
+          pendingInitialUserRef.current = false
           break
         }
         default:
           break
       }
     },
-    [persistAssistant, persistTool, scrollToBottom],
+    [enqueuePersist, persistAssistant, persistTool, scrollToBottom],
   )
 
   const disposeAgent = useCallback(() => {
@@ -678,6 +727,7 @@ export default function ChatPage({ isActive }: Props) {
     agentRef.current = null
     // 中断旧流后立即复位发送状态：abort 产生的 agent_end 会因退订而丢失，不能再依赖它。
     streamingIdRef.current = null
+    pendingInitialUserRef.current = false
     setStreaming(false)
   }, [])
 
@@ -850,9 +900,12 @@ export default function ChatPage({ isActive }: Props) {
           data: file.data,
           mimeType: file.mime,
         }))
+        // The prompt's own user events must not duplicate this bubble.
+        pendingInitialUserRef.current = true
         if (images.length > 0) await agent.prompt(promptText, images)
         else await agent.prompt(text)
       } catch (e) {
+        pendingInitialUserRef.current = false
         const shown = failureText(e, onlineRef.current)
         if (!onlineRef.current || networkFailure(friendlyError(e))) setNetworkIssue(true)
         // Only add a bubble when the stream never reached `message_end`,
@@ -875,6 +928,19 @@ export default function ChatPage({ isActive }: Props) {
   const send = useCallback(() => {
     void submitPrompt(input.trim(), attachments)
   }, [attachments, input, submitPrompt])
+
+  /** Enqueue guidance while a run is active; the agent injects it at the next boundary. */
+  const queueMessage = useCallback(() => {
+    const text = input.trim()
+    const agent = agentRef.current
+    if (!streaming || text === '' || !agent) return
+    const message = { role: 'user', content: text, timestamp: Date.now() } as AgentMessage
+    if (queueMode === 'steer') agent.steer(message)
+    else agent.followUp(message)
+    setInput('')
+    setQueuedCount(agent.peekQueuedMessages().length)
+    toast(queueMode === 'steer' ? '已追加，当前回复结束后生效' : '已排队，本轮结束后执行')
+  }, [input, queueMode, streaming])
 
   const retry = useCallback(
     (messageId: string) => {
@@ -1000,6 +1066,9 @@ export default function ChatPage({ isActive }: Props) {
   const stop = useCallback(() => {
     const agent = agentRef.current
     if (!agent) return
+    // Drop queued guidance so stopping really stops the run.
+    agent.clearAllQueues()
+    setQueuedCount(0)
     agent.abort()
     void agent.waitForIdle().then(() => setStreaming(false))
   }, [])
@@ -1331,10 +1400,22 @@ export default function ChatPage({ isActive }: Props) {
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault()
-                void send()
+                if (streaming) void queueMessage()
+                else void send()
               }
             }}
           />
+          {streaming && (
+            <button
+              type="button"
+              className="chat-queue-mode"
+              title="切换追加方式：追加立即注入，排队在本轮结束后执行"
+              onClick={() => setQueueMode((prev) => (prev === 'steer' ? 'followUp' : 'steer'))}
+            >
+              {queueMode === 'steer' ? '追加' : '排队'}
+              {queuedCount > 0 ? ` ${queuedCount}` : ''}
+            </button>
+          )}
           <button
             type="button"
             className="chat-attach"
@@ -1345,9 +1426,20 @@ export default function ChatPage({ isActive }: Props) {
             <IconImage size={20} />
           </button>
           {streaming ? (
-            <button type="button" className="chat-send stop" aria-label="停止" onClick={stop}>
-              <IconStop size={20} />
-            </button>
+            <>
+              <button
+                type="button"
+                className="chat-send"
+                aria-label={queueMode === 'steer' ? '追加指令' : '排队指令'}
+                disabled={input.trim() === ''}
+                onClick={() => void queueMessage()}
+              >
+                <IconSend size={20} />
+              </button>
+              <button type="button" className="chat-send stop" aria-label="停止" onClick={stop}>
+                <IconStop size={20} />
+              </button>
+            </>
           ) : (
             <button
               type="button"

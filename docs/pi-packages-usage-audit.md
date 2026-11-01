@@ -349,9 +349,9 @@
 | 思考档位 | `thinkingLevel`、`thinkingBudgets` | 已接入 | `thinking_mode=on` 时 `thinkingLevel='medium'`；Rust 映射为 Anthropic `budget_tokens`、OpenAI `reasoning_effort` / `reasoning.effort` |
 | 传输选择 | `transport` | 未接入 | 由 Rust 决定 HTTP/SSE |
 | 重试延迟上限 | `maxRetryDelayMs` | 未接入 | 无重试 |
-| Steering 队列 | `steer()`、`steeringMode`、`clearSteeringQueue()` | 未接入 | UI 只能停止后重发 |
-| Follow-up 队列 | `followUp()`、`followUpMode`、`clearFollowUpQueue()` | 未接入 | 无排队输入 |
-| 队列预览 | `peekQueuedMessages()`、`hasQueuedMessages()` | 未接入 | 无 |
+| Steering 队列 | `steer()`、`steeringMode`、`clearSteeringQueue()` | 已接入 | 运行中输入改为 `steer()`，在回合边界注入；停止时清空队列 |
+| Follow-up 队列 | `followUp()`、`followUpMode`、`clearFollowUpQueue()` | 已接入 | 可切换「排队」模式，本轮结束后执行 |
+| 队列预览 | `peekQueuedMessages()`、`hasQueuedMessages()` | 已接入 | 输入区显示排队条数 |
 | 继续执行 | `continue()` | 未接入 | 每次都是新 `prompt()` |
 | 状态读取 | `agent.state.isStreaming/streamingMessage/pendingToolCalls/errorMessage` | 未接入 | UI 自己维护流式状态 |
 | 运行信号 | `agent.signal` | 未接入 | 只依赖 `abort()` |
@@ -427,7 +427,7 @@
 | 轮次收尾控制 | 无 | 未接 `finishTurn`，无法按 stopReason 精细结束 | 实现 |
 | 请求前上下文重放 | 无 | 未接 `prepareRequest`，长会话只能靠 Rust 裁剪 | 与 `transformContext` 合并实现 |
 | 遥测 | 无 | 未接 `pi-telemetry`，无耗时/token/成本指标 | 不实现 |
-| 队列式交互 | 无 | 未接 `steer()`/`followUp()`，运行中不能补充指令 | 实现 |
+| 队列式交互 | 无 | 已接入 `steer()`/`followUp()`，运行中可追加或排队，停止时清空 | 实现 |
 
 ### 5.3 P2：体系级能力
 
@@ -466,8 +466,9 @@
 | `estimateContextTokens` + `transformContext` | 新增 [context.ts](../src/agent/context.ts) 本地估算器（CJK 1 字≈1 token，ASCII 3 字符≈1 token），[runtime.ts](../src/agent/runtime.ts) 按 `contextWindow` 的 75% 裁剪到 user 回合边界 |
 | `thinking_*` 全链路 | [llm.rs](../src-tauri/src/agent/llm.rs) 解析三协议思考流（含 Anthropic 签名）；[protocol.ts](../src/agent/protocol.ts) 重建思考块；[ChatPage.tsx](../src/pages/chat/ChatPage.tsx) 折叠展示；schema v8 保存 `thinking`/`thinking_signature` |
 | 图片输入 | [ChatPage.tsx](../src/pages/chat/ChatPage.tsx) 附图与缩略图；[utils.ts](../src/utils.ts) 压到 1568px JPEG；Rust 三协议多模态消息、8 张/16MB 限额；schema v9 存 `image_asset_ids`，重启后经 `media_asset_data` 还原上下文 |
+| `steer()` / `followUp()` | 运行中输入切换为队列：`追加` 在下一回合注入、`排队` 在本轮结束后执行；队列消息随 `message_start/end` 渲染并落库，停止时清空 |
 
-剩余未落地：`sessionId`/`cacheRetention`、`steer()`/`followUp()`、`continue()`、`StringEnum`/`prepareArguments`、远程 MCP。
+剩余未落地：`sessionId`/`cacheRetention`、`continue()`、`StringEnum`/`prepareArguments`、远程 MCP。
 
 ---
 
@@ -498,7 +499,7 @@
 | `continue()` | 想修「重试会重复插入 user 消息」 | 需要处理已取消的 assistant 消息作为上下文 |
 | `StringEnum` / `prepareArguments` | 弱模型经常给错枚举值或参数形状 | 只改工具 schema/兼容层，收益有限 |
 
-以上六项全部纳入实现：`thinking_*` 全链路与图片输入已落地（默认折叠展示 / 附件最多 4 张）；`sessionId`/`cacheRetention` 在媒体管线打通后落地。当前进度：下一批按「队列交互 → 缓存」顺序推进。
+以上六项全部纳入实现：`thinking_*`、图片输入、`steer()`/`followUp()` 已落地；`sessionId`/`cacheRetention` 在媒体管线打通后落地。当前进度：下一批按「缓存 → `continue()`」顺序推进。
 
 ### 6.3 明确不建议（扩展后仍不采纳）
 

@@ -3354,6 +3354,19 @@ body.split-resizing {
   opacity: 0.4;
 }
 
+.chat-queue-mode {
+  flex: 0 0 auto;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  align-self: center;
+}
+
 .chat-input {
   flex: 1;
   min-height: 42px;
