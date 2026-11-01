@@ -352,7 +352,7 @@
 | Steering 队列 | `steer()`、`steeringMode`、`clearSteeringQueue()` | 已接入 | 运行中输入改为 `steer()`，在回合边界注入；停止时清空队列 |
 | Follow-up 队列 | `followUp()`、`followUpMode`、`clearFollowUpQueue()` | 已接入 | 可切换「排队」模式，本轮结束后执行 |
 | 队列预览 | `peekQueuedMessages()`、`hasQueuedMessages()` | 已接入 | 输入区显示排队条数 |
-| 继续执行 | `continue()` | 未接入 | 每次都是新 `prompt()` |
+| 继续执行 | `continue()` | 已接入 | 「重试」先删除该 user 回合之后的记录，再用 `continue()` 重新生成，不再插入重复 user 消息 |
 | 状态读取 | `agent.state.isStreaming/streamingMessage/pendingToolCalls/errorMessage` | 未接入 | UI 自己维护流式状态 |
 | 运行信号 | `agent.signal` | 未接入 | 只依赖 `abort()` |
 | 重置 | `reset()` | 未接入 | 通过销毁/重建 Agent 实现 |
@@ -468,8 +468,9 @@
 | 图片输入 | [ChatPage.tsx](../src/pages/chat/ChatPage.tsx) 附图与缩略图；[utils.ts](../src/utils.ts) 压到 1568px JPEG；Rust 三协议多模态消息、8 张/16MB 限额；schema v9 存 `image_asset_ids`，重启后经 `media_asset_data` 还原上下文 |
 | `steer()` / `followUp()` | 运行中输入切换为队列：`追加` 在下一回合注入、`排队` 在本轮结束后执行；队列消息随 `message_start/end` 渲染并落库，停止时清空 |
 | `sessionId` / `cacheRetention` | 会话固定 `conv_{id}` 作为 `sessionId`；设置页新增「提示缓存」开关（关闭/短期/长期），Anthropic 写 `cache_control`（long 带 `ttl:1h`），OpenAI 写 `prompt_cache_key` / `prompt_cache_retention` |
+| `continue()` | 「重试」改为：按被点消息定位到上一条 user 记录 → `chat_truncate` 删除其后消息 → 重建 Agent → `continue()`；不再重复插入 user 消息 |
 
-剩余未落地：`continue()`、`StringEnum`/`prepareArguments`、远程 MCP。
+剩余未落地：`StringEnum`/`prepareArguments`、远程 MCP。
 
 ---
 
@@ -500,7 +501,7 @@
 | `continue()` | 想修「重试会重复插入 user 消息」 | 需要处理已取消的 assistant 消息作为上下文 |
 | `StringEnum` / `prepareArguments` | 弱模型经常给错枚举值或参数形状 | 只改工具 schema/兼容层，收益有限 |
 
-以上六项全部纳入实现：`thinking_*`、图片输入、队列交互、`sessionId`/`cacheRetention` 已落地。当前进度：下一批按「`continue()` → `StringEnum`」顺序推进。
+以上六项全部纳入实现，落地完成：`thinking_*`、图片输入、队列交互、缓存与 `continue()`。当前进度：剩余 `StringEnum`/`prepareArguments` 与远程 MCP。
 
 ### 6.3 明确不建议（扩展后仍不采纳）
 

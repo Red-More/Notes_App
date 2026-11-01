@@ -130,6 +130,7 @@ pub fn run() {
             commands::agent::chat_delete,
             commands::agent::chat_messages,
             commands::agent::chat_append,
+            commands::agent::chat_truncate,
             commands::agent::agent_settings,
             commands::agent::agent_model_save,
             commands::agent::agent_model_delete,

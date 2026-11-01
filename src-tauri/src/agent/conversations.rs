@@ -316,6 +316,24 @@ fn ensure_exists(conn: &Connection, id: i64) -> Result<(), ToolError> {
     Ok(())
 }
 
+/// Delete every message newer than `message_id`; retry keeps the user turn intact.
+pub fn truncate_after(vfs: &VirtualFs, conversation_id: i64, message_id: i64) -> Result<usize, ToolError> {
+    let conn = vfs.conn();
+    ensure_exists(conn, conversation_id)?;
+    let at = now(conn)?;
+    let tx = conn.unchecked_transaction()?;
+    let removed = tx.execute(
+        "DELETE FROM messages WHERE conversation_id = ?1 AND id > ?2",
+        params![conversation_id, message_id],
+    )?;
+    tx.execute(
+        "UPDATE conversations SET updated_at = ?1 WHERE id = ?2",
+        params![at, conversation_id],
+    )?;
+    tx.commit()?;
+    Ok(removed)
+}
+
 fn row_to_message(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
     let input: Option<i64> = r.get(8)?;
     let output: Option<i64> = r.get(9)?;

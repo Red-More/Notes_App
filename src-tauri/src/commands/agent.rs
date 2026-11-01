@@ -74,6 +74,17 @@ pub fn chat_append(
     conversations::append(&vfs, conversation_id, messages)
 }
 
+/// Drop every message newer than `message_id` so retry can continue from the user turn.
+#[tauri::command]
+pub fn chat_truncate(
+    state: State<'_, VfsState>,
+    conversation_id: i64,
+    message_id: i64,
+) -> Result<usize, ToolError> {
+    let vfs = state.0.lock().unwrap();
+    conversations::truncate_after(&vfs, conversation_id, message_id)
+}
+
 fn key_status(
     conn: &rusqlite::Connection,
     secrets: &crate::agent::secrets::SecretStore,

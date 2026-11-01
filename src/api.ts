@@ -545,6 +545,9 @@ export const chatApi = {
     invoke<ChatMessageRecord[]>('chat_messages', { conversationId }),
   append: (params: { conversationId: number; messages: NewChatMessage[] }) =>
     invoke<ChatMessageRecord[]>('chat_append', params),
+  /** Remove messages newer than `messageId`; retry continues from the kept user turn. */
+  truncate: (params: { conversationId: number; messageId: number }) =>
+    invoke<number>('chat_truncate', params),
   settings: () => invoke<AgentSettings>('agent_settings'),
   saveModel: (input: {
     id?: string

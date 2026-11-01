@@ -731,6 +731,31 @@ export default function ChatPage({ isActive }: Props) {
     setStreaming(false)
   }, [])
 
+  /** Build an Agent for the given transcript; returns null when no model is usable. */
+  const buildAgent = useCallback(
+    async (
+      conv: ChatConversation,
+      records: ChatMessageRecord[],
+      imageData: Map<number, ImageData>,
+    ) => {
+      const current = settingsRef.current
+      const baseProfile = current
+        ? profileFromSettings(current, conv.provider, conv.model)
+        : null
+      if (!baseProfile) return null
+      const activeProfile = await withCapabilities(baseProfile)
+      const agent = createAgent(
+        activeProfile,
+        await toAgentMessages(records, activeProfile, imageData),
+        buildSkillsIndex(skillsRef.current),
+        skillsRef.current,
+        `conv_${conv.id}`,
+      )
+      return { agent, profile: activeProfile }
+    },
+    [],
+  )
+
   const openConversation = useCallback(
     async (conv: ChatConversation) => {
       disposeAgent()
@@ -742,27 +767,16 @@ export default function ChatPage({ isActive }: Props) {
         const imageData = await loadImageData(records)
         setItems(recordsToItems(records, imageData))
         // 优先使用会话记录里的模型条目；该条目被删除后回退到当前激活模型。
-        const current = settingsRef.current
-        const baseProfile = current
-          ? profileFromSettings(current, conv.provider, conv.model)
-          : null
-        if (!baseProfile) {
+        const built = await buildAgent(conv, records, imageData)
+        if (!built) {
           // 没有可用模型时仍可查看历史，只是不能发送。
           return
         }
-        const activeProfile = await withCapabilities(baseProfile)
-        setContextWindow(activeProfile.contextWindow ?? 128000)
-        const agent = createAgent(
-          activeProfile,
-          await toAgentMessages(records, activeProfile, imageData),
-          buildSkillsIndex(skillsRef.current),
-          skillsRef.current,
-          `conv_${conv.id}`,
-        )
-        unsubscribeRef.current = agent.subscribe((event) => {
+        setContextWindow(built.profile.contextWindow ?? 128000)
+        unsubscribeRef.current = built.agent.subscribe((event) => {
           handleEvent(event)
         })
-        agentRef.current = agent
+        agentRef.current = built.agent
       } catch (e) {
         toast(friendlyError(e))
       } finally {
@@ -771,7 +785,7 @@ export default function ChatPage({ isActive }: Props) {
         setScrollBottomVisible(false)
       }
     },
-    [disposeAgent, handleEvent, scrollToBottom],
+    [buildAgent, disposeAgent, handleEvent, scrollToBottom],
   )
 
   const bootstrap = useCallback(async () => {
@@ -943,19 +957,75 @@ export default function ChatPage({ isActive }: Props) {
     toast(queueMode === 'steer' ? '已追加，当前回复结束后生效' : '已排队，本轮结束后执行')
   }, [input, queueMode, streaming])
 
+  /**
+   * Regenerate the reply to the user turn that produced `messageId`:
+   * later messages are removed from both DB and UI, then `continue()` reuses
+   * the kept user turn instead of inserting a duplicate prompt.
+   */
   const retry = useCallback(
-    (messageId: string) => {
-      const index = items.findIndex((item) => item.id === messageId)
-      for (let i = index - 1; i >= 0; i -= 1) {
-        const item = items[i]
-        if (item.kind === 'user' && item.text.trim() !== '') {
-          void submitPrompt(item.text)
+    async (messageId: string) => {
+      const conv = conversationRef.current
+      if (!conv || streaming) return
+      try {
+        const records = await chatApi.messages(conv.id)
+        const match = /^m-(\d+)$/.exec(messageId)
+        let targetIndex = match
+          ? records.findIndex((record) => record.id === Number(match[1]))
+          : -1
+        if (targetIndex < 0) {
+          // The bubble came from a failed in-session run; target the last reply.
+          targetIndex = records.map((record) => record.role).lastIndexOf('assistant')
+        }
+        if (targetIndex < 0) {
+          toast('没有可重试的回答')
           return
         }
+        let userIndex = -1
+        for (let i = targetIndex - 1; i >= 0; i -= 1) {
+          if (records[i].role === 'user') {
+            userIndex = i
+            break
+          }
+        }
+        if (userIndex < 0) {
+          toast('找不到上一条用户消息，无法重试')
+          return
+        }
+        const kept = records.slice(0, userIndex + 1)
+        await chatApi.truncate({ conversationId: conv.id, messageId: kept[userIndex].id })
+        const imageData = await loadImageData(kept)
+        setItems((prev) => {
+          const clicked = prev.findIndex((item) => item.id === messageId)
+          const end = clicked >= 0 ? clicked : prev.length
+          for (let i = end - 1; i >= 0; i -= 1) {
+            if (prev[i].kind === 'user') return prev.slice(0, i + 1)
+          }
+          return prev
+        })
+        disposeAgent()
+        const built = await buildAgent(conv, kept, imageData)
+        if (!built) {
+          toast('请先在设置中启用对话模型')
+          return
+        }
+        setContextWindow(built.profile.contextWindow ?? 128000)
+        unsubscribeRef.current = built.agent.subscribe((event) => handleEvent(event))
+        agentRef.current = built.agent
+        settledRef.current = false
+        pendingInitialUserRef.current = false
+        setStreaming(true)
+        scrollToBottom()
+        try {
+          await built.agent.continue()
+        } finally {
+          setStreaming(false)
+        }
+      } catch (e) {
+        setStreaming(false)
+        toast(friendlyError(e))
       }
-      toast('找不到上一条用户消息，无法重试')
     },
-    [items, submitPrompt],
+    [buildAgent, disposeAgent, handleEvent, scrollToBottom, streaming],
   )
 
   const toggleTool = useCallback((id: string) => {
@@ -1308,7 +1378,7 @@ export default function ChatPage({ isActive }: Props) {
                           <button
                             type="button"
                             className="chat-action"
-                            onClick={() => retry(item.id)}
+                            onClick={() => void retry(item.id)}
                           >
                             重试
                           </button>

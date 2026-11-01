@@ -619,6 +619,50 @@ fn conversation_lifecycle_persists_messages() {
 }
 
 #[test]
+fn truncate_after_keeps_the_user_turn_for_retry() {
+    let vfs = test_vfs();
+    let entry = add_model(&vfs, "测试模型", "demo-model");
+    let conv = conversations::create(&vfs, None, entry.id.clone(), entry.model_id.clone()).unwrap();
+    let messages = conversations::append(
+        &vfs,
+        conv.id,
+        vec![
+            conversations::NewMessage {
+                role: "user".into(),
+                content: "写一条".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                tool_name: None,
+                is_error: false,
+                usage: None,
+                thinking: None,
+                thinking_signature: None,
+                image_asset_ids: None,
+            },
+            conversations::NewMessage {
+                role: "assistant".into(),
+                content: "失败回答".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                tool_name: None,
+                is_error: true,
+                usage: None,
+                thinking: None,
+                thinking_signature: None,
+                image_asset_ids: None,
+            },
+        ],
+    )
+    .unwrap();
+    let user_id = messages[0].id;
+    let removed = conversations::truncate_after(&vfs, conv.id, user_id).unwrap();
+    assert_eq!(removed, 1, "only the failed reply is removed");
+    let kept = conversations::messages(&vfs, conv.id).unwrap();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].role, "user");
+}
+
+#[test]
 fn conversation_rejects_unknown_roles_and_bad_titles() {
     let vfs = test_vfs();
     let entry = add_model(&vfs, "测试模型", "demo-model");
