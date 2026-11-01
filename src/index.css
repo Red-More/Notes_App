@@ -3273,11 +3273,85 @@ body.split-resizing {
 
 .chat-composer {
   display: flex;
-  align-items: flex-end;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
   padding: 8px 12px 4px;
   background: var(--bg);
   border-top: 1px solid var(--border);
+}
+
+.chat-composer-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  width: 100%;
+}
+
+.chat-attachments {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.chat-attachment {
+  position: relative;
+  width: 56px;
+  height: 56px;
+}
+
+.chat-attachment img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+
+.chat-attachment-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.chat-bubble-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+  margin-bottom: 4px;
+}
+
+.chat-bubble-images img {
+  max-width: 180px;
+  max-height: 180px;
+  object-fit: cover;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+
+.chat-attach {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-2);
+}
+
+.chat-attach:disabled {
+  opacity: 0.4;
 }
 
 .chat-input {

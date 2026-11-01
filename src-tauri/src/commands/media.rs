@@ -5,7 +5,7 @@
 use std::sync::atomic::Ordering;
 
 use base64::Engine;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
 use crate::media::{assets, exec, jobs, MediaState};
@@ -78,6 +78,35 @@ pub fn media_asset_path(
     let vfs = vfs_state.0.lock().unwrap();
     let asset = assets::get(vfs.conn(), id)?;
     Ok(assets::path(&media.root, &asset).to_string_lossy().into_owned())
+}
+
+/// Base64 payload for one asset; used to rebuild image context after reload.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetData {
+    pub mime: String,
+    pub data: String,
+}
+
+#[tauri::command]
+pub fn media_asset_data(
+    vfs_state: State<'_, VfsState>,
+    media: State<'_, MediaState>,
+    id: i64,
+) -> Result<AssetData, ToolError> {
+    let (asset, path) = {
+        let vfs = vfs_state.0.lock().unwrap();
+        let asset = assets::get(vfs.conn(), id)?;
+        let path = assets::path(&media.root, &asset);
+        (asset, path)
+    };
+    let bytes = std::fs::read(&path).map_err(|e| ToolError::Storage {
+        message: format!("读取资产失败：{e}"),
+    })?;
+    Ok(AssetData {
+        mime: asset.mime,
+        data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+    })
 }
 
 /// Import a WebView-supplied audio payload into the asset library.

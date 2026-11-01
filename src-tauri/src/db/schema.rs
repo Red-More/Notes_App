@@ -12,12 +12,13 @@
 //! v6：媒体作业支持 `asr` 类型（重建 CHECK 约束）。
 //! v7：消息表记录 token 用量（usage_* / cache_*）。
 //! v8：消息表保存思考内容与签名（thinking / thinking_signature）。
+//! v9：用户消息记录附图资产 id（image_asset_ids）。
 //! FTS5 索引在应用层与 blobs 同事务维护（无触发器），schema 版本保持不变。
 
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// 当前 life.db schema 版本。
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// 虚拟文件系统的根路径，与 `vfs::cap_gate::ROOT` 保持一致。
 const ROOT: &str = "/life";
@@ -341,6 +342,17 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
                     "ALTER TABLE messages ADD COLUMN {column} TEXT;"
                 ))?;
             }
+        }
+        tx.pragma_update(None, "user_version", 8)?;
+        tx.commit()?;
+        version = 8;
+    }
+
+    if version < 9 {
+        let tx = conn.transaction()?;
+        // JSON array of media asset ids attached to one user message.
+        if !table_has_column(&tx, "messages", "image_asset_ids")? {
+            tx.execute_batch("ALTER TABLE messages ADD COLUMN image_asset_ids TEXT;")?;
         }
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;

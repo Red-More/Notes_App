@@ -279,6 +279,8 @@ export interface ChatMessageRecord {
   thinking: string | null
   /** Provider signature required to replay Anthropic thinking blocks. */
   thinkingSignature: string | null
+  /** JSON array of media asset ids attached to this user message. */
+  imageAssetIds: string | null
   createdAt: string
 }
 
@@ -293,6 +295,7 @@ export interface NewChatMessage {
   usage?: MessageUsage | null
   thinking?: string | null
   thinkingSignature?: string | null
+  imageAssetIds?: string | null
 }
 
 /** Wire protocol used by one user-defined model entry. */

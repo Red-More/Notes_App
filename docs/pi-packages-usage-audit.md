@@ -303,7 +303,7 @@
 | 流式参数解析 | `parseStreamingJson()`、`parseToolCallArguments()` | 部分接入 | 只用 `parseStreamingJson`；完整参数由 Rust `ToolCallPayload` 解析 |
 | 思考/推理 | `thinking_*` 事件、`reasoning`、`thinkingBudgets`、`providerThinkingLevel` | 已接入 | 三种协议解析思考流；前端折叠展示；`thinking`/`thinking_signature` 落库（schema v8）；Anthropic 重放带签名的思考块 |
 | 思考档位探测 | `getSupportedThinkingLevels()` | 未接入 | 未按 Provider 探测可用档位，统一使用 `medium` |
-| 图片输入 | `ImageContent`、多模态消息 | 未接入 | UI 无图片入口；Rust `text_of()` 丢弃图片 |
+| 图片输入 | `ImageContent`、多模态消息 | 已接入 | 对话页附图（压缩到 1568px JPEG）；Rust 转三种协议多模态消息；资产入库、消息存 asset id |
 | 图像生成 | `generateImages()`、`ImageModel` | 未接入 | 无调用 |
 | 结构化分类 | `classify()`、`ClassifierModel` | 未接入 | 无调用 |
 | 用量与成本 | `Usage`、`model.cost`、`cost.total` | 已接入 | token 用量随 assistant 消息落库（schema v7）；气泡展示输入/输出与按价格计算的成本；Rust `cost` 仍为 0，成本由前端按 `pricing` 换算 |
@@ -358,7 +358,7 @@
 | 重置 | `reset()` | 未接入 | 通过销毁/重建 Agent 实现 |
 | 事件订阅 | `subscribe()` | 部分接入 | 10 种事件消费 7 种；新增 `toolcall_*` 流式参数展示；忽略 `agent_start`、`turn_start`、`turn_end`、`tool_execution_update` |
 | 思考事件 | `message_update.assistantMessageEvent.thinking_*` | 已接入 | 前端消费 `thinking_start/delta/end`，默认折叠展示并随消息落库 |
-| 图片提示 | `prompt(text, images)` | 未接入 | 只支持纯文本 |
+| 图片提示 | `prompt(text, images)` | 已接入 | 对话页可附带最多 4 张图片，历史记录按 asset id 还原为 `ImageContent` |
 | 自定义消息类型 | `declare module` 扩展 `CustomAgentMessages` | 未接入 | 历史只有标准三角色 |
 | 低层循环 | `agentLoop`、`agentLoopContinue`、`runAgentLoop`、`runAgentLoopContinue` | 未接入 | 只用高层 `Agent` |
 | 嵌套工具调用 | `runToolCall()` | 未接入 | 无 codemode/工具嵌套 |
@@ -465,8 +465,9 @@
 | `Usage` 全链路持久化与展示 | schema v7 为 `messages` 增加 usage 列；[conversations.rs](../src-tauri/src/agent/conversations.rs) 读写；气泡展示输入/输出与按价格计算的成本；[runtime.ts](../src/agent/runtime.ts) 历史还原保留 usage |
 | `estimateContextTokens` + `transformContext` | 新增 [context.ts](../src/agent/context.ts) 本地估算器（CJK 1 字≈1 token，ASCII 3 字符≈1 token），[runtime.ts](../src/agent/runtime.ts) 按 `contextWindow` 的 75% 裁剪到 user 回合边界 |
 | `thinking_*` 全链路 | [llm.rs](../src-tauri/src/agent/llm.rs) 解析三协议思考流（含 Anthropic 签名）；[protocol.ts](../src/agent/protocol.ts) 重建思考块；[ChatPage.tsx](../src/pages/chat/ChatPage.tsx) 折叠展示；schema v8 保存 `thinking`/`thinking_signature` |
+| 图片输入 | [ChatPage.tsx](../src/pages/chat/ChatPage.tsx) 附图与缩略图；[utils.ts](../src/utils.ts) 压到 1568px JPEG；Rust 三协议多模态消息、8 张/16MB 限额；schema v9 存 `image_asset_ids`，重启后经 `media_asset_data` 还原上下文 |
 
-剩余未落地：图片输入、`sessionId`/`cacheRetention`、`steer()`/`followUp()`、`continue()`、`StringEnum`/`prepareArguments`、远程 MCP。
+剩余未落地：`sessionId`/`cacheRetention`、`steer()`/`followUp()`、`continue()`、`StringEnum`/`prepareArguments`、远程 MCP。
 
 ---
 
@@ -497,7 +498,7 @@
 | `continue()` | 想修「重试会重复插入 user 消息」 | 需要处理已取消的 assistant 消息作为上下文 |
 | `StringEnum` / `prepareArguments` | 弱模型经常给错枚举值或参数形状 | 只改工具 schema/兼容层，收益有限 |
 
-以上六项全部纳入实现：`thinking_*` 全链路已落地（默认折叠展示）；图片输入与 `sessionId`/`cacheRetention` 在媒体管线打通后落地。当前进度：思考流已完成，下一批按「图片输入 → 队列交互 → 缓存」顺序推进。
+以上六项全部纳入实现：`thinking_*` 全链路与图片输入已落地（默认折叠展示 / 附件最多 4 张）；`sessionId`/`cacheRetention` 在媒体管线打通后落地。当前进度：下一批按「队列交互 → 缓存」顺序推进。
 
 ### 6.3 明确不建议（扩展后仍不采纳）
 

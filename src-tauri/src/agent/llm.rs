@@ -30,7 +30,11 @@ use crate::vfs::error::ToolError;
 
 const MAX_SYSTEM_BYTES: usize = 64 * 1024;
 const MAX_MESSAGES: usize = 200;
-const MAX_TOTAL_BYTES: usize = 4 * 1024 * 1024;
+const MAX_TOTAL_BYTES: usize = 24 * 1024 * 1024;
+const MAX_IMAGES_PER_REQUEST: usize = 8;
+const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_IMAGES_TOTAL_BYTES: usize = 16 * 1024 * 1024;
+const ALLOWED_IMAGE_MIME: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 const MAX_MODEL_CHARS: usize = 100;
 /// Anthropic rejects requests without `max_tokens`; used only when the user
 /// left both `max_tokens` and the output context window empty. This is a
@@ -284,12 +288,47 @@ enum Role {
 struct Turn {
     role: Role,
     text: String,
+    /// Base64 image blocks attached to a user turn.
+    images: Vec<ImagePart>,
     /// Reasoning text; only replayed for Anthropic, which requires signatures.
     thinking: String,
     thinking_signature: Option<String>,
     tool_calls: Vec<ToolCallSpec>,
     tool_call_id: Option<String>,
     is_error: bool,
+}
+
+struct ImagePart {
+    mime: String,
+    data: String,
+}
+
+impl ImagePart {
+    fn data_url(&self) -> String {
+        format!("data:{};base64,{}", self.mime, self.data)
+    }
+}
+
+/// Extract pi `ImageContent` blocks from a message's content array.
+fn images_of(content: &Value) -> Vec<ImagePart> {
+    let Some(items) = content.as_array() else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            if item.get("type").and_then(Value::as_str) != Some("image") {
+                return None;
+            }
+            let data = item.get("data").and_then(Value::as_str)?.to_string();
+            let mime = item
+                .get("mimeType")
+                .and_then(Value::as_str)
+                .unwrap_or("image/png")
+                .to_string();
+            Some(ImagePart { mime, data })
+        })
+        .collect()
 }
 
 fn text_of(content: &Value) -> String {
@@ -370,6 +409,7 @@ fn to_turns(messages: &[Value]) -> Vec<Turn> {
             "user" => turns.push(Turn {
                 role: Role::User,
                 text: message.get("content").map(text_of).unwrap_or_default(),
+                images: message.get("content").map(images_of).unwrap_or_default(),
                 thinking: String::new(),
                 thinking_signature: None,
                 tool_calls: Vec::new(),
@@ -413,6 +453,7 @@ fn to_turns(messages: &[Value]) -> Vec<Turn> {
                 turns.push(Turn {
                     role: Role::Assistant,
                     text,
+                    images: Vec::new(),
                     thinking,
                     thinking_signature,
                     tool_calls: calls,
@@ -432,6 +473,7 @@ fn to_turns(messages: &[Value]) -> Vec<Turn> {
                 turns.push(Turn {
                     role: Role::Tool,
                     text,
+                    images: Vec::new(),
                     thinking: String::new(),
                     thinking_signature: None,
                     tool_calls: Vec::new(),
@@ -451,6 +493,44 @@ fn to_turns(messages: &[Value]) -> Vec<Turn> {
 // ---------------------------------------------------------------------------
 // 校验
 // ---------------------------------------------------------------------------
+
+/// Bound image attachments: count, MIME whitelist and decoded size.
+fn validate_images(messages: &[Value]) -> Result<(), ToolError> {
+    let mut count = 0usize;
+    let mut total_bytes = 0usize;
+    for message in messages {
+        if message.get("role").and_then(Value::as_str) != Some("user") {
+            continue;
+        }
+        let Some(content) = message.get("content") else {
+            continue;
+        };
+        for image in images_of(content) {
+            count += 1;
+            if count > MAX_IMAGES_PER_REQUEST {
+                return Err(ToolError::invalid(format!(
+                    "单次请求最多 {MAX_IMAGES_PER_REQUEST} 张图片"
+                )));
+            }
+            if !ALLOWED_IMAGE_MIME.contains(&image.mime.as_str()) {
+                return Err(ToolError::invalid(format!(
+                    "不支持的图片类型：{}",
+                    image.mime
+                )));
+            }
+            // Base64 decodes to ~3/4 of its length.
+            let bytes = (image.data.len() / 4).saturating_mul(3);
+            if bytes > MAX_IMAGE_BYTES {
+                return Err(ToolError::invalid("单张图片超过 8MB"));
+            }
+            total_bytes = total_bytes.saturating_add(bytes);
+            if total_bytes > MAX_IMAGES_TOTAL_BYTES {
+                return Err(ToolError::invalid("图片总量超过 16MB"));
+            }
+        }
+    }
+    Ok(())
+}
 
 pub fn validate_request(req: &ProxyRequest, entry: &ModelEntry) -> Result<(), ToolError> {
     if req.model.provider != entry.id {
@@ -486,8 +566,9 @@ pub fn validate_request(req: &ProxyRequest, entry: &ModelEntry) -> Result<(), To
         .map_err(|e| ToolError::invalid(format!("上下文序列化失败：{e}")))?
         .len();
     if total > MAX_TOTAL_BYTES {
-        return Err(ToolError::invalid("单次请求上下文超过 4MB"));
+        return Err(ToolError::invalid("单次请求上下文超过 24MB"));
     }
+    validate_images(&req.context.messages)?;
     if tools.len() > TOOL_ALLOWLIST.len() {
         return Err(ToolError::invalid("工具数量超过 5 个白名单"));
     }
@@ -785,7 +866,23 @@ fn openai_body(
                 "tool_call_id": turn.tool_call_id.clone().unwrap_or_default(),
                 "content": turn.text,
             })),
-            Role::User => messages.push(json!({ "role": "user", "content": turn.text })),
+            Role::User => {
+                if turn.images.is_empty() {
+                    messages.push(json!({ "role": "user", "content": turn.text }));
+                } else {
+                    let mut parts: Vec<Value> = Vec::new();
+                    if !turn.text.is_empty() {
+                        parts.push(json!({ "type": "text", "text": turn.text }));
+                    }
+                    for image in &turn.images {
+                        parts.push(json!({
+                            "type": "image_url",
+                            "image_url": { "url": image.data_url() },
+                        }));
+                    }
+                    messages.push(json!({ "role": "user", "content": parts }));
+                }
+            }
         }
     }
 
@@ -1087,11 +1184,23 @@ fn responses_body(
                 "call_id": turn.tool_call_id.clone().unwrap_or_default(),
                 "output": turn.text,
             })),
-            Role::User => input.push(json!({
-                "type": "message",
-                "role": "user",
-                "content": [{ "type": "input_text", "text": turn.text }],
-            })),
+            Role::User => {
+                let mut parts: Vec<Value> = Vec::new();
+                if !turn.text.is_empty() {
+                    parts.push(json!({ "type": "input_text", "text": turn.text }));
+                }
+                for image in &turn.images {
+                    parts.push(json!({
+                        "type": "input_image",
+                        "image_url": image.data_url(),
+                    }));
+                }
+                input.push(json!({
+                    "type": "message",
+                    "role": "user",
+                    "content": parts,
+                }));
+            }
         }
     }
 
@@ -1611,11 +1720,23 @@ fn anthropic_body(
                 });
                 push_turn(&mut messages, "user", vec![block]);
             }
-            Role::User => push_turn(
-                &mut messages,
-                "user",
-                vec![json!({ "type": "text", "text": turn.text })],
-            ),
+            Role::User => {
+                let mut blocks: Vec<Value> = Vec::new();
+                for image in &turn.images {
+                    blocks.push(json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": image.mime,
+                            "data": image.data,
+                        },
+                    }));
+                }
+                if !turn.text.is_empty() {
+                    blocks.push(json!({ "type": "text", "text": turn.text }));
+                }
+                push_turn(&mut messages, "user", blocks);
+            }
         }
     }
 

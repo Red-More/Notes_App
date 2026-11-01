@@ -4,13 +4,16 @@
 //! 不使用 `dangerouslySetInnerHTML`，模型输出不经过任何 HTML 解析。
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, chatApi, skillApi } from '../../api'
-import { createAgent, extractAssistant, profileFromSettings, toAgentMessages } from '../../agent/runtime'
+import { api, chatApi, mediaApi, skillApi } from '../../api'
+import { createAgent, extractAssistant, parseImageAssetIds, profileFromSettings, toAgentMessages } from '../../agent/runtime'
 import type { AgentProfile } from '../../agent/runtime'
 import { buildSkillsIndex } from '../../agent/skills'
 import type { AgentEvent } from '@earendil-works/pi-agent-core'
 import type { AgentSettings, ChatConversation, ChatMessageRecord, MessageUsage, SkillSummary } from '../../types'
-import { friendlyError } from '../../utils'
+import { friendlyError, normalizeImage } from '../../utils'
+import type { ImageContent } from '@earendil-works/pi-ai'
+import { open as openDialog } from '@tauri-apps/plugin-dialog'
+import { readFile } from '@tauri-apps/plugin-fs'
 import { toast } from '../../toast'
 import { Modal } from '../../components/ui'
 import PageHeader from '../../components/PageHeader'
@@ -19,6 +22,7 @@ import {
   IconChat,
   IconEdit,
   IconEye,
+  IconImage,
   IconInfo,
   IconNote,
   IconPlus,
@@ -45,6 +49,17 @@ interface Bubble {
   /** Reasoning text streamed before the visible answer. */
   thinking?: string | null
   thinkingSignature?: string | null
+  /** Data URLs of images attached to a user turn. */
+  images?: string[]
+  imageAssetIds?: number[]
+}
+
+/** One image staged in the composer. */
+interface Attachment {
+  assetId: number
+  mime: string
+  data: string
+  dataUrl: string
 }
 
 interface ToolCard {
@@ -69,11 +84,58 @@ function messageKey(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`
 }
 
-function recordsToItems(records: ChatMessageRecord[]): Item[] {
+/** Best-effort MIME for a picked file; normalizeImage re-encodes to JPEG anyway. */
+function imageMime(path: string): string {
+  const ext = path.split('.').pop()?.toLowerCase() ?? ''
+  if (ext === 'png') return 'image/png'
+  if (ext === 'webp') return 'image/webp'
+  if (ext === 'gif') return 'image/gif'
+  return 'image/jpeg'
+}
+
+const MAX_ATTACHMENTS = 4
+const MAX_INPUT_IMAGE_BYTES = 20 * 1024 * 1024
+
+type ImageData = { mime: string; data: string }
+
+/** Load attached image bytes for one conversation; failures drop that image. */
+async function loadImageData(records: ChatMessageRecord[]): Promise<Map<number, ImageData>> {
+  const ids = new Set<number>()
+  for (const record of records) {
+    if (record.role !== 'user') continue
+    for (const id of parseImageAssetIds(record.imageAssetIds)) ids.add(id)
+  }
+  const pairs = await Promise.all(
+    [...ids].slice(0, 16).map(async (id) => {
+      try {
+        return [id, await mediaApi.assetData(id)] as const
+      } catch {
+        return null
+      }
+    }),
+  )
+  return new Map(pairs.filter((pair): pair is readonly [number, ImageData] => pair !== null))
+}
+
+function recordsToItems(
+  records: ChatMessageRecord[],
+  images: Map<number, ImageData>,
+): Item[] {
   const items: Item[] = []
   for (const record of records) {
     if (record.role === 'user') {
-      items.push({ id: `m-${record.id}`, kind: 'user', text: record.content })
+      const ids = parseImageAssetIds(record.imageAssetIds)
+      const dataUrls = ids
+        .map((id) => images.get(id))
+        .filter((image): image is ImageData => image !== undefined)
+        .map((image) => `data:${image.mime};base64,${image.data}`)
+      items.push({
+        id: `m-${record.id}`,
+        kind: 'user',
+        text: record.content,
+        images: dataUrls.length > 0 ? dataUrls : undefined,
+        imageAssetIds: ids.length > 0 ? ids : undefined,
+      })
     } else if (record.role === 'assistant') {
       if (record.content.trim() === '') continue
       items.push({
@@ -317,6 +379,7 @@ export default function ChatPage({ isActive }: Props) {
   const [loading, setLoading] = useState(true)
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set())
   const [expandedThinking, setExpandedThinking] = useState<Set<string>>(new Set())
+  const [attachments, setAttachments] = useState<Attachment[]>([])
   const [docPreview, setDocPreview] = useState<DocPreview | null>(null)
   const [online, setOnline] = useState(() => navigator.onLine)
   // Set after a network-looking failure; WebView's online flag is unreliable.
@@ -626,7 +689,8 @@ export default function ChatPage({ isActive }: Props) {
       setLoading(true)
       try {
         const records = await chatApi.messages(conv.id)
-        setItems(recordsToItems(records))
+        const imageData = await loadImageData(records)
+        setItems(recordsToItems(records, imageData))
         // 优先使用会话记录里的模型条目；该条目被删除后回退到当前激活模型。
         const current = settingsRef.current
         const baseProfile = current
@@ -640,7 +704,7 @@ export default function ChatPage({ isActive }: Props) {
         setContextWindow(activeProfile.contextWindow ?? 128000)
         const agent = createAgent(
           activeProfile,
-          toAgentMessages(records, activeProfile),
+          await toAgentMessages(records, activeProfile, imageData),
           buildSkillsIndex(skillsRef.current),
           skillsRef.current,
         )
@@ -741,8 +805,8 @@ export default function ChatPage({ isActive }: Props) {
   }, [])
 
   const submitPrompt = useCallback(
-    async (text: string) => {
-      if (!text || streaming) return
+    async (text: string, files: Attachment[] = []) => {
+      if ((!text && files.length === 0) || streaming) return
       const agent = agentRef.current
       const conv = conversationRef.current
       if (!agent || !conv) {
@@ -751,19 +815,43 @@ export default function ChatPage({ isActive }: Props) {
       }
       settledRef.current = false
       setInput('')
-      setItems((prev) => [...prev, { id: messageKey('u'), kind: 'user', text }])
+      setItems((prev) => [
+        ...prev,
+        {
+          id: messageKey('u'),
+          kind: 'user',
+          text,
+          images: files.length > 0 ? files.map((file) => file.dataUrl) : undefined,
+          imageAssetIds: files.length > 0 ? files.map((file) => file.assetId) : undefined,
+        },
+      ])
+      setAttachments([])
       setStreaming(true)
       scrollToBottom()
-      void ensureTitle(text)
+      void ensureTitle(text || '图片')
       try {
         await enqueuePersist(() =>
           chatApi.append({
             conversationId: conv.id,
-            messages: [{ role: 'user', content: text }],
+            messages: [
+              {
+                role: 'user',
+                content: text,
+                imageAssetIds:
+                  files.length > 0 ? JSON.stringify(files.map((file) => file.assetId)) : null,
+              },
+            ],
           }),
         )
         // 技能正文由模型通过 load_skill 主动加载；用户消息不携带技能内容。
-        await agent.prompt(text)
+        const promptText = text || '请描述这些图片。'
+        const images: ImageContent[] = files.map((file) => ({
+          type: 'image',
+          data: file.data,
+          mimeType: file.mime,
+        }))
+        if (images.length > 0) await agent.prompt(promptText, images)
+        else await agent.prompt(text)
       } catch (e) {
         const shown = failureText(e, onlineRef.current)
         if (!onlineRef.current || networkFailure(friendlyError(e))) setNetworkIssue(true)
@@ -785,8 +873,8 @@ export default function ChatPage({ isActive }: Props) {
   )
 
   const send = useCallback(() => {
-    void submitPrompt(input.trim())
-  }, [input, submitPrompt])
+    void submitPrompt(input.trim(), attachments)
+  }, [attachments, input, submitPrompt])
 
   const retry = useCallback(
     (messageId: string) => {
@@ -895,6 +983,7 @@ export default function ChatPage({ isActive }: Props) {
               usage: record.usage,
               thinking: record.thinking,
               thinkingSignature: record.thinkingSignature,
+              imageAssetIds: record.imageAssetIds,
             })),
           })
         }
@@ -979,6 +1068,56 @@ export default function ChatPage({ isActive }: Props) {
     ? `${activeModel.label} · ${activeModel.modelId}`
     : '未添加模型'
   const hasModel = settings?.activeId != null
+
+  const pickImages = useCallback(async () => {
+    if (!activeModel?.supportsImages) {
+      toast('当前模型未开启图片输入，请在设置 → AI 助理中启用')
+      return
+    }
+    try {
+      const picked = await openDialog({
+        multiple: true,
+        filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif'] }],
+      })
+      const paths = typeof picked === 'string' ? [picked] : Array.isArray(picked) ? picked : []
+      if (paths.length === 0) return
+      let next = attachments
+      for (const path of paths) {
+        if (next.length >= MAX_ATTACHMENTS) {
+          toast(`一次最多附带 ${MAX_ATTACHMENTS} 张图片`)
+          break
+        }
+        const bytes = await readFile(path)
+        if (bytes.length > MAX_INPUT_IMAGE_BYTES) {
+          toast('图片超过 20MB，请先压缩')
+          continue
+        }
+        const normalized = await normalizeImage(bytes, imageMime(path))
+        if (!normalized.data) {
+          toast('图片处理失败')
+          continue
+        }
+        // Assets are deduplicated by content hash, so re-picking is free.
+        const asset = await mediaApi.storeAsset({ mime: normalized.mime, data: normalized.data })
+        next = [
+          ...next,
+          {
+            assetId: asset.id,
+            mime: normalized.mime,
+            data: normalized.data,
+            dataUrl: normalized.dataUrl,
+          },
+        ]
+      }
+      setAttachments(next)
+    } catch (e) {
+      toast(friendlyError(e))
+    }
+  }, [activeModel, attachments])
+
+  const removeAttachment = useCallback((assetId: number) => {
+    setAttachments((prev) => prev.filter((file) => file.assetId !== assetId))
+  }, [])
 
   // Rough token estimate (CJK ~1 char/token, ASCII ~3 chars/token).
   const contextChars = items.reduce(
@@ -1073,11 +1212,20 @@ export default function ChatPage({ isActive }: Props) {
                           )}
                         </div>
                       )}
-                      <div
-                        className={`chat-bubble ${item.kind} ${item.isError ? 'error' : ''}`}
-                      >
-                        {item.text || (item.streaming ? '…' : '')}
-                      </div>
+                      {item.kind === 'user' && item.images && item.images.length > 0 && (
+                        <div className="chat-bubble-images">
+                          {item.images.map((src, imageIndex) => (
+                            <img key={imageIndex} src={src} alt="附图" />
+                          ))}
+                        </div>
+                      )}
+                      {(!item.images || item.images.length === 0 || item.text) && (
+                        <div
+                          className={`chat-bubble ${item.kind} ${item.isError ? 'error' : ''}`}
+                        >
+                          {item.text || (item.streaming ? '…' : '')}
+                        </div>
+                      )}
                       {item.kind === 'assistant' && !item.streaming && (
                         <div className="chat-actions">
                           <button
@@ -1155,35 +1303,63 @@ export default function ChatPage({ isActive }: Props) {
       )}
 
       <div className="chat-composer">
-        <textarea
-          className="chat-input"
-          value={input}
-          rows={1}
-          placeholder={hasModel ? '说点什么…' : '请先添加模型'}
-          disabled={!hasModel}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault()
-              void send()
-            }
-          }}
-        />
-        {streaming ? (
-          <button type="button" className="chat-send stop" aria-label="停止" onClick={stop}>
-            <IconStop size={20} />
-          </button>
-        ) : (
+        {attachments.length > 0 && (
+          <div className="chat-attachments">
+            {attachments.map((file) => (
+              <div className="chat-attachment" key={file.assetId}>
+                <img src={file.dataUrl} alt="待发送图片" />
+                <button
+                  type="button"
+                  className="chat-attachment-remove"
+                  aria-label="移除图片"
+                  onClick={() => removeAttachment(file.assetId)}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="chat-composer-row">
+          <textarea
+            className="chat-input"
+            value={input}
+            rows={1}
+            placeholder={hasModel ? '说点什么…' : '请先添加模型'}
+            disabled={!hasModel}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                void send()
+              }
+            }}
+          />
           <button
             type="button"
-            className="chat-send"
-            aria-label="发送"
-            disabled={input.trim() === '' || !hasModel}
-            onClick={() => void send()}
+            className="chat-attach"
+            aria-label="添加图片"
+            disabled={!hasModel || streaming}
+            onClick={() => void pickImages()}
           >
-            <IconSend size={20} />
+            <IconImage size={20} />
           </button>
-        )}
+          {streaming ? (
+            <button type="button" className="chat-send stop" aria-label="停止" onClick={stop}>
+              <IconStop size={20} />
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="chat-send"
+              aria-label="发送"
+              disabled={(input.trim() === '' && attachments.length === 0) || !hasModel}
+              onClick={() => void send()}
+            >
+              <IconSend size={20} />
+            </button>
+          )}
+        </div>
       </div>
 
       {docPreview && (

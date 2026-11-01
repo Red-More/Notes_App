@@ -516,7 +516,7 @@ fn schema_creates_agent_and_media_tables() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 8, "thinking columns require schema v8");
+    assert_eq!(version, 9, "image asset columns require schema v9");
     for table in [
         "conversations",
         "messages",
@@ -562,6 +562,7 @@ fn conversation_lifecycle_persists_messages() {
                 usage: None,
                 thinking: None,
                 thinking_signature: None,
+                image_asset_ids: Some("[7]".into()),
             },
             conversations::NewMessage {
                 role: "assistant".into(),
@@ -582,6 +583,7 @@ fn conversation_lifecycle_persists_messages() {
                 }),
                 thinking: Some("先确认日期再写入".into()),
                 thinking_signature: Some("sig-1".into()),
+                image_asset_ids: None,
             },
         ],
     )
@@ -591,6 +593,7 @@ fn conversation_lifecycle_persists_messages() {
     let messages = conversations::messages(&vfs, conv.id).unwrap();
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0].role, "user");
+    assert_eq!(messages[0].image_asset_ids.as_deref(), Some("[7]"));
     assert!(messages[1].tool_calls.is_some());
     let usage = messages[1].usage.expect("usage must survive the round trip");
     assert_eq!(usage.input, 120);
@@ -633,6 +636,7 @@ fn conversation_rejects_unknown_roles_and_bad_titles() {
             usage: None,
             thinking: None,
             thinking_signature: None,
+            image_asset_ids: None,
         }],
     );
     assert!(bad_role.is_err(), "system role must not be accepted");
@@ -1262,6 +1266,52 @@ fn proxy_request_rejects_untrusted_inputs() {
         "content": "x".repeat(70 * 1024),
     })];
     assert!(llm::validate_request(&huge, &entry).is_err());
+}
+
+#[test]
+fn proxy_request_validates_image_attachments() {
+    let entry = test_entry("custom_1", "gpt-4o-mini");
+    let image = serde_json::json!({
+        "type": "image",
+        "data": "aGVsbG8=",
+        "mimeType": "image/png",
+    });
+    let mut ok = proxy_request("custom_1", "gpt-4o-mini");
+    ok.context.messages = vec![serde_json::json!({
+        "role": "user",
+        "content": [{ "type": "text", "text": "看图" }, image],
+    })];
+    assert!(
+        llm::validate_request(&ok, &entry).is_ok(),
+        "bounded images must pass"
+    );
+
+    let mut bad_mime = proxy_request("custom_1", "gpt-4o-mini");
+    bad_mime.context.messages = vec![serde_json::json!({
+        "role": "user",
+        "content": [{
+            "type": "image",
+            "data": "aGVsbG8=",
+            "mimeType": "application/pdf",
+        }],
+    })];
+    assert!(
+        llm::validate_request(&bad_mime, &entry).is_err(),
+        "non-image MIME types must be rejected"
+    );
+
+    let too_many: Vec<serde_json::Value> = (0..9)
+        .map(|_| serde_json::json!({"type": "image", "data": "aGVsbG8=", "mimeType": "image/png"}))
+        .collect();
+    let mut many = proxy_request("custom_1", "gpt-4o-mini");
+    many.context.messages = vec![serde_json::json!({
+        "role": "user",
+        "content": too_many,
+    })];
+    assert!(
+        llm::validate_request(&many, &entry).is_err(),
+        "more than eight images must be rejected"
+    );
 }
 
 #[test]
