@@ -377,6 +377,27 @@ export interface ConnectionTestResult {
   model: string
 }
 
+/** Remote MCP server configured by the user (token never returned). */
+export interface McpServerInfo {
+  id: string
+  label: string
+  url: string
+  enabled: boolean
+  configured: boolean
+}
+
+/** One tool advertised by an enabled MCP server. */
+export interface McpToolInfo {
+  serverId: string
+  serverLabel: string
+  /** Raw tool name on the server. */
+  name: string
+  /** Model-facing name; always starts with `mcp_`. */
+  qualified: string
+  description: string
+  inputSchema: Record<string, unknown>
+}
+
 /** Background media job; decoupled from a chat run. */
 export type MediaJobKind = 'image' | 'video' | 'tts' | 'classify' | 'asr'
 export type MediaJobStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'

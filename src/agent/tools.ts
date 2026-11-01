@@ -6,7 +6,9 @@
 
 import type { AgentTool } from '@earendil-works/pi-agent-core'
 import { StringEnum, Type } from '@earendil-works/pi-ai'
-import { api, skillApi } from '../api'
+import type { TSchema } from '@earendil-works/pi-ai'
+import { api, mcpApi, skillApi } from '../api'
+import type { McpToolInfo } from '../types'
 import {
   GREP_TYPES,
   argBoolean,
@@ -133,7 +135,10 @@ function renderWrite(receipt: VfsWriteReceipt): string {
 }
 
 /** 5 个 fs_* 与 `commands/fs.rs` 一一对应；`load_skill` 只读已启用技能。 */
-export function createTools(skills: SkillSummary[] = []): AgentTool[] {
+export function createTools(
+  skills: SkillSummary[] = [],
+  mcpTools: McpToolInfo[] = [],
+): AgentTool[] {
   const read: AgentTool = {
     name: 'fs_read',
     label: '读取文档',
@@ -384,5 +389,28 @@ export function createTools(skills: SkillSummary[] = []): AgentTool[] {
     executionMode: 'parallel',
   }
 
-  return [read, write, edit, glob, grep, loadSkill]
+  // Remote MCP tools are namespaced (`mcp_*`) and always run sequentially.
+  const remoteTools: AgentTool[] = mcpTools.map((tool) => ({
+    name: tool.qualified,
+    label: `${tool.serverLabel} · ${tool.name}`,
+    description: tool.description || `调用远程工具 ${tool.name}`,
+    parameters: tool.inputSchema as unknown as TSchema,
+    executionMode: 'sequential',
+    execute: async (_toolCallId, params) => {
+      const outcome = await runTool(() =>
+        mcpApi.callTool({
+          serverId: tool.serverId,
+          tool: tool.name,
+          arguments: params as Record<string, unknown>,
+        }),
+      )
+      if (!outcome.ok) return toolFailure(outcome.text)
+      return {
+        content: [{ type: 'text', text: outcome.value }],
+        details: { server: tool.serverId, tool: tool.name },
+      }
+    },
+  }))
+
+  return [read, write, edit, glob, grep, loadSkill, ...remoteTools]
 }

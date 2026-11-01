@@ -1372,6 +1372,46 @@ fn proxy_request_validates_image_attachments() {
 }
 
 #[test]
+fn remote_mcp_tools_follow_the_namespace_allowlist() {
+    let entry = test_entry("custom_1", "gpt-4o-mini");
+    let mut allowed = proxy_request("custom_1", "gpt-4o-mini");
+    allowed.context.messages = vec![serde_json::json!({
+        "role": "system",
+        "content": "ok",
+        "toolsAdded": [{ "name": "mcp_mcp_1_search_docs" }],
+    })];
+    assert!(
+        llm::validate_request(&allowed, &entry).is_ok(),
+        "namespaced MCP tools must pass validation"
+    );
+
+    let mut bad = proxy_request("custom_1", "gpt-4o-mini");
+    bad.context.messages = vec![serde_json::json!({
+        "role": "system",
+        "content": "ok",
+        "toolsAdded": [{ "name": "mcp evil/tool" }],
+    })];
+    assert!(
+        llm::validate_request(&bad, &entry).is_err(),
+        "only mcp_-prefixed identifier names are accepted"
+    );
+
+    let too_many: Vec<serde_json::Value> = (0..40)
+        .map(|i| serde_json::json!({ "name": format!("mcp_mcp_1_tool_{i}") }))
+        .collect();
+    let mut many = proxy_request("custom_1", "gpt-4o-mini");
+    many.context.messages = vec![serde_json::json!({
+        "role": "system",
+        "content": "ok",
+        "toolsAdded": too_many,
+    })];
+    assert!(
+        llm::validate_request(&many, &entry).is_err(),
+        "MCP tools beyond the cap must be rejected"
+    );
+}
+
+#[test]
 fn run_trims_long_histories_but_keeps_system_messages() {
     let mut messages: Vec<serde_json::Value> = vec![serde_json::json!({
         "role": "system",

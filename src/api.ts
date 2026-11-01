@@ -13,6 +13,8 @@ import type {
   Folder,
   FolderStats,
   LlmParams,
+  McpServerInfo,
+  McpToolInfo,
   MediaAsset,
   MediaJob,
   MediaJobKind,
@@ -599,6 +601,26 @@ export const mediaApi = {
   /** Persist a WebView-supplied audio payload before an ASR job. */
   storeAsset: (input: { mime: string; data: string }) =>
     invoke<MediaAsset>('media_asset_store', { input }),
+}
+
+/**
+ * 远程 MCP API：配置只存 URL/名称，令牌交给 Rust 私有存储。
+ */
+export const mcpApi = {
+  servers: () => invoke<McpServerInfo[]>('mcp_server_list'),
+  saveServer: (input: {
+    id?: string
+    label: string
+    url: string
+    enabled: boolean
+    /** Empty string clears the stored token. */
+    token?: string
+  }) => invoke<McpServerInfo>('mcp_server_save', { input }),
+  deleteServer: (id: string) => invoke<void>('mcp_server_delete', { id }),
+  toolsFor: (id: string) => invoke<McpToolInfo[]>('mcp_server_tools', { id }),
+  tools: () => invoke<McpToolInfo[]>('mcp_all_tools'),
+  callTool: (params: { serverId: string; tool: string; arguments: Record<string, unknown> }) =>
+    invoke<string>('mcp_tool_call', params),
 }
 
 /**

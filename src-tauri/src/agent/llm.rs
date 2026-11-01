@@ -35,6 +35,8 @@ const MAX_IMAGES_PER_REQUEST: usize = 8;
 const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_IMAGES_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 const ALLOWED_IMAGE_MIME: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+/// Remote MCP tools are namespaced with `mcp_`; the cap keeps request bodies small.
+const MAX_MCP_TOOLS: usize = 32;
 const MAX_MODEL_CHARS: usize = 100;
 /// Anthropic rejects requests without `max_tokens`; used only when the user
 /// left both `max_tokens` and the output context window empty. This is a
@@ -582,11 +584,11 @@ pub fn validate_request(req: &ProxyRequest, entry: &ModelEntry) -> Result<(), To
         return Err(ToolError::invalid("单次请求上下文超过 24MB"));
     }
     validate_images(&req.context.messages)?;
-    if tools.len() > TOOL_ALLOWLIST.len() {
-        return Err(ToolError::invalid("工具数量超过 5 个白名单"));
+    if tools.len() > TOOL_ALLOWLIST.len() + MAX_MCP_TOOLS {
+        return Err(ToolError::invalid("工具数量超过上限"));
     }
     for tool in &tools {
-        if !TOOL_ALLOWLIST.contains(&tool.name.as_str()) {
+        if !TOOL_ALLOWLIST.contains(&tool.name.as_str()) && !is_mcp_tool(&tool.name) {
             return Err(ToolError::invalid(format!(
                 "工具 {} 不在白名单内",
                 tool.name
@@ -594,6 +596,15 @@ pub fn validate_request(req: &ProxyRequest, entry: &ModelEntry) -> Result<(), To
         }
     }
     Ok(())
+}
+
+/// Remote MCP tools must be prefixed and limited to identifier characters.
+fn is_mcp_tool(name: &str) -> bool {
+    name.starts_with("mcp_")
+        && name.len() <= 128
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
 }
 
 // ---------------------------------------------------------------------------

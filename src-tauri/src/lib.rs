@@ -1,5 +1,6 @@
 mod agent;
 mod commands;
+mod mcp;
 mod db;
 mod docs;
 mod media;
@@ -149,6 +150,12 @@ pub fn run() {
             commands::media::media_asset_path,
             commands::media::media_asset_data,
             commands::media::media_asset_store,
+            commands::mcp::mcp_server_list,
+            commands::mcp::mcp_server_save,
+            commands::mcp::mcp_server_delete,
+            commands::mcp::mcp_server_tools,
+            commands::mcp::mcp_all_tools,
+            commands::mcp::mcp_tool_call,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

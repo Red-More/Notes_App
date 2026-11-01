@@ -11,5 +11,6 @@ pub mod folder;
 pub mod fs;
 pub mod index;
 pub mod media;
+pub mod mcp;
 pub mod skill;
 pub mod version;

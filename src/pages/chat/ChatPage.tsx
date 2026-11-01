@@ -4,7 +4,7 @@
 //! 不使用 `dangerouslySetInnerHTML`，模型输出不经过任何 HTML 解析。
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, chatApi, mediaApi, skillApi } from '../../api'
+import { api, chatApi, mcpApi, mediaApi, skillApi } from '../../api'
 import { createAgent, extractAssistant, parseImageAssetIds, profileFromSettings, toAgentMessages } from '../../agent/runtime'
 import type { AgentProfile } from '../../agent/runtime'
 import { buildSkillsIndex } from '../../agent/skills'
@@ -744,11 +744,14 @@ export default function ChatPage({ isActive }: Props) {
         : null
       if (!baseProfile) return null
       const activeProfile = await withCapabilities(baseProfile)
+      // MCP discovery is optional; a failure must not block chat.
+      const mcpTools = await mcpApi.tools().catch(() => [])
       const agent = createAgent(
         activeProfile,
         await toAgentMessages(records, activeProfile, imageData),
         buildSkillsIndex(skillsRef.current),
         skillsRef.current,
+        mcpTools,
         `conv_${conv.id}`,
       )
       return { agent, profile: activeProfile }

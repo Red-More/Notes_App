@@ -10,7 +10,7 @@ import { buildSystemPrompt } from './prompt'
 import { trimContext } from './context'
 import { nativeStreamFn } from './stream'
 import { createTools } from './tools'
-import type { ChatMessageRecord, AgentSettings, ModelApiFormat, SkillSummary } from '../types'
+import type { ChatMessageRecord, AgentSettings, ModelApiFormat, SkillSummary, McpToolInfo } from '../types'
 import { parseDbTime } from '../utils'
 
 const DEFAULT_TOOL_ROUNDS = 500
@@ -205,6 +205,7 @@ export function createAgent(
   history: AgentMessage[],
   skillsIndex = '',
   skills: SkillSummary[] = [],
+  mcpTools: McpToolInfo[] = [],
   sessionId?: string,
 ): Agent {
   return new Agent({
@@ -212,7 +213,7 @@ export function createAgent(
       systemPrompt: buildSystemPrompt(skillsIndex),
       model: createAppModel(profile),
       thinkingLevel: profile.reasoning ? 'medium' : 'off',
-      tools: createTools(skills),
+      tools: createTools(skills, mcpTools),
       messages: history,
     },
     streamFn: nativeStreamFn,
