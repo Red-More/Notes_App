@@ -45,6 +45,15 @@ pub enum ThinkingMode {
     Off,
 }
 
+/// Prompt-cache preference forwarded to providers that support it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CacheRetention {
+    None,
+    Short,
+    Long,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct LlmParams {
@@ -66,6 +75,8 @@ pub struct LlmParams {
     pub tool_rounds: Option<u32>,
     pub supports_images: Option<bool>,
     pub thinking_mode: Option<ThinkingMode>,
+    /// Prompt-cache preference; unset keeps the provider default (no cache hints).
+    pub cache_retention: Option<CacheRetention>,
     // Cost layer (USD, optional): per 1M tokens, per image, per video second,
     // per 1k spoken characters. Displayed by the capability matrix.
     pub input_price: Option<f64>,
@@ -95,6 +106,7 @@ impl LlmParams {
             && self.tool_rounds.is_none()
             && self.supports_images.is_none()
             && self.thinking_mode.is_none()
+            && self.cache_retention.is_none()
             && self.input_price.is_none()
             && self.output_price.is_none()
             && self.image_price.is_none()

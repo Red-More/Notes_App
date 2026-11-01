@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use super::model_store::{self, ApiFormat, ModelEntry};
-use super::params::{LlmParams, ThinkingMode};
+use super::params::{CacheRetention, LlmParams, ThinkingMode};
 use super::{AgentState, TOOL_ALLOWLIST};
 use crate::vfs::error::ToolError;
 
@@ -86,6 +86,9 @@ pub struct Options {
     /// pi thinking level (`off` / `minimal` / `low` / `medium` / `high`).
     #[serde(default)]
     pub thinking_level: Option<String>,
+    /// Stable per-conversation id used for provider cache key/affinity.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 /// 工具声明，直接取自 pi 的 `Tool`（`parameters` 是 TypeBox 生成的 JSON Schema）。
@@ -539,6 +542,16 @@ pub fn validate_request(req: &ProxyRequest, entry: &ModelEntry) -> Result<(), To
     if req.request_id.trim().is_empty() || req.request_id.chars().count() > 64 {
         return Err(ToolError::invalid("requestId 非法"));
     }
+    if let Some(session) = &req.options.session_id {
+        if session.is_empty()
+            || session.chars().count() > 64
+            || session
+                .chars()
+                .any(|c| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+        {
+            return Err(ToolError::invalid("sessionId 非法"));
+        }
+    }
     // baseUrl/headers 等字段一律忽略：URL 只能来自 life.db 中的模型条目。
     if !req.model.api.is_empty() && req.model.api != entry.format.pi_api() {
         return Err(ToolError::invalid("model.api 与模型协议不一致"));
@@ -814,6 +827,55 @@ fn thinking_budget(req: &Prepared<'_>) -> Option<u32> {
     (max > budget + 1).then_some(budget)
 }
 
+/// Effective cache preference; `None` means "send no cache hints".
+fn cache_retention(req: &Prepared<'_>) -> Option<CacheRetention> {
+    match req.params.cache_retention {
+        Some(CacheRetention::None) | None => None,
+        Some(retention) => Some(retention),
+    }
+}
+
+fn anthropic_cache_control(retention: CacheRetention) -> Value {
+    match retention {
+        CacheRetention::Long => json!({ "type": "ephemeral", "ttl": "1h" }),
+        _ => json!({ "type": "ephemeral" }),
+    }
+}
+
+/// Mark the system prompt, the last tool and the last message as cacheable.
+fn apply_anthropic_cache(map: &mut Map<String, Value>, retention: CacheRetention) {
+    let control = anthropic_cache_control(retention);
+    if let Some(system) = map.get_mut("system") {
+        if let Some(text) = system.as_str() {
+            *system = json!([{ "type": "text", "text": text, "cache_control": control.clone() }]);
+        }
+    }
+    if let Some(tools) = map.get_mut("tools").and_then(Value::as_array_mut) {
+        if let Some(last) = tools.last_mut() {
+            last["cache_control"] = control.clone();
+        }
+    }
+    if let Some(messages) = map.get_mut("messages").and_then(Value::as_array_mut) {
+        if let Some(last) = messages.last_mut() {
+            if let Some(content) = last.get_mut("content").and_then(Value::as_array_mut) {
+                if let Some(block) = content.last_mut() {
+                    block["cache_control"] = control;
+                }
+            }
+        }
+    }
+}
+
+/// OpenAI-compatible cache key/retention fields.
+fn apply_openai_cache(map: &mut Map<String, Value>, req: &Prepared<'_>, retention: CacheRetention) {
+    if let Some(session) = &req.options.session_id {
+        map.insert("prompt_cache_key".into(), json!(session));
+    }
+    if retention == CacheRetention::Long {
+        map.insert("prompt_cache_retention".into(), json!("24h"));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // OpenAI（/v1/chat/completions）
 // ---------------------------------------------------------------------------
@@ -932,6 +994,9 @@ fn prepare_openai_body(req: &Prepared<'_>) -> Result<Value, ToolError> {
     req.params.apply_openai(map);
     if let Some(effort) = reasoning_effort(req) {
         map.insert("reasoning_effort".into(), json!(effort));
+    }
+    if let Some(retention) = cache_retention(req) {
+        apply_openai_cache(map, req, retention);
     }
     map.insert("stream".into(), json!(stream));
     if !stream {
@@ -1244,6 +1309,9 @@ fn prepare_responses_body(req: &Prepared<'_>) -> Result<Value, ToolError> {
     req.params.apply_openai_responses(map);
     if let Some(effort) = reasoning_effort(req) {
         map.insert("reasoning".into(), json!({ "effort": effort }));
+    }
+    if let Some(retention) = cache_retention(req) {
+        apply_openai_cache(map, req, retention);
     }
     map.insert("stream".into(), json!(req.params.stream_enabled()));
     req.params.merge_extra(map)?;
@@ -1801,6 +1869,9 @@ fn prepare_anthropic_body(req: &Prepared<'_>) -> Result<Value, ToolError> {
             "thinking".into(),
             json!({ "type": "enabled", "budget_tokens": budget }),
         );
+    }
+    if let Some(retention) = cache_retention(req) {
+        apply_anthropic_cache(map, retention);
     }
     map.insert("stream".into(), json!(req.params.stream_enabled()));
     req.params.merge_extra(map)?;

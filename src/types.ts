@@ -360,6 +360,8 @@ export interface LlmParams {
   toolRounds?: number
   supportsImages?: boolean
   thinkingMode?: 'default' | 'on' | 'off'
+  /** Prompt-cache preference; unset sends no cache hints. */
+  cacheRetention?: 'none' | 'short' | 'long'
   /** Optional USD prices; metadata only, never sent in request bodies. */
   inputPrice?: number
   outputPrice?: number

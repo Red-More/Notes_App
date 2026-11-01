@@ -1266,6 +1266,19 @@ fn proxy_request_rejects_untrusted_inputs() {
         "content": "x".repeat(70 * 1024),
     })];
     assert!(llm::validate_request(&huge, &entry).is_err());
+
+    let mut bad_session = proxy_request("custom_1", "gpt-4o-mini");
+    bad_session.options.session_id = Some("bad id!".into());
+    assert!(
+        llm::validate_request(&bad_session, &entry).is_err(),
+        "session ids must stay short and printable"
+    );
+    let mut ok_session = proxy_request("custom_1", "gpt-4o-mini");
+    ok_session.options.session_id = Some("conv_42".into());
+    assert!(
+        llm::validate_request(&ok_session, &entry).is_ok(),
+        "conversation session ids must pass"
+    );
 }
 
 #[test]
@@ -1368,6 +1381,7 @@ fn llm_params_roundtrip_and_validation() {
         tool_rounds: Some(500),
         supports_images: Some(false),
         thinking_mode: Some(params::ThinkingMode::Default),
+        cache_retention: Some(params::CacheRetention::Long),
         input_price: Some(0.5),
         output_price: Some(1.5),
         image_price: None,

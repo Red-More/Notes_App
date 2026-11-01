@@ -124,6 +124,12 @@ const THINKING_OPTIONS: Array<{ key: NonNullable<LlmParams['thinkingMode']>; lab
   { key: 'off', label: '关闭思考' },
 ]
 
+const CACHE_OPTIONS: Array<{ key: NonNullable<LlmParams['cacheRetention']>; label: string }> = [
+  { key: 'none', label: '关闭' },
+  { key: 'short', label: '短期' },
+  { key: 'long', label: '长期' },
+]
+
 const IMAGE_OPTIONS = [
   { key: 'no', label: '不支持' },
   { key: 'yes', label: '支持' },
@@ -400,6 +406,20 @@ function ParamsEditor(props: {
           onChange={(thinkingMode) => patchParams({ thinkingMode })}
         />
       </div>
+
+      {draft.kind === 'chat' && (
+        <div className="form-field">
+          <span className="form-label">提示缓存</span>
+          <ChipRow
+            items={CACHE_OPTIONS}
+            value={params.cacheRetention ?? 'none'}
+            onChange={(cacheRetention) => patchParams({ cacheRetention })}
+          />
+          <p className="settings-note">
+            短期使用协议原生 cache_control；长期追加 1h / 24h TTL。仅在支持的协议与网关上生效。
+          </p>
+        </div>
+      )}
 
       <div className="form-field">
         <span className="form-label">价格（USD，可选）</span>

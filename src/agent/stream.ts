@@ -58,6 +58,7 @@ export const nativeStreamFn: StreamFn = (
             maxTokens: options?.maxTokens,
             toolChoice: options?.toolChoice,
             thinkingLevel: options?.reasoning,
+            sessionId: options?.sessionId,
           },
         },
         onEvent: channel,

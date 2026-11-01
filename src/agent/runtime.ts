@@ -205,6 +205,7 @@ export function createAgent(
   history: AgentMessage[],
   skillsIndex = '',
   skills: SkillSummary[] = [],
+  sessionId?: string,
 ): Agent {
   return new Agent({
     initialState: {
@@ -215,6 +216,8 @@ export function createAgent(
       messages: history,
     },
     streamFn: nativeStreamFn,
+    // Stable per-conversation id so cache-aware providers can reuse prefixes.
+    sessionId,
     // 按 token 预算裁剪：Rust 的 200 条上限只作兜底，避免长会话撑爆上下文。
     transformContext: async (messages) =>
       trimContext(messages, profile.contextWindow ?? 128000),

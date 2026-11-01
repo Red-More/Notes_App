@@ -343,7 +343,7 @@
 | 请求前重放 | `prepareRequest` | 未接入 | 无 |
 | 下一轮准备 | `prepareNextTurn`、`prepareNextTurnWithContext` | 未接入 | 无 |
 | 轮次收尾 | `finishTurn` | 未接入 | 由 `toolUse` 自然继续 |
-| 会话 ID | `sessionId` | 未接入 | 无 prompt cache/会话亲和 |
+| 会话 ID | `sessionId` | 已接入 | 每个会话固定 `conv_{id}`，经 streamFn 传入 Rust；OpenAI 侧作为 `prompt_cache_key` |
 | 请求身份 | `identity` | 未接入 | 无 |
 | 请求调试回调 | `onPayload`、`onResponse`、`onProviderStreamEvent` | 未接入 | Agent 选项未配置 |
 | 思考档位 | `thinkingLevel`、`thinkingBudgets` | 已接入 | `thinking_mode=on` 时 `thinkingLevel='medium'`；Rust 映射为 Anthropic `budget_tokens`、OpenAI `reasoning_effort` / `reasoning.effort` |
@@ -420,8 +420,8 @@
 
 | 功能点 | 当前落点 | 缺口 | 本轮结论 |
 |---|---|---|---|
-| 图片输入 | `supportsImages` 写入 `model.input` | UI 无入口；Rust 丢弃图片；历史不保存图片 | 实现 |
-| 缓存/会话亲和 | 无 | 未传 `sessionId`/`cacheRetention`；Rust 无缓存头 | 实现 |
+| 图片输入 | `supportsImages` 写入 `model.input` | 已支持附图、资产入库与历史还原 | 实现 |
+| 缓存/会话亲和 | 无 | 已按模型配置 `cache_retention`：Anthropic `cache_control`、OpenAI `prompt_cache_key`；未配置时不发任何缓存字段 | 实现 |
 | Payload/原始事件调试 | 无 | 未接 `onPayload`/`onResponse`/`onProviderStreamEvent` | 仅开发开关 |
 | 工具后处理 | 无 | 未接 `afterToolCall`，无法统一审计/改写结果 | 实现（媒体工具审计依赖） |
 | 轮次收尾控制 | 无 | 未接 `finishTurn`，无法按 stopReason 精细结束 | 实现 |
@@ -467,8 +467,9 @@
 | `thinking_*` 全链路 | [llm.rs](../src-tauri/src/agent/llm.rs) 解析三协议思考流（含 Anthropic 签名）；[protocol.ts](../src/agent/protocol.ts) 重建思考块；[ChatPage.tsx](../src/pages/chat/ChatPage.tsx) 折叠展示；schema v8 保存 `thinking`/`thinking_signature` |
 | 图片输入 | [ChatPage.tsx](../src/pages/chat/ChatPage.tsx) 附图与缩略图；[utils.ts](../src/utils.ts) 压到 1568px JPEG；Rust 三协议多模态消息、8 张/16MB 限额；schema v9 存 `image_asset_ids`，重启后经 `media_asset_data` 还原上下文 |
 | `steer()` / `followUp()` | 运行中输入切换为队列：`追加` 在下一回合注入、`排队` 在本轮结束后执行；队列消息随 `message_start/end` 渲染并落库，停止时清空 |
+| `sessionId` / `cacheRetention` | 会话固定 `conv_{id}` 作为 `sessionId`；设置页新增「提示缓存」开关（关闭/短期/长期），Anthropic 写 `cache_control`（long 带 `ttl:1h`），OpenAI 写 `prompt_cache_key` / `prompt_cache_retention` |
 
-剩余未落地：`sessionId`/`cacheRetention`、`continue()`、`StringEnum`/`prepareArguments`、远程 MCP。
+剩余未落地：`continue()`、`StringEnum`/`prepareArguments`、远程 MCP。
 
 ---
 
@@ -499,7 +500,7 @@
 | `continue()` | 想修「重试会重复插入 user 消息」 | 需要处理已取消的 assistant 消息作为上下文 |
 | `StringEnum` / `prepareArguments` | 弱模型经常给错枚举值或参数形状 | 只改工具 schema/兼容层，收益有限 |
 
-以上六项全部纳入实现：`thinking_*`、图片输入、`steer()`/`followUp()` 已落地；`sessionId`/`cacheRetention` 在媒体管线打通后落地。当前进度：下一批按「缓存 → `continue()`」顺序推进。
+以上六项全部纳入实现：`thinking_*`、图片输入、队列交互、`sessionId`/`cacheRetention` 已落地。当前进度：下一批按「`continue()` → `StringEnum`」顺序推进。
 
 ### 6.3 明确不建议（扩展后仍不采纳）
 

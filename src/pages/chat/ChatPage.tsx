@@ -757,6 +757,7 @@ export default function ChatPage({ isActive }: Props) {
           await toAgentMessages(records, activeProfile, imageData),
           buildSkillsIndex(skillsRef.current),
           skillsRef.current,
+          `conv_${conv.id}`,
         )
         unsubscribeRef.current = agent.subscribe((event) => {
           handleEvent(event)
