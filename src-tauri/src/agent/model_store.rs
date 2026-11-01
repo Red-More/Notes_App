@@ -52,6 +52,24 @@ pub enum ApiFormat {
     /// `POST <baseUrl>/audio/transcriptions`
     #[serde(rename = "openai-transcriptions")]
     OpenAiTranscriptions,
+    /// DashScope Wanx image synthesis (async task + poll).
+    #[serde(rename = "dashscope-image")]
+    DashScopeImage,
+    /// DashScope Wan text-to-video (async task + poll).
+    #[serde(rename = "dashscope-video")]
+    DashScopeVideo,
+    /// DashScope CosyVoice text-to-speech.
+    #[serde(rename = "dashscope-tts")]
+    DashScopeTts,
+    /// Volcano Ark Seedance video tasks.
+    #[serde(rename = "volc-video")]
+    VolcVideo,
+    /// Kling AI text-to-video (AccessKey:SecretKey JWT).
+    #[serde(rename = "kling-video")]
+    KlingVideo,
+    /// ElevenLabs text-to-speech (`xi-api-key`).
+    #[serde(rename = "elevenlabs-tts")]
+    ElevenLabsTts,
 }
 
 impl ApiFormat {
@@ -65,7 +83,13 @@ impl ApiFormat {
             Self::OpenAiImages
             | Self::OpenAiAudio
             | Self::OpenAiVideos
-            | Self::OpenAiTranscriptions => "openai-completions",
+            | Self::OpenAiTranscriptions
+            | Self::DashScopeImage
+            | Self::DashScopeVideo
+            | Self::DashScopeTts
+            | Self::VolcVideo
+            | Self::KlingVideo
+            | Self::ElevenLabsTts => "openai-completions",
         }
     }
 
@@ -89,6 +113,12 @@ impl ApiFormat {
             Self::OpenAiAudio => "/audio/speech",
             Self::OpenAiVideos => "/videos",
             Self::OpenAiTranscriptions => "/audio/transcriptions",
+            Self::DashScopeImage => "/api/v1/services/aigc/text2image/image-synthesis",
+            Self::DashScopeVideo => "/api/v1/services/aigc/video-generation/video-synthesis",
+            Self::DashScopeTts => "/api/v1/services/aigc/multimodal-generation/generation",
+            Self::VolcVideo => "/api/v3/contents/generations/tasks",
+            Self::KlingVideo => "/v1/videos/text2video",
+            Self::ElevenLabsTts => "/v1/text-to-speech",
         }
     }
 
@@ -444,14 +474,35 @@ fn validate_format_for_kind(kind: ModelKind, format: ApiFormat) -> Result<(), To
         ModelKind::Chat | ModelKind::Classify if !format.is_chat() => {
             Err(ToolError::invalid("对话与分类模型必须使用对话协议"))
         }
-        ModelKind::Image if format != ApiFormat::OpenAiImages => {
-            Err(ToolError::invalid("图像模型必须使用 OpenAI Images 协议"))
+        ModelKind::Image
+            if !matches!(format, ApiFormat::OpenAiImages | ApiFormat::DashScopeImage) =>
+        {
+            Err(ToolError::invalid(
+                "图像模型必须使用 OpenAI Images 或 DashScope 协议",
+            ))
         }
-        ModelKind::Tts if format != ApiFormat::OpenAiAudio => {
-            Err(ToolError::invalid("语音模型必须使用 OpenAI Audio 协议"))
+        ModelKind::Tts
+            if !matches!(
+                format,
+                ApiFormat::OpenAiAudio | ApiFormat::DashScopeTts | ApiFormat::ElevenLabsTts
+            ) =>
+        {
+            Err(ToolError::invalid(
+                "语音模型必须使用 OpenAI Audio、DashScope 或 ElevenLabs 协议",
+            ))
         }
-        ModelKind::Video if format != ApiFormat::OpenAiVideos => {
-            Err(ToolError::invalid("视频模型必须使用 OpenAI Videos 协议"))
+        ModelKind::Video
+            if !matches!(
+                format,
+                ApiFormat::OpenAiVideos
+                    | ApiFormat::DashScopeVideo
+                    | ApiFormat::VolcVideo
+                    | ApiFormat::KlingVideo
+            ) =>
+        {
+            Err(ToolError::invalid(
+                "视频模型必须使用 OpenAI Videos、DashScope、火山或可灵协议",
+            ))
         }
         ModelKind::Asr if format != ApiFormat::OpenAiTranscriptions => {
             Err(ToolError::invalid("转写模型必须使用 OpenAI Transcriptions 协议"))

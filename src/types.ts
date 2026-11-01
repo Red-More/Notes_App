@@ -307,6 +307,13 @@ export type ModelApiFormat =
   | 'openai-audio'
   | 'openai-videos'
   | 'openai-transcriptions'
+  // Vendor-native media protocols (6.4.6).
+  | 'dashscope-image'
+  | 'dashscope-video'
+  | 'dashscope-tts'
+  | 'volc-video'
+  | 'kling-video'
+  | 'elevenlabs-tts'
 
 /** Capability a model entry is configured for; only `chat` runs today. */
 export type ModelKind = 'chat' | 'image' | 'video' | 'tts' | 'classify' | 'asr'

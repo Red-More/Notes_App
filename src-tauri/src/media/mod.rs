@@ -10,6 +10,7 @@
 pub mod assets;
 pub mod exec;
 pub mod jobs;
+pub mod providers;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

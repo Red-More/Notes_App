@@ -474,8 +474,9 @@
 | 媒体成本账本（6.4.4） | schema v10 为 `media_jobs` 增加 `units`/`cost_usd`；[exec.rs](../src-tauri/src/media/exec.rs) 按张/秒/千字符/分钟换算；设置页 [MediaUsageSection.tsx](../src/pages/settings/MediaUsageSection.tsx) 汇总最近 200 个作业 |
 | 资产 GC（6.4.3） | [assets.rs](../src-tauri/src/media/assets.rs) 的 `gc()` 保留笔记正文引用、聊天附图与 30 天内作业产物，其余文件删除并解除作业引用；设置页提供手动清理入口 |
 | 媒体作业 Channel 进度（6.4.2） | [MediaState](../src-tauri/src/media/mod.rs) 维护每作业通道；`exec.rs` 在开始/进度/终态推送 `JobEvent`，[NoteEditorPage.tsx](../src/pages/notes/NoteEditorPage.tsx) 改为 `submitAndWatch`，移除轮询 |
+| 厂商私有媒体协议（6.4.6） | 新增 [providers.rs](../src-tauri/src/media/providers.rs)：DashScope 万相图像/视频、DashScope CosyVoice、火山方舟 Seedance、可灵（`AccessKey:SecretKey` 签发 HS256 JWT）、ElevenLabs（`xi-api-key`）；`exec.rs` 按 `ApiFormat` 分派，OpenAI 兼容协议的图像 `url` 响应也回退下载 |
 
-剩余未落地：6.4.6 的厂商私有媒体协议（当前仅 OpenAI 兼容）。
+6.4 全部缺口已补齐；6.4.6 的请求/响应字段依据公开 API 文档实现，尚未在真实厂商账户下逐一联调。
 
 ---
 
@@ -595,6 +596,22 @@
 
 现有三种 chat 协议不动；媒体协议按需增量，不铺开 pi-ai 的 30+ Provider。
 
+落实现状（2026-11-01）：
+
+| 格式（`ApiFormat`） | 端点后缀 | 鉴权 / 响应 |
+|---|---|---|
+| `dashscope-image` | `/api/v1/services/aigc/text2image/image-synthesis` | Bearer + `x-dashscope-async: enable`；轮询 `/api/v1/tasks/{id}` 取 `output.results[0].url` 后下载 |
+| `dashscope-video` | `/api/v1/services/aigc/video-generation/video-synthesis` | 同上；取 `output.video_url` 后下载 |
+| `dashscope-tts` | `/api/v1/services/aigc/multimodal-generation/generation` | 同步；`output.audio.url` 或 `output.audio.data`（base64） |
+| `volc-video` | `/api/v3/contents/generations/tasks` | Bearer；轮询 `{submitUrl}/{id}` 取 `content.video_url` |
+| `kling-video` | `/v1/videos/text2video` | `AccessKey:SecretKey` 签发 HS256 JWT（`iss`/`exp`/`nbf`）；轮询同路径 `/{id}` 取 `data.task_result.videos[0].url` |
+| `elevenlabs-tts` | `/v1/text-to-speech/{voiceId}` | `xi-api-key`；直接返回音频字节 |
+
+- 火山 Seedream 图像走 OpenAI 兼容的 `openai-images`（`/images/generations`），响应为 `url` 时自动下载落地。
+- 所有厂商结果统一落到资产库，多秒/长任务沿用 `poll_task`（2s × 300 次）并响应取消标记。
+- 设置页新增对应格式选项与 Base URL 预设；可灵不支持模型列表自动发现，需手填 Model ID。
+- 这些字段均按公开文档实现，真实账号联调仍需在拿到各家密钥后验证。
+
 ### 6.5 落地顺序
 
 1. 能力矩阵（`kind`/`capabilities`/价格）→ 验证：UI 能按能力分组选模型
@@ -632,6 +649,7 @@
 | `src-tauri/src/media/jobs.rs` | 作业表、提交/取消/查询、启动恢复 |
 | `src-tauri/src/media/assets.rs` | 资产哈希、落盘、引用与 GC |
 | `src-tauri/src/media/exec.rs` | 图像/视频/TTS/分类/转写的 Rust 执行器 |
+| `src-tauri/src/media/providers.rs` | 厂商私有协议（DashScope / 火山 / 可灵 / ElevenLabs）与任务轮询 |
 | `src-tauri/src/mcp/mod.rs` | 远程 MCP（Streamable HTTP、工具发现/调用） |
 | `src/pages/settings/MediaUsageSection.tsx` | 媒体成本汇总与资产清理入口 |
 

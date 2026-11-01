@@ -14,7 +14,7 @@ use crate::agent::llm;
 use crate::agent::model_store::{self, ApiFormat, ModelEntry};
 use crate::agent::params::{self, LlmParams};
 use crate::agent::AgentState;
-use crate::media::{assets, jobs, MediaState};
+use crate::media::{assets, jobs, providers, MediaState};
 use crate::vfs::VfsState;
 
 const MAX_CLASSIFY_TEXT: usize = 8000;
@@ -252,7 +252,7 @@ async fn execute(
     match kind {
         jobs::JobKind::Classify => classify(app, entry, params, job, key, cancel).await,
         jobs::JobKind::Tts => tts(app, entry, params, job, key, cancel).await,
-        jobs::JobKind::Image => image(app, entry, params, job, key, cancel).await,
+        jobs::JobKind::Image => image(app, job_id, entry, params, job, key, cancel).await,
         jobs::JobKind::Video => video(app, job_id, entry, params, job, key, cancel).await,
         jobs::JobKind::Asr => asr(app, entry, params, job, key, cancel).await,
     }
@@ -310,19 +310,43 @@ async fn tts(
     key: &str,
     cancel: &AtomicBool,
 ) -> Result<Outcome, String> {
-    if entry.format != ApiFormat::OpenAiAudio {
-        return Err("语音仅支持 OpenAI Audio 兼容协议".to_string());
-    }
     let text = required_text(job, "text", MAX_TTS_CHARS)?;
+    let default_voice = match entry.format {
+        ApiFormat::ElevenLabsTts => "21m00Tcm4TlvDq8ikWAM",
+        // CosyVoice ships a fixed Chinese voice set; `Cherry` is its default.
+        ApiFormat::DashScopeTts => "Cherry",
+        _ => "alloy",
+    };
     let voice = job
         .get("voice")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or("alloy")
+        .unwrap_or(default_voice)
         .to_string();
     if voice.chars().count() > 64 || voice.chars().any(char::is_control) {
         return Err("voice 非法".to_string());
+    }
+    if entry.format == ApiFormat::DashScopeTts {
+        let state = app.state::<AgentState>();
+        let bytes = providers::dashscope_tts(state.inner(), entry, key, &text, &voice).await?;
+        return Ok(Outcome::Asset {
+            bytes,
+            mime: "audio/mpeg",
+            meta: assets::AssetMeta::default(),
+        });
+    }
+    if entry.format == ApiFormat::ElevenLabsTts {
+        let state = app.state::<AgentState>();
+        let bytes = providers::elevenlabs_tts(state.inner(), entry, key, &text, &voice).await?;
+        return Ok(Outcome::Asset {
+            bytes,
+            mime: "audio/mpeg",
+            meta: assets::AssetMeta::default(),
+        });
+    }
+    if entry.format != ApiFormat::OpenAiAudio {
+        return Err("语音仅支持 OpenAI Audio、DashScope 或 ElevenLabs 协议".to_string());
     }
     let format = job
         .get("format")
@@ -358,15 +382,13 @@ async fn tts(
 
 async fn image(
     app: &AppHandle,
+    job_id: i64,
     entry: &ModelEntry,
     params: &LlmParams,
     job: &Value,
     key: &str,
     cancel: &AtomicBool,
 ) -> Result<Outcome, String> {
-    if entry.format != ApiFormat::OpenAiImages {
-        return Err("图像仅支持 OpenAI Images 兼容协议".to_string());
-    }
     let prompt = required_text(job, "prompt", MAX_PROMPT_CHARS)?;
     let size = job
         .get("size")
@@ -374,6 +396,31 @@ async fn image(
         .unwrap_or("1024x1024")
         .to_string();
     let (width, height) = parse_size(&size)?;
+    if entry.format == ApiFormat::DashScopeImage {
+        let state = app.state::<AgentState>();
+        let bytes = providers::dashscope_image(
+            state.inner(),
+            entry,
+            key,
+            &prompt,
+            &size,
+            cancel,
+            &|percent| update_progress(app, job_id, percent),
+        )
+        .await?;
+        return Ok(Outcome::Asset {
+            bytes,
+            mime: "image/png",
+            meta: assets::AssetMeta {
+                width: Some(width),
+                height: Some(height),
+                ..assets::AssetMeta::default()
+            },
+        });
+    }
+    if entry.format != ApiFormat::OpenAiImages {
+        return Err("图像仅支持 OpenAI Images 或 DashScope 协议".to_string());
+    }
     let body = json!({
         "model": entry.model_id.clone(),
         "prompt": prompt,
@@ -385,16 +432,22 @@ async fn image(
     if cancel.load(Ordering::SeqCst) {
         return Err("已取消".to_string());
     }
-    let b64 = payload
+    let item = payload
         .get("data")
         .and_then(Value::as_array)
         .and_then(|items| items.first())
-        .and_then(|item| item.get("b64_json"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| "图像响应缺少 b64_json（请确认厂商支持该字段）".to_string())?;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(b64)
-        .map_err(|e| format!("图像 base64 解码失败：{e}"))?;
+        .ok_or_else(|| "图像响应缺少 data".to_string())?;
+    let bytes = if let Some(b64) = item.get("b64_json").and_then(Value::as_str) {
+        base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| format!("图像 base64 解码失败：{e}"))?
+    } else if let Some(url) = item.get("url").and_then(Value::as_str) {
+        // Some OpenAI-compatible vendors (e.g. Volcano Ark) return a URL.
+        let state = app.state::<AgentState>();
+        providers::fetch_media(state.inner(), url).await?
+    } else {
+        return Err("图像响应缺少 b64_json 或 url".to_string());
+    };
     Ok(Outcome::Asset {
         bytes,
         mime: "image/png",
@@ -532,18 +585,68 @@ async fn video(
     key: &str,
     cancel: &AtomicBool,
 ) -> Result<Outcome, String> {
-    if entry.format != ApiFormat::OpenAiVideos {
-        return Err("视频仅支持 OpenAI Videos 兼容协议".to_string());
-    }
     let prompt = required_text(job, "prompt", MAX_PROMPT_CHARS)?;
+    let seconds = job.get("seconds").and_then(Value::as_u64);
+    if let Some(value) = seconds {
+        if !(1..=60).contains(&value) {
+            return Err("seconds 必须在 1–60 之间".to_string());
+        }
+    }
+    if entry.format != ApiFormat::OpenAiVideos {
+        // Vendor-specific async task APIs each return their own task shape;
+        // `providers` normalizes them to raw MP4 bytes.
+        let state = app.state::<AgentState>();
+        let progress = |percent| update_progress(app, job_id, percent);
+        let bytes = match entry.format {
+            ApiFormat::DashScopeVideo => {
+                providers::dashscope_video(
+                    state.inner(),
+                    entry,
+                    key,
+                    &prompt,
+                    seconds,
+                    cancel,
+                    &progress,
+                )
+                .await?
+            }
+            ApiFormat::VolcVideo => {
+                providers::volc_video(
+                    state.inner(),
+                    entry,
+                    key,
+                    &prompt,
+                    seconds,
+                    cancel,
+                    &progress,
+                )
+                .await?
+            }
+            ApiFormat::KlingVideo => {
+                providers::kling_video(
+                    state.inner(),
+                    entry,
+                    key,
+                    &prompt,
+                    seconds,
+                    cancel,
+                    &progress,
+                )
+                .await?
+            }
+            _ => return Err("视频仅支持 OpenAI Videos、DashScope、火山或可灵协议".to_string()),
+        };
+        return Ok(Outcome::Asset {
+            bytes,
+            mime: "video/mp4",
+            meta: assets::AssetMeta::default(),
+        });
+    }
     let mut body = json!({
         "model": entry.model_id.clone(),
         "prompt": prompt
     });
-    if let Some(seconds) = job.get("seconds").and_then(Value::as_u64) {
-        if !(1..=60).contains(&seconds) {
-            return Err("seconds 必须在 1–60 之间".to_string());
-        }
+    if let Some(seconds) = seconds {
         body["seconds"] = json!(seconds);
     }
     let submit_url = model_store::endpoint(entry);

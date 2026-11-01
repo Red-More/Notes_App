@@ -20,6 +20,12 @@ const FORMAT_OPTIONS: Array<{ key: ModelApiFormat; label: string }> = [
   { key: 'openai-audio', label: 'OpenAI Audio' },
   { key: 'openai-videos', label: 'OpenAI Videos' },
   { key: 'openai-transcriptions', label: 'OpenAI Transcriptions' },
+  { key: 'dashscope-image', label: 'DashScope 图像（万相）' },
+  { key: 'dashscope-video', label: 'DashScope 视频（通义万相）' },
+  { key: 'dashscope-tts', label: 'DashScope 语音合成' },
+  { key: 'volc-video', label: '火山方舟 Seedance 视频' },
+  { key: 'kling-video', label: '可灵 Kling 视频' },
+  { key: 'elevenlabs-tts', label: 'ElevenLabs 语音合成' },
 ]
 
 const CHAT_FORMATS: ModelApiFormat[] = ['openai-chat', 'openai-responses', 'anthropic-messages']
@@ -28,11 +34,11 @@ const CHAT_FORMATS: ModelApiFormat[] = ['openai-chat', 'openai-responses', 'anth
 function formatOptionsFor(kind: ModelKind): Array<{ key: ModelApiFormat; label: string }> {
   const allowed =
     kind === 'image'
-      ? ['openai-images']
+      ? ['openai-images', 'dashscope-image']
       : kind === 'tts'
-        ? ['openai-audio']
+        ? ['openai-audio', 'dashscope-tts', 'elevenlabs-tts']
         : kind === 'video'
-          ? ['openai-videos']
+          ? ['openai-videos', 'dashscope-video', 'volc-video', 'kling-video']
           : kind === 'asr'
             ? ['openai-transcriptions']
             : CHAT_FORMATS
@@ -115,6 +121,36 @@ const URL_PRESETS: Array<{ label: string; baseUrl: string; format: ModelApiForma
     label: 'OpenAI（Transcriptions）',
     baseUrl: 'https://api.openai.com/v1',
     format: 'openai-transcriptions',
+  },
+  {
+    label: 'DashScope 图像（万相）',
+    baseUrl: 'https://dashscope.aliyuncs.com',
+    format: 'dashscope-image',
+  },
+  {
+    label: 'DashScope 视频（通义万相）',
+    baseUrl: 'https://dashscope.aliyuncs.com',
+    format: 'dashscope-video',
+  },
+  {
+    label: 'DashScope 语音合成',
+    baseUrl: 'https://dashscope.aliyuncs.com',
+    format: 'dashscope-tts',
+  },
+  {
+    label: '火山方舟 Seedance',
+    baseUrl: 'https://ark.cn-beijing.volces.com',
+    format: 'volc-video',
+  },
+  {
+    label: '可灵 Kling',
+    baseUrl: 'https://api.klingai.com',
+    format: 'kling-video',
+  },
+  {
+    label: 'ElevenLabs',
+    baseUrl: 'https://api.elevenlabs.io',
+    format: 'elevenlabs-tts',
   },
 ]
 
@@ -199,6 +235,18 @@ function endpointHint(format: ModelApiFormat, fullUrl: boolean): string {
         return '直接使用该完整地址，不再拼接路径（示例 https://api.openai.com/v1/videos）。'
       case 'openai-transcriptions':
         return '直接使用该完整地址，不再拼接路径（示例 https://api.openai.com/v1/audio/transcriptions）。'
+      case 'dashscope-image':
+        return '直接使用该完整地址（示例 https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis）。'
+      case 'dashscope-video':
+        return '直接使用该完整地址（示例 https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis）。'
+      case 'dashscope-tts':
+        return '直接使用该完整地址（示例 https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation）。'
+      case 'volc-video':
+        return '直接使用该完整地址（示例 https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks）。'
+      case 'kling-video':
+        return '直接使用该完整地址（示例 https://api.klingai.com/v1/videos/text2video）。'
+      case 'elevenlabs-tts':
+        return '直接使用该完整地址（示例 https://api.elevenlabs.io/v1/text-to-speech）。'
       default:
         return '直接使用该完整地址，不再拼接路径（示例 https://api.openai.com/v1/chat/completions）。'
     }
@@ -216,6 +264,18 @@ function endpointHint(format: ModelApiFormat, fullUrl: boolean): string {
       return '不要以 / 结尾；系统会拼接 /videos，并轮询任务状态。'
     case 'openai-transcriptions':
       return '不要以 / 结尾；系统会拼接 /audio/transcriptions（multipart 上传）。'
+    case 'dashscope-image':
+      return '不要以 / 结尾；系统会拼接万相图像异步接口并轮询任务。'
+    case 'dashscope-video':
+      return '不要以 / 结尾；系统会拼接万相视频异步接口并轮询任务。'
+    case 'dashscope-tts':
+      return '不要以 / 结尾；系统会拼接 DashScope 多模态语音合成接口。'
+    case 'volc-video':
+      return '不要以 / 结尾；系统会拼接 /api/v3/contents/generations/tasks 并轮询任务。'
+    case 'kling-video':
+      return '不要以 / 结尾；系统会拼接 /v1/videos/text2video，密钥需填写 AccessKey:SecretKey。'
+    case 'elevenlabs-tts':
+      return '不要以 / 结尾；系统会拼接 /v1/text-to-speech/{voiceId}。'
     default:
       return '不要以 / 结尾；系统会拼接 /chat/completions。'
   }
@@ -236,13 +296,38 @@ function endpointPlaceholder(format: ModelApiFormat, fullUrl: boolean): string {
         return 'https://api.openai.com/v1/videos'
       case 'openai-transcriptions':
         return 'https://api.openai.com/v1/audio/transcriptions'
+      case 'dashscope-image':
+        return 'https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis'
+      case 'dashscope-video':
+        return 'https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis'
+      case 'dashscope-tts':
+        return 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation'
+      case 'volc-video':
+        return 'https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks'
+      case 'kling-video':
+        return 'https://api.klingai.com/v1/videos/text2video'
+      case 'elevenlabs-tts':
+        return 'https://api.elevenlabs.io/v1/text-to-speech'
       default:
         return 'https://api.openai.com/v1/chat/completions'
     }
   }
-  return format === 'anthropic-messages'
-    ? 'https://api.anthropic.com'
-    : 'https://api.openai.com/v1'
+  switch (format) {
+    case 'dashscope-image':
+    case 'dashscope-video':
+    case 'dashscope-tts':
+      return 'https://dashscope.aliyuncs.com'
+    case 'volc-video':
+      return 'https://ark.cn-beijing.volces.com'
+    case 'kling-video':
+      return 'https://api.klingai.com'
+    case 'elevenlabs-tts':
+      return 'https://api.elevenlabs.io'
+    default:
+      return format === 'anthropic-messages'
+        ? 'https://api.anthropic.com'
+        : 'https://api.openai.com/v1'
+  }
 }
 
 function parseJsonObject(text: string, field: string): Record<string, unknown> | null {

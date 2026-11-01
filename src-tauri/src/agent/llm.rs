@@ -701,7 +701,13 @@ pub async fn run(
             ApiFormat::OpenAiImages
             | ApiFormat::OpenAiAudio
             | ApiFormat::OpenAiVideos
-            | ApiFormat::OpenAiTranscriptions,
+            | ApiFormat::OpenAiTranscriptions
+            | ApiFormat::DashScopeImage
+            | ApiFormat::DashScopeVideo
+            | ApiFormat::DashScopeTts
+            | ApiFormat::VolcVideo
+            | ApiFormat::KlingVideo
+            | ApiFormat::ElevenLabsTts,
             _,
         ) => Err("该模型条目不是对话协议".to_string()),
     };
