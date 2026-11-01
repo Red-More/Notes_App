@@ -297,7 +297,7 @@
 | OpenAI 兼容性设置 | `compat`（`supportsDeveloperRole`、`supportsReasoningEffort`、`maxTokensField`、`thinkingFormat` 等） | 未接入 | 协议差异由 Rust 硬编码 |
 | 延迟响应 | `streamDeferred()`、`fetchDeferred()`、`cancelDeferred()` | 未接入 | 有抽象；1.4.0 中仅 faux 测试 Provider 实现，内置真实适配器未实现 |
 | Tool 定义 | `Tool`、`Type`、`Static`、`TSchema` | 部分接入 | 只使用 `Type`；未用 `Static`/`TSchema` |
-| 枚举 schema 辅助 | `StringEnum()` | 未接入 | 工具没有枚举参数 |
+| 枚举 schema 辅助 | `StringEnum()` | 已接入 | `fs_grep.type` 使用 `StringEnum` 限定 5 种文档类型 |
 | 工具参数校验 | `validateToolCall()`、`validateToolArguments()` | 部分接入 | 未直接调用，由 `pi-agent-core` 内部调用 |
 | 约束采样 | `constrainedSampling`（JSON Schema / grammar） | 未接入 | 6 个工具均未声明 |
 | 流式参数解析 | `parseStreamingJson()`、`parseToolCallArguments()` | 部分接入 | 只用 `parseStreamingJson`；完整参数由 Rust `ToolCallPayload` 解析 |
@@ -364,7 +364,7 @@
 | 嵌套工具调用 | `runToolCall()` | 未接入 | 无 codemode/工具嵌套 |
 | 代理流 | `streamProxy` | 未接入 | Rust 等价替代 |
 | 默认流函数 | `setDefaultStreamFn()` | 未接入 | 显式传入 `streamFn` |
-| 工具高级字段 | `prepareArguments`、`outputSchema`、`structuredContent`、`replay`、`usage`、`terminate`、`onUpdate` | 未接入 | 只用 `name/label/description/parameters/execute/executionMode` |
+| 工具高级字段 | `prepareArguments`、`outputSchema`、`structuredContent`、`replay`、`usage`、`terminate`、`onUpdate` | 部分接入 | 6 个工具均接入 `prepareArguments`（数字/布尔字符串化、JSON 字符串参数、枚举别名）；其余字段未用 |
 | 工具进度流 | `onUpdate()` | 未接入 | 工具卡片只在 start/end 更新 |
 | 工具错误约定 | 抛出异常由 Agent 转 `isError` | 已接入 | 项目主动返回 `isError: true` 结果；官方 `AgentToolResult` 同样支持该形状 |
 | MCP 集成 | `@earendil-works/pi-mcp` | 未安装/未接入 | 不安装；需要时只做 Rust 远程 MCP（见 4.3） |
@@ -469,8 +469,9 @@
 | `steer()` / `followUp()` | 运行中输入切换为队列：`追加` 在下一回合注入、`排队` 在本轮结束后执行；队列消息随 `message_start/end` 渲染并落库，停止时清空 |
 | `sessionId` / `cacheRetention` | 会话固定 `conv_{id}` 作为 `sessionId`；设置页新增「提示缓存」开关（关闭/短期/长期），Anthropic 写 `cache_control`（long 带 `ttl:1h`），OpenAI 写 `prompt_cache_key` / `prompt_cache_retention` |
 | `continue()` | 「重试」改为：按被点消息定位到上一条 user 记录 → `chat_truncate` 删除其后消息 → 重建 Agent → `continue()`；不再重复插入 user 消息 |
+| `StringEnum` / `prepareArguments` | `fs_grep.type` 改为 `StringEnum`；新增 [args.ts](../src/agent/args.ts) 归一化器，6 个工具都接入 `prepareArguments`（含中文枚举别名与数字/布尔字符串） |
 
-剩余未落地：`StringEnum`/`prepareArguments`、远程 MCP。
+剩余未落地：远程 MCP（P2 可选）。
 
 ---
 
@@ -501,7 +502,7 @@
 | `continue()` | 想修「重试会重复插入 user 消息」 | 需要处理已取消的 assistant 消息作为上下文 |
 | `StringEnum` / `prepareArguments` | 弱模型经常给错枚举值或参数形状 | 只改工具 schema/兼容层，收益有限 |
 
-以上六项全部纳入实现，落地完成：`thinking_*`、图片输入、队列交互、缓存与 `continue()`。当前进度：剩余 `StringEnum`/`prepareArguments` 与远程 MCP。
+以上六项全部纳入实现，落地完成：`thinking_*`、图片输入、队列交互、缓存、`continue()` 与 `StringEnum`/`prepareArguments`。当前进度：仅剩可选远程 MCP。
 
 ### 6.3 明确不建议（扩展后仍不采纳）
 

@@ -5,8 +5,16 @@
 //! `load_skill` 只能按已启用技能的名称/id 读取正文，不暴露任意路径。
 
 import type { AgentTool } from '@earendil-works/pi-agent-core'
-import { Type } from '@earendil-works/pi-ai'
+import { StringEnum, Type } from '@earendil-works/pi-ai'
 import { api, skillApi } from '../api'
+import {
+  GREP_TYPES,
+  argBoolean,
+  argGrepType,
+  argNumber,
+  argString,
+  argsObject,
+} from './args'
 import type {
   SkillSummary,
   VfsGlobEntry,
@@ -138,6 +146,17 @@ export function createTools(skills: SkillSummary[] = []): AgentTool[] {
       endLine: Type.Optional(Type.Number({ description: '结束行（含）' })),
       includeMeta: Type.Optional(Type.Boolean({ description: '是否返回 frontmatter 元数据' })),
     }),
+    // Weak models often send "10" as a string or a JSON string for args.
+    prepareArguments: (raw) => {
+      const args = argsObject(raw)
+      return {
+        path: argString(args.path) ?? '',
+        rev: argNumber(args.rev),
+        startLine: argNumber(args.startLine),
+        endLine: argNumber(args.endLine),
+        includeMeta: argBoolean(args.includeMeta),
+      }
+    },
     execute: async (_toolCallId, params) => {
       const input = params as {
         path: string
@@ -175,6 +194,15 @@ export function createTools(skills: SkillSummary[] = []): AgentTool[] {
         Type.Boolean({ description: '按路径自动补 frontmatter，默认 true' }),
       ),
     }),
+    prepareArguments: (raw) => {
+      const args = argsObject(raw)
+      return {
+        path: argString(args.path) ?? '',
+        content: typeof args.content === 'string' ? args.content : String(args.content ?? ''),
+        createParents: argBoolean(args.createParents),
+        autoFrontmatter: argBoolean(args.autoFrontmatter),
+      }
+    },
     executionMode: 'sequential',
     execute: async (_toolCallId, params) => {
       const input = params as {
@@ -211,6 +239,16 @@ export function createTools(skills: SkillSummary[] = []): AgentTool[] {
         Type.Number({ description: '乐观锁：read 到的 rev；不一致返回 conflict' }),
       ),
     }),
+    prepareArguments: (raw) => {
+      const args = argsObject(raw)
+      return {
+        path: argString(args.path) ?? '',
+        oldString: typeof args.oldString === 'string' ? args.oldString : String(args.oldString ?? ''),
+        newString: typeof args.newString === 'string' ? args.newString : String(args.newString ?? ''),
+        replaceAll: argBoolean(args.replaceAll),
+        expectRev: argNumber(args.expectRev),
+      }
+    },
     executionMode: 'sequential',
     execute: async (_toolCallId, params) => {
       const input = params as {
@@ -252,6 +290,14 @@ export function createTools(skills: SkillSummary[] = []): AgentTool[] {
       root: Type.Optional(Type.String({ description: '相对模式的根目录，默认 /life' })),
       caseSensitive: Type.Optional(Type.Boolean({ description: '是否区分大小写' })),
     }),
+    prepareArguments: (raw) => {
+      const args = argsObject(raw)
+      return {
+        pattern: argString(args.pattern) ?? '',
+        root: argString(args.root),
+        caseSensitive: argBoolean(args.caseSensitive),
+      }
+    },
     execute: async (_toolCallId, params) => {
       const input = params as { pattern: string; root?: string; caseSensitive?: boolean }
       assertReadableGlob(input.pattern, input.root)
@@ -270,11 +316,23 @@ export function createTools(skills: SkillSummary[] = []): AgentTool[] {
       pattern: Type.String({ description: '要搜索的文字' }),
       path: Type.Optional(Type.String({ description: '限定路径或目录，默认 /life' })),
       type: Type.Optional(
-        Type.String({ description: '限定文档类型：note/todo/event/contact/diary' }),
+        StringEnum(GREP_TYPES, {
+          description: '限定文档类型：note/todo/event/contact/diary',
+        }),
       ),
       maxResults: Type.Optional(Type.Number({ description: '最多返回条数，上限 200' })),
       contextLines: Type.Optional(Type.Number({ description: '上下文行数，上限 3' })),
     }),
+    prepareArguments: (raw) => {
+      const args = argsObject(raw)
+      return {
+        pattern: argString(args.pattern) ?? '',
+        path: argString(args.path),
+        type: argGrepType(args.type),
+        maxResults: argNumber(args.maxResults),
+        contextLines: argNumber(args.contextLines),
+      }
+    },
     execute: async (_toolCallId, params) => {
       const input = params as {
         pattern: string
@@ -299,6 +357,10 @@ export function createTools(skills: SkillSummary[] = []): AgentTool[] {
     parameters: Type.Object({
       name: Type.String({ description: '技能索引中的 id 或名称，例如 daily-review' }),
     }),
+    prepareArguments: (raw) => {
+      const args = argsObject(raw)
+      return { name: argString(args.name) ?? '' }
+    },
     execute: async (_toolCallId, params) => {
       const input = params as { name: string }
       const wanted = input.name.trim()
