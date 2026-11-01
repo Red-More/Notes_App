@@ -299,9 +299,17 @@ impl Runtime {
                     return Err(error);
                 }
             };
+            let load_started = std::time::Instant::now();
             match super::engine::Engine::load(backend, &path, context, threads) {
                 Ok(engine) => {
                     let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+                    log::info!(
+                        "local perf: load_ms={} bytes={} context={} threads={}",
+                        load_started.elapsed().as_millis(),
+                        bytes,
+                        context,
+                        threads
+                    );
                     *self.inner.loaded.lock().unwrap() = Some(engine);
                     self.publish(
                         LocalState::Ready,

@@ -102,6 +102,7 @@ impl Engine {
         let n_batch = self.context_size.min(512) as usize;
         let mut batch = LlamaBatch::new(n_batch, 1);
         let mut pos = 0usize;
+        let prompt_started = std::time::Instant::now();
         while pos < prompt_tokens.len() {
             let end = (pos + n_batch).min(prompt_tokens.len());
             batch.clear();
@@ -115,12 +116,14 @@ impl Engine {
                 .map_err(|e| format!("提示词解码失败：{e}"))?;
             pos = end;
         }
+        let prompt_ms = prompt_started.elapsed().as_millis();
 
         let mut sampler = sampler_for(params);
         let mut output = String::new();
         let mut pending: Vec<u8> = Vec::new();
         let mut generated = 0u32;
         let mut next_pos = prompt_tokens.len() as i32;
+        let decode_started = std::time::Instant::now();
         let mut length_limited = false;
 
         loop {
@@ -165,6 +168,17 @@ impl Engine {
                 pending.clear();
             }
         }
+
+        let decode_ms = decode_started.elapsed().as_millis();
+        // Phase F baseline: keep the three segments measurable so the KV sliding
+        // window is only built when prefill actually dominates.
+        log::info!(
+            "local perf: prompt_tokens={} prompt_ms={} output_tokens={} decode_ms={}",
+            prompt_tokens.len(),
+            prompt_ms,
+            generated,
+            decode_ms
+        );
 
         sink(LocalChunk::Done {
             prompt_tokens: prompt_tokens.len() as u32,
