@@ -5,6 +5,7 @@
 use rusqlite::params;
 use serde_json::Value;
 
+use crate::agent::local::{gating, runtime, LocalState};
 use crate::agent::model_store::{self, ApiFormat, ModelEntry, ModelInput, ModelKind};
 use crate::agent::params::{self, LlmParams};
 use crate::agent::{conversations, discovery, llm, secrets};
@@ -2579,5 +2580,175 @@ fn privacy_egress_scopes_glob_and_grep_arguments() {
     let broad = egress::guard(&tool_call("fs_grep", serde_json::json!({ "pattern": "会议" })), &snapshot);
     assert!(broad.blocked());
     assert!(broad.paths.iter().any(|p| p == "/life"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Phase B: local llama.cpp runtime
+// ---------------------------------------------------------------------------
+
+#[test]
+fn local_gate_blocks_heat_and_low_battery() {
+    let policy = gating::GatePolicy::default();
+    // Unknown metrics never block: desktop builds have no sysfs source.
+    assert_eq!(
+        gating::evaluate(&gating::PowerSnapshot::default(), &policy),
+        gating::GateDecision::Allow
+    );
+    // Heat wins even when charging.
+    assert_eq!(
+        gating::evaluate(
+            &gating::PowerSnapshot {
+                thermal_celsius: Some(48.0),
+                ..Default::default()
+            },
+            &policy
+        ),
+        gating::GateDecision::Suspend("设备温度过高")
+    );
+    // Low battery only blocks while discharging.
+    assert_eq!(
+        gating::evaluate(
+            &gating::PowerSnapshot {
+                battery_percent: Some(10),
+                charging: Some(false),
+                ..Default::default()
+            },
+            &policy
+        ),
+        gating::GateDecision::Suspend("电量过低")
+    );
+    assert_eq!(
+        gating::evaluate(
+            &gating::PowerSnapshot {
+                battery_percent: Some(10),
+                charging: Some(true),
+                ..Default::default()
+            },
+            &policy
+        ),
+        gating::GateDecision::Allow
+    );
+}
+
+#[test]
+fn local_device_recommendation_follows_memory_tiers() {
+    let low = gating::recommend(Some(3500), 8);
+    assert_eq!(low.tier, "none");
+    assert_eq!(low.recommended_threads, 1);
+    assert_eq!(low.max_model_mb, 0);
+
+    let medium = gating::recommend(Some(7000), 8);
+    assert_eq!(medium.tier, "medium");
+    assert_eq!(medium.recommended_threads, 3);
+    assert_eq!(medium.recommended_context, 4096);
+
+    let high = gating::recommend(Some(12000), 12);
+    assert_eq!(high.tier, "high");
+    assert_eq!(high.recommended_threads, 4);
+    assert_eq!(high.max_model_mb, 1600);
+
+    let unknown = gating::recommend(None, 6);
+    assert_eq!(unknown.tier, "unknown");
+    assert_eq!(unknown.recommended_context, 2048);
+}
+
+#[test]
+fn local_config_persists_and_rejects_path_traversal() {
+    let vfs = test_vfs();
+    let config = runtime::LocalConfig {
+        file: "qwen3-0.6b-iq4_xs.gguf".into(),
+        threads: 4,
+        context_size: 2048,
+        keep_alive: true,
+        enabled: true,
+        max_tokens: 256,
+    };
+    let saved = runtime::save_config(vfs.conn(), &config).expect("valid local config");
+    assert_eq!(saved, config);
+    assert_eq!(runtime::load_config(vfs.conn()), config);
+
+    for file in ["../evil.gguf", "/etc/passwd.gguf", "dir/model.gguf", "model.bin"] {
+        let bad = runtime::LocalConfig {
+            file: file.into(),
+            ..config.clone()
+        };
+        assert!(
+            runtime::save_config(vfs.conn(), &bad).is_err(),
+            "{file} must be rejected"
+        );
+    }
+
+    let bad_context = runtime::LocalConfig {
+        context_size: 64,
+        ..config
+    };
+    assert!(runtime::save_config(vfs.conn(), &bad_context).is_err());
+}
+
+#[test]
+fn local_file_names_are_directory_safe() {
+    assert!(runtime::is_valid_file_name("qwen3-0.6b-iq4_xs.GGUF"));
+    for name in ["", "model", "a/b.gguf", "a b.gguf", "a\\b.gguf", "../x.gguf"] {
+        assert!(!runtime::is_valid_file_name(name), "{name} must be rejected");
+    }
+}
+
+#[test]
+fn local_model_entry_uses_file_name_and_skips_url_validation() {
+    let vfs = test_vfs();
+    let entry = model_store::save(
+        vfs.conn(),
+        ModelInput {
+            id: "local_llama".into(),
+            label: "本地模型".into(),
+            format: ApiFormat::LocalLlama,
+            base_url: "qwen3-0.6b-iq4_xs.gguf".into(),
+            model_id: "qwen3-0.6b-iq4_xs".into(),
+            full_url: false,
+            kind: ModelKind::Chat,
+        },
+    )
+    .expect("local entry should be accepted without HTTPS");
+    assert_eq!(entry.format, ApiFormat::LocalLlama);
+    assert!(entry.format.is_chat());
+    assert!(entry.format.is_local());
+    // Persisted entries survive the read-side filter.
+    assert_eq!(model_store::configs(vfs.conn()).unwrap().len(), 1);
+
+    let bad = model_store::save(
+        vfs.conn(),
+        ModelInput {
+            id: "local_bad".into(),
+            label: "坏模型".into(),
+            format: ApiFormat::LocalLlama,
+            base_url: "https://api.example.com/v1".into(),
+            model_id: "bad".into(),
+            full_url: false,
+            kind: ModelKind::Chat,
+        },
+    );
+    assert!(bad.is_err(), "local entries must not accept URLs");
+}
+
+#[test]
+fn local_runtime_reports_unsupported_without_feature() {
+    let dir = std::env::temp_dir().join(format!(
+        "lifeos-local-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_nanos())
+            .unwrap_or(0)
+    ));
+    let runtime = runtime::Runtime::new(dir.clone());
+    if !runtime.supported() {
+        assert_eq!(runtime.status().state, LocalState::Unsupported);
+    }
+    let loaded = runtime.load_blocking(runtime::LocalConfig {
+        file: "qwen3-0.6b-iq4_xs.gguf".into(),
+        ..Default::default()
+    });
+    assert!(loaded.is_err(), "loading must fail without a real model");
     let _ = std::fs::remove_dir_all(&dir);
 }

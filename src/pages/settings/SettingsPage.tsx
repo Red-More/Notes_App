@@ -31,6 +31,7 @@ import {
 import { toast } from '../../toast'
 import { api } from '../../api'
 import AgentSettingsSection from './AgentSettingsSection'
+import LocalModelSection from './LocalModelSection'
 import McpSection from './McpSection'
 import MediaUsageSection from './MediaUsageSection'
 import PrivacySection from './PrivacySection'
@@ -247,6 +248,8 @@ export default function SettingsPage({ onBack }: Props) {
         </div>
 
         <AgentSettingsSection />
+
+        <LocalModelSection />
 
         <PrivacySection />
 

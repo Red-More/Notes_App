@@ -1,0 +1,249 @@
+//! llama.cpp 引擎封装（`local-llm` feature）。
+//!
+//! 只暴露“加载一个 GGUF + 按聊天模板流式生成”：线程数、上下文与采样参数
+//! 全部由运行时传入；引擎不接触数据库、网络或前端。
+
+use std::num::NonZeroU32;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use llama_cpp_2::context::params::LlamaContextParams;
+use llama_cpp_2::llama_backend::LlamaBackend;
+use llama_cpp_2::llama_batch::LlamaBatch;
+use llama_cpp_2::model::params::LlamaModelParams;
+use llama_cpp_2::model::{LlamaChatMessage, LlamaChatTemplate, LlamaModel};
+use llama_cpp_2::sampling::LlamaSampler;
+
+use super::{LocalChunk, LocalParams, LocalTurn};
+
+pub struct Engine {
+    model: LlamaModel,
+    context_size: u32,
+    threads: u32,
+}
+
+impl Engine {
+    pub fn load(
+        backend: &LlamaBackend,
+        path: &Path,
+        context_size: u32,
+        threads: u32,
+    ) -> Result<Self, String> {
+        let params = LlamaModelParams::default()
+            .with_n_gpu_layers(0)
+            .with_use_mmap(true)
+            .with_use_mlock(false);
+        let model = LlamaModel::load_from_file(backend, path, &params)
+            .map_err(|e| format!("模型加载失败：{e}"))?;
+        let trained = model.n_ctx_train();
+        Ok(Self {
+            model,
+            context_size: context_size.min(trained).max(512),
+            threads: threads.max(1),
+        })
+    }
+
+    pub fn generate(
+        &self,
+        backend: &LlamaBackend,
+        turns: &[LocalTurn],
+        params: &LocalParams,
+        cancel: &AtomicBool,
+        sink: &mut dyn FnMut(LocalChunk),
+    ) -> Result<(), String> {
+        if turns.is_empty() {
+            return Err("没有可发送的消息".to_string());
+        }
+        let template = self
+            .model
+            .chat_template(None)
+            .map_err(|e| format!("模型缺少聊天模板：{e}"))?;
+        let vocab = self.model.vocab();
+        let budget = (self.context_size as usize)
+            .saturating_sub(params.max_tokens as usize)
+            .saturating_sub(32)
+            .max(128);
+
+        // 超预算时从最旧的非 system 消息开始丢弃，system 与最后一轮始终保留。
+        let mut kept: Vec<&LocalTurn> = turns.iter().collect();
+        let (prompt_tokens, prompt) = loop {
+            let prompt = render_prompt(&self.model, &template, &kept)?;
+            let tokens = vocab.tokenize(prompt.as_bytes(), true, true);
+            if tokens.len() <= budget || kept.len() <= 2 {
+                break (tokens, prompt);
+            }
+            match kept.iter().position(|turn| turn.role != "system") {
+                Some(index) => {
+                    kept.remove(index);
+                }
+                None => break (tokens, prompt),
+            }
+        };
+        if prompt_tokens.len() > self.context_size as usize {
+            return Err("输入超出本地模型上下文，请缩短问题或调大上下文".to_string());
+        }
+        let _ = prompt;
+
+        let mut ctx = self
+            .model
+            .new_context(
+                backend,
+                LlamaContextParams::default()
+                    .with_n_ctx(NonZeroU32::new(self.context_size))
+                    .with_n_threads(self.threads as i32)
+                    .with_n_threads_batch(self.threads as i32)
+                    .with_n_batch(self.context_size.min(512)),
+            )
+            .map_err(|e| format!("创建上下文失败：{e}"))?;
+
+        let n_batch = self.context_size.min(512) as usize;
+        let mut batch = LlamaBatch::new(n_batch, 1);
+        let mut pos = 0usize;
+        while pos < prompt_tokens.len() {
+            let end = (pos + n_batch).min(prompt_tokens.len());
+            batch.clear();
+            for index in pos..end {
+                let last = index + 1 == prompt_tokens.len();
+                batch
+                    .add(prompt_tokens[index], index as i32, &[0], last)
+                    .map_err(|e| format!("写入 batch 失败：{e}"))?;
+            }
+            ctx.decode(&mut batch)
+                .map_err(|e| format!("提示词解码失败：{e}"))?;
+            pos = end;
+        }
+
+        let mut sampler = sampler_for(params);
+        let mut output = String::new();
+        let mut pending: Vec<u8> = Vec::new();
+        let mut generated = 0u32;
+        let mut next_pos = prompt_tokens.len() as i32;
+        let mut length_limited = false;
+
+        loop {
+            if cancel.load(Ordering::SeqCst) {
+                return Err("已取消".to_string());
+            }
+            let token = sampler.sample(&ctx, -1);
+            if vocab.is_eog(token) {
+                break;
+            }
+            pending.extend_from_slice(&vocab.token_to_piece(token, false, None));
+            let text = drain_utf8(&mut pending);
+            if !text.is_empty() {
+                if let Some(cut) = stop_prefix(&output, &text, &params.stop) {
+                    if cut > 0 {
+                        sink(LocalChunk::Token(text[..cut].to_string()));
+                    }
+                    break;
+                }
+                output.push_str(&text);
+                sink(LocalChunk::Token(text));
+            }
+
+            generated += 1;
+            if generated >= params.max_tokens {
+                length_limited = true;
+                break;
+            }
+            if next_pos + 1 >= self.context_size as i32 {
+                length_limited = true;
+                break;
+            }
+            batch.clear();
+            batch
+                .add(token, next_pos, &[0], true)
+                .map_err(|e| format!("写入 batch 失败：{e}"))?;
+            ctx.decode(&mut batch)
+                .map_err(|e| format!("生成解码失败：{e}"))?;
+            next_pos += 1;
+            // 防御：极端情况下 UTF-8 缓冲区残留，保证不会无限增长。
+            if pending.len() > 64 {
+                pending.clear();
+            }
+        }
+
+        sink(LocalChunk::Done {
+            prompt_tokens: prompt_tokens.len() as u32,
+            output_tokens: generated,
+            reason: if length_limited { "length" } else { "stop" },
+        });
+        Ok(())
+    }
+}
+
+fn render_prompt(
+    model: &LlamaModel,
+    template: &LlamaChatTemplate,
+    turns: &[&LocalTurn],
+) -> Result<String, String> {
+    let messages = turns
+        .iter()
+        .map(|turn| LlamaChatMessage::new(turn.role.to_string(), turn.content.clone()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("消息包含非法字符：{e}"))?;
+    model
+        .apply_chat_template(template, &messages, true)
+        .map_err(|e| format!("应用聊天模板失败：{e}"))
+}
+
+fn sampler_for(params: &LocalParams) -> LlamaSampler {
+    if params.temperature <= 0.0 {
+        return LlamaSampler::greedy();
+    }
+    let top_k = i32::try_from(params.top_k.clamp(1, 1000)).unwrap_or(40);
+    LlamaSampler::chain_simple([
+        LlamaSampler::temp(params.temperature),
+        LlamaSampler::top_k(top_k),
+        LlamaSampler::top_p(params.top_p, 1),
+        LlamaSampler::dist(params.seed),
+    ])
+}
+
+/// 取出缓冲区中可完整解码的 UTF-8 前缀；不完整的尾字节留到下一个 token。
+fn drain_utf8(pending: &mut Vec<u8>) -> String {
+    let mut out = String::new();
+    for _ in 0..8 {
+        match std::str::from_utf8(pending) {
+            Ok(text) => {
+                out.push_str(text);
+                pending.clear();
+                break;
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                if valid > 0 {
+                    if let Ok(text) = std::str::from_utf8(&pending[..valid]) {
+                        out.push_str(text);
+                    }
+                    pending.drain(..valid);
+                }
+                match error.error_len() {
+                    Some(len) => {
+                        let len = len.min(pending.len());
+                        pending.drain(..len);
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 返回 `text` 中可安全输出的字节长度；命中停止串时截断并以停止串为界。
+fn stop_prefix(output: &str, text: &str, stops: &[String]) -> Option<usize> {
+    let mut combined = String::with_capacity(output.len() + text.len());
+    combined.push_str(output);
+    combined.push_str(text);
+    let found = stops
+        .iter()
+        .filter(|stop| !stop.is_empty())
+        .filter_map(|stop| combined.find(stop.as_str()))
+        .min()?;
+    let mut cut = found.saturating_sub(output.len()).min(text.len());
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    Some(cut)
+}

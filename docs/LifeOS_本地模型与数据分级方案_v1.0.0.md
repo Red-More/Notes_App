@@ -1,19 +1,20 @@
-# LifeOS 本地模型与数据分级方案（v1.1.0）
+# LifeOS 本地模型与数据分级方案（v1.2.0）
 
 | 项目 | 内容 |
 |---|---|
 | 文档编号 | LIF-2026-DES-002 |
-| 版本 | v1.1.0 |
+| 版本 | v1.2.0 |
 | 编制日期 | 2026-11-01 |
 | 依据文档 | [Model Management.md](./Model%20Management.md)、[LifeOS_厂商适配说明.md](./LifeOS_%E5%8E%82%E5%95%86%E9%80%82%E9%85%8D%E8%AF%B4%E6%98%8E.md) |
-| 代码基线 | `2188771` feat(privacy): enforce data tiers at the cloud egress gate<br>`src-tauri/src/agent/{model_store,llm,discovery}.rs`、`src-tauri/src/vfs/`、`src-tauri/src/privacy/`、`src/agent/{runtime,prompt,context,tools}.ts` |
+| 代码基线 | `2188771` feat(privacy): enforce data tiers at the cloud egress gate<br>`src-tauri/src/agent/{model_store,llm,discovery}.rs`、`src-tauri/src/vfs/`、`src-tauri/src/privacy/`、`src-tauri/src/agent/local/`、`src/agent/{runtime,prompt,context,tools}.ts` |
 | 目标平台 | Android arm64-v8a 优先；桌面随后复用同一 Rust 接口 |
-| 交付范围 | v1.0.0 为设计与实施计划；v1.1.0 已完成阶段 A（安全核心：分级、识别器、实体库、出境闸门），B–F 待实施 |
+| 交付范围 | v1.0.0 为设计与实施计划；v1.1.0 完成阶段 A（安全核心）；v1.2.0 完成阶段 B（本地运行时），C–F 待实施 |
 
 ### 修订历史
 
 | 版本 | 日期 | 变更摘要 |
 |---|---|---|
+| v1.2.0 | 2026-11-01 | 阶段 B 落地：`local-llm` feature、llama.cpp 引擎、生命周期状态机、`LocalLlama` 模型条目、本地命令与设置页、sysfs 热/电量门控；新增第 14 节实施记录 |
 | v1.1.0 | 2026-11-01 | 阶段 A 落地：schema v11、L0/L1/L2 检测、有效级别、`egress::guard` 接入 `agent_stream`、隐私命令与设置页；新增第 13 节实施记录 |
 | v1.0.0 | 2026-11-01 | 初版：内嵌 llama.cpp 常驻、三级数据分级、Presidio/EDM 式脱敏、ModelScope 模型分发、局域网信任档 |
 
@@ -53,6 +54,8 @@
 **结论**：Android 首版可行，但必须接受三条平台事实——内嵌推理是 CPU 密集、真后台常驻必须前台服务、0.6B 不具备通用 Agent 能力。方案不回避这三点，而是把它们转成产品边界。
 
 **阶段 A 已落地（v1.1.0）**：分级、识别器、实体库与出境闸门先于本地运行时上线，用“拒绝发送”优先兑现隐私承诺；在 B/C 完成前，S0 与未脱敏的 S1 请求一律被拒，只有 S2 允许出境。实现细节见第 13 节。
+
+**阶段 B 已落地（v1.2.0）**：本地运行时以 `local-llm` feature 隔离，默认构建不引入 C/C++ 工具链；本地条目走 `ApiFormat::LocalLlama`，在 `llm::run` 内分流到 llama.cpp，不经过任何 HTTP 代码路径，因此天然零出境。生命周期、导入与设置页已接通，实现细节与构建前置见第 14 节。
 
 ---
 
@@ -346,7 +349,7 @@ CREATE TABLE egress_audit (
 | 阶段 | 内容 | 前置 | 完成判据 | 状态 |
 |---|---|---|---|---|
 | A 安全核心（优先） | L0/L1/L2 + 有效级别 + `egress::guard` 接入现有云端链路 | 无 | 云端请求遇 S0 必被拒；S1 未脱敏必被拒；单测覆盖校验位与归一化 | ✅ 完成（`2188771`） |
-| B 本地运行时 | llama.cpp 绑定、状态机、事件映射、热/电量门控 | Android 构建镜像 | 真机加载 IQ4_XS 可流式输出；后台 3 秒内释放内存 | 未开始 |
+| B 本地运行时 | llama.cpp 绑定、状态机、事件映射、热/电量门控 | Android 构建镜像 | 真机加载 IQ4_XS 可流式输出；后台 3 秒内释放内存 | ✅ 已实现（代码验收见 §14；真机验收归 F） |
 | C 编排链路 | `cloud_consult`、脱敏、diff 校验、回填、审计 | A + B | 云端抓包只见占位符；回填后本地文本正确 | 未开始 |
 | D 目录与分发 | 设备检测、ModelScope 白名单、下载/校验/切换 | B | 断点续传可用；篡改文件被拒；推荐与实际能力一致 | 未开始 |
 | E 局域网档 | 私有校验、双 client、配对与指纹 | A | 公网条目行为零变化；内网条目强制 Key | 未开始 |
@@ -408,7 +411,7 @@ CREATE TABLE egress_audit (
 | [Model Management.md](./Model%20Management.md) | 云端出境闸门、审计、默认分级对模型使用的影响 | ✅ 已回写 |
 | [LifeOS_厂商适配说明.md](./LifeOS_%E5%8E%82%E5%95%86%E9%80%82%E9%85%8D%E8%AF%B4%E6%98%8E.md) | 安全约束、代码基线与已知限制补充分级/闸门 | ✅ 已回写（v4） |
 | [LifeOS_下一步执行计划_v1.3.0.md](./LifeOS_%E4%B8%8B%E4%B8%80%E6%AD%A5%E6%89%A7%E8%A1%8C%E8%AE%A1%E5%88%92_v1.3.0.md) | 阶段 A 实施记录、M6 红线补充项与后续约束 | ✅ 已回写（§16） |
-| 本方案 | 阶段状态与实施记录 | ✅ v1.1.0 |
+| 本方案 | 阶段状态与实施记录 | ✅ v1.2.0 |
 
 ---
 
@@ -466,3 +469,79 @@ CREATE TABLE egress_audit (
 1. C 阶段的脱敏必须基于本节识别器输出的 span 结构扩展；替换与回填在 Rust 完成，模型不接触映射表。
 2. E 阶段的私有档只对 `network_scope=private` 条目放宽地址校验，不得改动本节的出境闸门。
 3. F 阶段需把第 10.2 节的隐私用例扩展为真机抓包验收（S0 零出境、S1 仅占位符、S2 与现状一致）。
+
+---
+
+## 14. 阶段 B 实施记录（2026-11-01）
+
+> 本节是执行记录，不改变第 1–11 节的设计决策；阶段 B 尚未提交（代码基线待补）。
+
+### 14.1 交付物与代码落点
+
+| 设计项 | 实现 | 文件 |
+|---|---|---|
+| 构建隔离 | `local-llm` feature 引入可选依赖 `llama-cpp-2`；默认构建不触发 clang/cmake | `src-tauri/Cargo.toml` |
+| 引擎封装 | GGUF 加载、聊天模板、分块解码提示词、采样链、UTF-8 增量输出、停止串 | `src-tauri/src/agent/local/engine.rs` |
+| 生命周期 | `Unsupported/Unloaded/Loading/Ready/Generating/Suspended/Failed`；手动关闭、后台暂停、切换模型都先取消再释放权重 | `src-tauri/src/agent/local/mod.rs`、`runtime.rs` |
+| 线程与内存 | 加载/推理在 `tauri::async_runtime::spawn_blocking`；单实例 `busy` 互斥；每次生成新建 context，空闲只驻留权重 | `runtime.rs` |
+| 热/电量门控 | sysfs 读取 thermal_zone 与 battery；≥45°C 或 ≤15% 且未充电即暂停并释放 | `local/gating.rs` |
+| 设备推荐 | `/proc/meminfo` + 核数分档（<4GB 不推荐、4–6GB、6–8GB、≥8GB），只提示不自动下载 | `gating.rs` |
+| 模型条目 | 新增 `ApiFormat::LocalLlama`；本地条目 `base_url` 存 `.gguf` 文件名，跳过 HTTPS 校验，读取侧按格式分别校验 | `agent/model_store.rs` |
+| 请求分流 | `llm::run` 在发送前分流本地；本地请求不加载 EDM 快照、不写出境审计、不经过 HTTP | `agent/llm.rs`、`commands/agent.rs` |
+| 事件映射 | 复用 `StreamEvent`（`TextStart/TextDelta/TextEnd/Done`）；取消回 `aborted` | `llm.rs` |
+| 配置持久化 | `settings` 键 `agent.local.v1`；文件名/线程/上下文/输出上限校验 | `runtime.rs` |
+| 命令 | `local_model_status/config_set/load/unload/pause/resume/import/remove/activate` | `commands/local.rs`、`lib.rs` |
+| 设置页 | 状态、设备档位、门控、文件列表、导入/删除、加载/卸载、参数、启用与后台常驻 | `src/pages/settings/LocalModelSection.tsx` |
+| 生命周期钩子 | 前台恢复加载、后台默认释放（`keepAlive` 时保持） | `src/agent/localLifecycle.ts`、`App.tsx` |
+| 前端契约 | `localApi` 与本地模型类型；模型列表为本地条目显示“无网络请求”并禁用测试/编辑 | `src/api.ts`、`src/types.ts`、`AgentSettingsSection.tsx` |
+
+### 14.2 对外行为（阶段 B）
+
+| 场景 | 结果 |
+|---|---|
+| 当前模型为本地条目、已加载 | `agent_stream` 直接流式返回本地输出，全程无网络请求、无出境审计 |
+| 本地条目未启用 / 未加载 | 明确错误提示，不隐式回退到云端（避免 S0 意外出境） |
+| 本地条目被选为当前模型但从未加载 | `agent_stream` 触发一次异步加载（受热/电量门控约束） |
+| 设备 ≥45°C 或 ≤15% 且未充电 | 加载/生成前拒绝，状态转 `Suspended` 并释放权重 |
+| 应用切到后台且未开启常驻 | `local_model_pause` 释放权重；开启常驻则保持 |
+| 导入模型 | 仅接受 `.gguf` 文件名（ASCII、无路径分隔符）、≤3GB、同名不覆盖；先写 `.part` 再原子重命名 |
+| 尝试删除使用中的模型 | 拒绝，要求先卸载 |
+| 未启用 `local-llm` 的构建 | 状态 `unsupported`；本地条目仍可保存，但加载返回可行动错误 |
+
+### 14.3 构建前置与已知风险
+
+1. **Windows 桌面构建已验证（2026-11-01）**：VS Build Tools 18 自带 CMake 4.3.1、Ninja 1.13.2 与 MSVC 14.51；bindgen 所需的 libclang 通过 PyPI `libclang 18.1.1` 提供（`C:\Users\16412\miniconda3\Lib\site-packages\clang\native`）。已把 VS 的 CMake/Ninja 目录写入用户 `PATH`，并设置用户级 `LIBCLANG_PATH`。首次 `cargo check --features local-llm` 用时 15m40s（含 llama.cpp 全量编译），增量 10s。
+2. **Android 构建仍需独立环境**：NDK 的 `android.toolchain.cmake`、`-DANDROID_ABI=arm64-v8a`、`-DANDROID_PLATFORM=26`、`-DGGML_NATIVE=OFF`，并需在固定 CI 镜像内预装 clang/cmake；桌面验证不代表 Android 可直接产出。
+3. **llama-cpp-2 API 版本**：已按锁定版本 `0.1.160` 完整编译通过（`chat_template/apply_chat_template`、`LlamaVocab::tokenize/token_to_piece`、`LlamaSampler` 均匹配）；升级版本时仍需重新验证 `engine.rs`。
+4. **后台常驻**：Android 真正的后台常驻仍需要前台服务与通知；本轮只实现“默认后台卸载 / 用户可选保持”，前台服务归阶段 F。
+5. **小模型能力**：本地分支不注入工具声明，模型不会调用 `fs_*`；system 提示裁到 1200 字符，历史按 token 预算丢弃最旧轮次。
+
+### 14.4 验证
+
+| 项 | 结果 |
+|---|---|
+| `cargo check`（默认 feature） | 通过，无告警 |
+| `cargo check --features local-llm` | 通过，无告警（首次 15m40s，增量 10s） |
+| `cargo test --lib` | 73 passed（新增 6 个本地运行时用例：门控、设备分档、配置校验、文件名安全、本地条目校验、无 feature 状态） |
+| `cargo test --lib --features local-llm` | 73 passed，含 llama.cpp 链接 |
+| `tsc -b` | 通过 |
+| `vitest run` | 14 文件 / 139 用例通过 |
+| `oxlint` | 0 errors；2 个既有 `set-state-in-effect` 警告（`McpSection`、`MediaUsageSection`），与本节改动无关 |
+
+### 14.5 与设计的偏差与延后项
+
+| 项 | 现状 | 归属 |
+|---|---|---|
+| ModelScope 目录与下载 | 未实现；目前只能手动导入 GGUF，无 sha256/断点续传 | 阶段 D |
+| 自动下载与“仅推荐不自动下载” | 已按设计只提示推荐，不触发下载 | D |
+| Android 热/电量 | 只读 sysfs；无 `PowerManager` 前台服务上报 | F |
+| 本地 prompt 档位 | 前端未新增紧凑 prompt；Rust 侧裁剪 system 与历史 | C/F |
+| `cloud_consult` 脱敏链路 | 未实现；本地模型仍只处理本会话 | C |
+| 预编译产物 | 未接入预编译 llama.cpp，仍走源码构建 | F（风险处置） |
+
+### 14.6 对后续阶段的约束
+
+1. C 阶段的 `cloud_consult` 必须复用本地 `LocalState` 与门控，不得绕过 `require_gate`。
+2. D 阶段的下载必须写同一模型目录、复用 `is_valid_file_name` 与 `MAX_MODEL_BYTES`，并补 sha256 与断点续传。
+3. E 阶段的局域网档不得改动 `ApiFormat::LocalLlama` 的零网络语义；本地条目永远跳过出境闸门。
+4. F 阶段需补齐真机验收：IQ4_XS 流式输出、后台 3 秒内释放、4GB 机型 30 分钟无 OOM。

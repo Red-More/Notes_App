@@ -157,7 +157,7 @@ Full URL 开启时直接 POST 用户填写的完整地址，路径必须由用�
 
 分级规则、实体库与出境判定见 [LifeOS_本地模型与数据分级方案_v1.0.0.md](./LifeOS_%E6%9C%AC%E5%9C%B0%E6%A8%A1%E5%9E%8B%E4%B8%8E%E6%95%B0%E6%8D%AE%E5%88%86%E7%BA%A7%E6%96%B9%E6%A1%88_v1.0.0.md)（LIF-2026-DES-002）。
 
-> 当前只有 HTTPS 公网条目。本地 llama.cpp 档（阶段 B）与局域网私有档（阶段 E）尚未实现，模型条目字段暂不包含 `network_scope` / `prompt_profile`。
+> 当前支持 HTTPS 公网条目与本地 llama.cpp 条目（阶段 B）：本地条目使用 `local-llama` 格式，`Base URL` 字段存模型目录内的 `.gguf` 文件名，不做 HTTPS 校验、不发起任何网络请求，`agent_stream` 在发送前直接分流到内嵌运行时。局域网私有档（阶段 E）尚未实现，模型条目字段暂不包含 `network_scope` / `prompt_profile`。
 
 持久化键：
 
@@ -166,6 +166,7 @@ Full URL 开启时直接 POST 用户填写的完整地址，路径必须由用�
 | 模型列表 | `agent.models.v2` |
 | 当前模型 | `agent.active_model.v2` |
 | 模型参数 | `agent.params.v2` |
+| 本地模型偏好 | `agent.local.v1` |
 
 旧版 `agent.provider*` 配置及其密钥在首次读取时清理一次，以空的 `agent.models.v2` 作为迁移标记。
 
@@ -221,9 +222,10 @@ Full URL 开启时直接 POST 用户填写的完整地址，路径必须由用�
 
 ## 八、已知限制
 
-1. Base URL 只允许 HTTPS，本地 Ollama / 局域网地址与 SSRF 约束冲突，暂不支持；相关信任档见 LIF-2026-DES-002 §7，计划在阶段 E 实现。
+1. Base URL 只允许 HTTPS；本地 llama.cpp 条目走独立的 `local-llama` 格式，不经过 URL 校验。局域网/本地 Ollama 地址与 SSRF 约束冲突，暂不支持；相关信任档见 LIF-2026-DES-002 §7，计划在阶段 E 实现。
 2. 未做 DNS 重绑定防护，保存时可将域名解析并固定 IP 以进一步收紧。
 3. Full URL 模式无法自动发现模型，必须手填 Model ID。
 4. Anthropic 未设置输出上限时使用协议兜底 `max_tokens=4096`。
 5. 厂商模型列表分页差异可能导致拉取不完整，失败时可用手填 Model ID 兜底。
 6. 数据分级默认拦截：`/life/contacts`、`/life/diary` 为 S0，`/life/notes`、`/life/todos`、`/life/schedule` 为 S1，未标记路径按 S1。阶段 A 尚未提供脱敏外发，因此这些路径的云端对话会被拒绝，需在设置页把已确认非敏感的路径改为 S2。
+7. 本地模型（阶段 B）：需要启用 `local-llm` feature 构建，模型通过设置页手动导入 GGUF；ModelScope 自动下载与哈希校验在阶段 D 提供。

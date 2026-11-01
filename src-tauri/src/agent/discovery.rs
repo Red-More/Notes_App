@@ -72,6 +72,9 @@ pub async fn fetch(
                 "可灵不支持自动发现模型，请手动填写 Model ID",
             ));
         }
+        ApiFormat::LocalLlama => {
+            return Err(ToolError::invalid("本地模型无需发现模型列表"));
+        }
     };
     let resp = request
         .send()
@@ -167,6 +170,10 @@ pub async fn test_connection(
         | ApiFormat::ElevenLabsTts => {
             return Err(ToolError::invalid("媒体模型暂不支持连接测试"));
         }
+        // Local entries never reach the network; the settings page handles loading.
+        ApiFormat::LocalLlama => {
+            return Err(ToolError::invalid("本地模型无需连接测试"));
+        }
     };
     let mut request = client.post(&url).timeout(FETCH_TIMEOUT).json(&body);
     request = match entry.format {
@@ -186,6 +193,9 @@ pub async fn test_connection(
         ApiFormat::ElevenLabsTts => request.header("xi-api-key", api_key),
         ApiFormat::KlingVideo => {
             return Err(ToolError::invalid("媒体模型暂不支持连接测试"));
+        }
+        ApiFormat::LocalLlama => {
+            return Err(ToolError::invalid("本地模型无需连接测试"));
         }
     };
     let started = Instant::now();

@@ -13,6 +13,9 @@ import type {
   Folder,
   FolderStats,
   LlmParams,
+  LocalModelConfig,
+  LocalModelFile,
+  LocalModelSnapshot,
   McpServerInfo,
   McpToolInfo,
   MediaAsset,
@@ -590,6 +593,24 @@ export const chatApi = {
   paramsSet: (modelEntryId: string, params: LlmParams) =>
     invoke<void>('agent_params_set', { modelEntryId, params }),
   cancel: (requestId: string) => invoke<void>('agent_cancel', { requestId }),
+}
+
+/**
+ * 本地模型 API（阶段 B）：只操作应用模型目录内的 GGUF 文件。
+ * 导入路径必须来自系统文件选择器；推理始终在 Rust 侧执行。
+ */
+export const localApi = {
+  status: () => invoke<LocalModelSnapshot>('local_model_status'),
+  configSet: (config: LocalModelConfig) =>
+    invoke<LocalModelConfig>('local_model_config_set', { config }),
+  load: (config?: LocalModelConfig) => invoke<void>('local_model_load', { config }),
+  unload: () => invoke<void>('local_model_unload'),
+  pause: () => invoke<void>('local_model_pause'),
+  resume: () => invoke<void>('local_model_resume'),
+  import: (path: string) => invoke<LocalModelFile>('local_model_import', { path }),
+  remove: (file: string) => invoke<void>('local_model_remove', { file }),
+  /** Create/update the stable local entry, activate it and load the model. */
+  activate: (file: string) => invoke<void>('local_model_activate', { file }),
 }
 
 /**

@@ -10,6 +10,7 @@ pub mod export;
 pub mod folder;
 pub mod fs;
 pub mod index;
+pub mod local;
 pub mod media;
 pub mod mcp;
 pub mod privacy;

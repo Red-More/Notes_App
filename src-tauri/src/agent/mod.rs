@@ -9,6 +9,7 @@
 pub mod conversations;
 pub mod discovery;
 pub mod llm;
+pub mod local;
 pub mod model_store;
 pub mod params;
 pub mod secrets;
@@ -29,17 +30,19 @@ pub const TOOL_ALLOWLIST: [&str; 6] = [
     "load_skill",
 ];
 
-/// Tauri 管理的 Agent 状态：HTTP 客户端、密钥文件、取消标记。
+/// Tauri 管理的 Agent 状态：HTTP 客户端、密钥文件、取消标记与本地运行时。
 pub struct AgentState {
     pub secrets: secrets::SecretStore,
     /// 每个流式请求一个取消标记；`agent_cancel` 置位。
     pub cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// 仅 HTTPS + 禁重定向 + 读超时的客户端；初始化失败时为 None，请求会报错而不是降级。
     pub client: Option<reqwest::Client>,
+    /// 内嵌 llama.cpp 运行时；未启用 feature 时状态为 `unsupported`。
+    pub local: local::runtime::Runtime,
 }
 
 impl AgentState {
-    pub fn new(secret_path: std::path::PathBuf) -> Self {
+    pub fn new(secret_path: std::path::PathBuf, models_dir: std::path::PathBuf) -> Self {
         let client = match reqwest::Client::builder()
             .https_only(true)
             .redirect(reqwest::redirect::Policy::none())
@@ -59,6 +62,7 @@ impl AgentState {
             secrets: secrets::SecretStore::new(secret_path),
             cancels: Mutex::new(HashMap::new()),
             client,
+            local: local::runtime::Runtime::new(models_dir),
         }
     }
 

@@ -93,7 +93,12 @@ fn key_status(
     Ok(model_store::configs(conn)?
         .into_iter()
         .map(|entry| {
-            let configured = secrets.has(&entry.id);
+            // Local entries have no API key; a stored file name counts as configured.
+            let configured = if entry.format.is_local() {
+                !entry.base_url.trim().is_empty()
+            } else {
+                secrets.has(&entry.id)
+            };
             (entry.id, configured)
         })
         .collect())
@@ -140,7 +145,9 @@ pub fn agent_model_save(
 ) -> Result<ModelView, ToolError> {
     let new_key = validate_key(input.api_key.as_deref())?;
     let creating = input.id.trim().is_empty();
-    if creating && new_key.is_none() {
+    // Local llama.cpp entries never carry an API key.
+    let is_local = input.format.is_local();
+    if creating && new_key.is_none() && !is_local {
         return Err(ToolError::invalid("API Key 必填"));
     }
     let vfs = vfs_state.0.lock().unwrap();
@@ -165,10 +172,14 @@ pub fn agent_model_save(
             }
             return Err(ToolError::Storage { message });
         }
-    } else if !agent_state.secrets.has(&saved.id) {
+    } else if !is_local && !agent_state.secrets.has(&saved.id) {
         return Err(ToolError::invalid("API Key 未保存，请重新填写"));
     }
-    let configured = agent_state.secrets.has(&saved.id);
+    let configured = if saved.format.is_local() {
+        !saved.base_url.trim().is_empty()
+    } else {
+        agent_state.secrets.has(&saved.id)
+    };
     Ok(model_store::view(vfs.conn(), saved, configured))
 }
 
@@ -217,19 +228,28 @@ pub async fn agent_stream(
             return Err(ToolError::invalid("该模型条目不是对话模型"));
         }
         let params = params::get(vfs.conn(), &entry.id);
-        // Labels + decrypted EDM values; loading here keeps the lock short.
-        let snapshot = privacy::policy::Snapshot::load(vfs.conn(), &state.secrets)?;
+        // Local entries never leave the device, so the gate snapshot is skipped.
+        let snapshot = if entry.format.is_local() {
+            None
+        } else {
+            // Labels + decrypted EDM values; loading here keeps the lock short.
+            Some(privacy::policy::Snapshot::load(vfs.conn(), &state.secrets)?)
+        };
         (entry, params, snapshot)
     };
 
     // The single egress gate: S0 and un-redacted S1 never reach the network.
-    let decision = privacy::egress::guard(&request.context.messages, &snapshot);
-    {
-        let vfs = vfs_state.0.lock().unwrap();
-        if let Err(e) = privacy::egress::record_audit(vfs.conn(), &entry.id, "chat", &decision) {
-            log::warn!("egress audit write failed: {e}");
+    let decision = match &snapshot {
+        Some(snapshot) => {
+            let decision = privacy::egress::guard(&request.context.messages, snapshot);
+            let vfs = vfs_state.0.lock().unwrap();
+            if let Err(e) = privacy::egress::record_audit(vfs.conn(), &entry.id, "chat", &decision) {
+                log::warn!("egress audit write failed: {e}");
+            }
+            Some(decision)
         }
-    }
+        None => None,
+    };
 
     let request_id = request.request_id.clone();
     let cancel = state.register_cancel(&request_id);
@@ -239,19 +259,21 @@ pub async fn agent_stream(
         }
     };
 
-    if decision.blocked() {
-        let message = decision
-            .message
-            .clone()
-            .unwrap_or_else(|| "隐私拦截：本次请求不允许发送到云端。".into());
-        emit(llm::StreamEvent::Start);
-        emit(llm::StreamEvent::Error {
-            reason: "error".into(),
-            error_message: message,
-            usage: llm::Usage::default(),
-        });
-        state.clear_cancel(&request_id);
-        return Ok(());
+    if let Some(decision) = &decision {
+        if decision.blocked() {
+            let message = decision
+                .message
+                .clone()
+                .unwrap_or_else(|| "隐私拦截：本次请求不允许发送到云端。".into());
+            emit(llm::StreamEvent::Start);
+            emit(llm::StreamEvent::Error {
+                reason: "error".into(),
+                error_message: message,
+                usage: llm::Usage::default(),
+            });
+            state.clear_cancel(&request_id);
+            return Ok(());
+        }
     }
 
     let result = llm::run(state.inner(), request, &entry, &params, cancel, &emit).await;
@@ -280,6 +302,9 @@ pub async fn agent_models_list(
     state: State<'_, AgentState>,
     input: ModelDiscoveryInput,
 ) -> Result<Vec<String>, ToolError> {
+    if input.format.is_local() {
+        return Err(ToolError::invalid("本地模型无需拉取模型列表"));
+    }
     let base_url = model_store::validate_base_url(&input.base_url)?;
     let key = match validate_key(input.api_key.as_deref())? {
         Some(key) => key.to_string(),
@@ -325,6 +350,9 @@ pub async fn agent_test_connection(
     state: State<'_, AgentState>,
     input: TestConnectionInput,
 ) -> Result<ConnectionTest, ToolError> {
+    if input.format.is_local() {
+        return Err(ToolError::invalid("本地模型在设置页加载后即可使用，无需连通性测试"));
+    }
     let entry = ModelEntry {
         id: if input.id.trim().is_empty() {
             "test".to_string()

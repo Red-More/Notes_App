@@ -57,9 +57,18 @@ pub fn run() {
                 eprintln!("life.db agent workspace failed: {e}");
             }
             app.manage(VfsState(Mutex::new(vault)));
-            // Agent 侧状态：HTTP 客户端、私有密钥文件、取消标记。
+            // Agent 侧状态：HTTP 客户端、私有密钥文件、取消标记与本地运行时。
             let secret_path = app.path().app_data_dir()?.join("agent-secrets.json");
-            app.manage(agent::AgentState::new(secret_path));
+            let models_dir = app.path().app_data_dir()?.join("models");
+            let agent_state = agent::AgentState::new(secret_path, models_dir);
+            // 本地模型偏好随应用启动恢复；仅在用户启用后才加载。
+            let local_config = {
+                let vfs = app.state::<VfsState>();
+                let vfs = vfs.0.lock().unwrap();
+                agent::local::runtime::load_config(vfs.conn())
+            };
+            agent_state.local.set_config(local_config);
+            app.manage(agent_state);
             // 媒体资产目录与作业取消标记；与 Agent run 生命周期解耦。
             let media_root = app.path().app_data_dir()?.join("media");
             std::fs::create_dir_all(&media_root)?;
@@ -143,6 +152,15 @@ pub fn run() {
             commands::agent::agent_params_set,
             commands::agent::agent_stream,
             commands::agent::agent_cancel,
+            commands::local::local_model_status,
+            commands::local::local_model_config_set,
+            commands::local::local_model_load,
+            commands::local::local_model_unload,
+            commands::local::local_model_pause,
+            commands::local::local_model_resume,
+            commands::local::local_model_import,
+            commands::local::local_model_remove,
+            commands::local::local_model_activate,
             commands::privacy::privacy_labels_list,
             commands::privacy::privacy_label_set,
             commands::privacy::privacy_label_delete,

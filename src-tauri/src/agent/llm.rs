@@ -23,6 +23,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
+use super::local::{LocalChunk, LocalParams, LocalState, LocalTurn};
 use super::model_store::{self, ApiFormat, ModelEntry};
 use super::params::{CacheRetention, LlmParams, ThinkingMode};
 use super::{AgentState, TOOL_ALLOWLIST};
@@ -649,6 +650,11 @@ pub async fn run(
     validate_request(&req, entry)?;
     emit(StreamEvent::Start);
 
+    // Local entries never reach the HTTP paths below; the runtime owns decoding.
+    if entry.format.is_local() {
+        return run_local(state, &req, entry, params, cancel, emit).await;
+    }
+
     let (system, tools) = replay_system(&req.context.messages);
     let turns = to_turns(&req.context.messages);
     let model = entry.model_id.clone();
@@ -710,6 +716,8 @@ pub async fn run(
             | ApiFormat::ElevenLabsTts,
             _,
         ) => Err("该模型条目不是对话协议".to_string()),
+        // The local branch returns before this match; keep exhaustiveness explicit.
+        (ApiFormat::LocalLlama, _) => Err("该模型条目不是对话协议".to_string()),
     };
 
     if let Err(message) = result {
@@ -724,6 +732,202 @@ pub async fn run(
         );
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 本地 llama.cpp 分支
+// ---------------------------------------------------------------------------
+
+/// 小模型上下文有限：system 提示先裁到固定长度，历史由引擎按 token 预算裁剪。
+const LOCAL_SYSTEM_CHARS: usize = 1200;
+
+/// 本地链路：按需加载模型，阻塞生成通过通道回传，事件契约与云端一致。
+async fn run_local(
+    state: &AgentState,
+    req: &ProxyRequest,
+    entry: &ModelEntry,
+    params: &LlmParams,
+    cancel: Arc<AtomicBool>,
+    emit: Emit<'_>,
+) -> Result<(), ToolError> {
+    let config = state.local.config();
+    if !config.enabled {
+        emit_error(emit, "本地模型已关闭；请到设置页启用并加载后再试", "error");
+        return Ok(());
+    }
+    let mut load_config = config.clone();
+    if load_config.file.trim().is_empty() {
+        load_config.file = entry.base_url.trim().to_string();
+    }
+
+    let status = state.local.status();
+    if !matches!(status.state, LocalState::Ready | LocalState::Generating) {
+        let runtime = state.local.clone();
+        let loaded =
+            tauri::async_runtime::spawn_blocking(move || runtime.load_blocking(load_config)).await;
+        match loaded {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                emit_error(emit, format!("本地模型加载失败：{error}"), "error");
+                return Ok(());
+            }
+            Err(error) => {
+                emit_error(emit, format!("本地模型线程异常：{error}"), "error");
+                return Ok(());
+            }
+        }
+    }
+
+    let (system, _) = replay_system(&req.context.messages);
+    let turns = to_turns(&req.context.messages);
+    let local_turns = build_local_turns(&system, &turns);
+    if !local_turns.iter().any(|turn| turn.role == "user") {
+        emit_error(emit, "本地模型没有收到可回答的问题", "error");
+        return Ok(());
+    }
+    let local_params = LocalParams {
+        max_tokens: params
+            .output_limit()
+            .unwrap_or(config.max_tokens)
+            .clamp(1, 4096),
+        temperature: params.temperature.map_or(0.7, |value| value as f32),
+        top_p: params.top_p.map_or(0.8, |value| value as f32),
+        top_k: params.top_k.unwrap_or(20),
+        seed: params.seed.unwrap_or(0) as u32,
+        stop: params.stop.clone().unwrap_or_default(),
+    };
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<LocalChunk>();
+    let runtime = state.local.clone();
+    let cancel_local = cancel.clone();
+    let handle = tauri::async_runtime::spawn_blocking(move || {
+        let mut sink = |chunk: LocalChunk| {
+            let _ = tx.send(chunk);
+        };
+        runtime.generate_blocking(&local_turns, &local_params, &cancel_local, &mut sink)
+    });
+
+    emit(StreamEvent::TextStart { content_index: 0 });
+    let mut prompt_tokens = 0u32;
+    let mut output_tokens = 0u32;
+    let mut reason = "stop";
+    while let Some(chunk) = rx.recv().await {
+        match chunk {
+            LocalChunk::Token(text) => emit(StreamEvent::TextDelta {
+                content_index: 0,
+                delta: text,
+            }),
+            LocalChunk::Done {
+                prompt_tokens: prompt,
+                output_tokens: output,
+                reason: stop_reason,
+            } => {
+                prompt_tokens = prompt;
+                output_tokens = output;
+                reason = stop_reason;
+            }
+        }
+    }
+    emit(StreamEvent::TextEnd { content_index: 0 });
+
+    match handle.await {
+        Ok(Ok(())) => {
+            emit(StreamEvent::Done {
+                reason: reason.to_string(),
+                usage: local_usage(prompt_tokens, output_tokens),
+            });
+        }
+        Ok(Err(error)) => {
+            let aborted = cancel.load(Ordering::SeqCst);
+            emit(StreamEvent::Error {
+                reason: if aborted { "aborted".into() } else { "error".into() },
+                error_message: error.to_string(),
+                usage: Usage::default(),
+            });
+        }
+        Err(error) => {
+            emit(StreamEvent::Error {
+                reason: "error".into(),
+                error_message: format!("本地模型线程异常：{error}"),
+                usage: Usage::default(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// 把 pi transcript 折叠成聊天模板可接受的角色；工具结果并入 user。
+fn build_local_turns(system: &str, turns: &[Turn]) -> Vec<LocalTurn> {
+    let mut out = Vec::new();
+    let system = clip_chars(system.trim(), LOCAL_SYSTEM_CHARS);
+    if !system.is_empty() {
+        out.push(LocalTurn {
+            role: "system",
+            content: system,
+        });
+    }
+    for turn in turns {
+        let content = match turn.role {
+            Role::User => {
+                let mut text = turn.text.trim().to_string();
+                if !turn.images.is_empty() {
+                    if text.is_empty() {
+                        text.push_str("[用户发送了图片，本地模型无法查看]");
+                    } else {
+                        text.push_str("\n[附图片，本地模型无法查看]");
+                    }
+                }
+                text
+            }
+            Role::Assistant => {
+                if turn.text.trim().is_empty() {
+                    turn.thinking.trim().to_string()
+                } else {
+                    turn.text.trim().to_string()
+                }
+            }
+            Role::Tool => format!("[工具结果]\n{}", turn.text.trim()),
+        };
+        if content.is_empty() {
+            continue;
+        }
+        let role = if matches!(turn.role, Role::Assistant) {
+            "assistant"
+        } else {
+            "user"
+        };
+        out.push(LocalTurn { role, content });
+    }
+    out
+}
+
+fn clip_chars(text: &str, limit: usize) -> String {
+    let mut out = String::new();
+    for (index, ch) in text.chars().enumerate() {
+        if index >= limit {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn local_usage(input: u32, output: u32) -> Usage {
+    Usage {
+        input: input as i64,
+        output: output as i64,
+        cache_read: 0,
+        cache_write: 0,
+        total_tokens: input as i64 + output as i64,
+        cost: Cost {
+            input: 0.0,
+            output: 0.0,
+            cache_read: 0.0,
+            cache_write: 0.0,
+            total: 0.0,
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------

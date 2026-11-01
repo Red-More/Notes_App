@@ -26,6 +26,8 @@ const FORMAT_OPTIONS: Array<{ key: ModelApiFormat; label: string }> = [
   { key: 'volc-video', label: '火山方舟 Seedance 视频' },
   { key: 'kling-video', label: '可灵 Kling 视频' },
   { key: 'elevenlabs-tts', label: 'ElevenLabs 语音合成' },
+  // Created by the local model section; never offered in the add-model form.
+  { key: 'local-llama', label: '本地 llama.cpp（内嵌）' },
 ]
 
 const CHAT_FORMATS: ModelApiFormat[] = ['openai-chat', 'openai-responses', 'anthropic-messages']
@@ -812,6 +814,10 @@ export default function AgentSettingsSection() {
   }
 
   const testSaved = async (entry: AgentModelInfo) => {
+    if (entry.format === 'local-llama') {
+      toast('本地模型请在「本地模型」中加载，无需连通性测试')
+      return
+    }
     if (entry.kind !== 'chat') {
       toast('媒体与分类模型暂不支持连接测试')
       return
@@ -894,10 +900,19 @@ export default function AgentSettingsSection() {
                     </div>
                     <div className="model-meta">{capabilityLabel(entry)}</div>
                     <div className="model-meta">
-                      {entry.fullUrl ? '完整地址' : 'Base URL'} · {entry.baseUrl}
+                      {entry.format === 'local-llama'
+                        ? '模型文件'
+                        : entry.fullUrl
+                          ? '完整地址'
+                          : 'Base URL'}{' '}
+                      · {entry.baseUrl}
                     </div>
                     <div className="model-meta">
-                      {entry.configured ? '已配置 API Key' : '未配置 API Key'}
+                      {entry.format === 'local-llama'
+                        ? '本地推理 · 无网络请求'
+                        : entry.configured
+                          ? '已配置 API Key'
+                          : '未配置 API Key'}
                     </div>
                   </div>
                   <div className="model-actions">
@@ -912,7 +927,7 @@ export default function AgentSettingsSection() {
                     <button
                       type="button"
                       className="restore-default"
-                      disabled={busy || kind !== 'chat'}
+                      disabled={busy || kind !== 'chat' || entry.format === 'local-llama'}
                       onClick={() => void testSaved(entry)}
                     >
                       测试
@@ -920,7 +935,7 @@ export default function AgentSettingsSection() {
                     <button
                       type="button"
                       className="restore-default"
-                      disabled={busy}
+                      disabled={busy || entry.format === 'local-llama'}
                       onClick={() => void openEdit(entry)}
                     >
                       编辑

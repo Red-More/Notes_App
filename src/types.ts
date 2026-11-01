@@ -314,6 +314,8 @@ export type ModelApiFormat =
   | 'volc-video'
   | 'kling-video'
   | 'elevenlabs-tts'
+  // Embedded llama.cpp runtime (phase B); no network request is made.
+  | 'local-llama'
 
 /** Capability a model entry is configured for; only `chat` runs today. */
 export type ModelKind = 'chat' | 'image' | 'video' | 'tts' | 'classify' | 'asr'
@@ -346,6 +348,71 @@ export interface AgentModelInfo {
 export interface AgentSettings {
   activeId: string | null
   models: AgentModelInfo[]
+}
+
+/** Local llama.cpp lifecycle state; `unsupported` means the build lacks the engine. */
+export type LocalModelState =
+  | 'unsupported'
+  | 'unloaded'
+  | 'loading'
+  | 'ready'
+  | 'generating'
+  | 'suspended'
+  | 'failed'
+
+/** Runtime snapshot; never contains prompt text or model bytes. */
+export interface LocalModelStatus {
+  state: LocalModelState
+  model: string | null
+  modelBytes: number | null
+  threads: number
+  contextSize: number
+  error: string | null
+}
+
+/** Persisted local preferences; zeros fall back to the device recommendation. */
+export interface LocalModelConfig {
+  file: string
+  threads: number
+  contextSize: number
+  keepAlive: boolean
+  enabled: boolean
+  maxTokens: number
+}
+
+/** One GGUF file in the app models directory. */
+export interface LocalModelFile {
+  name: string
+  bytes: number
+  recommended: boolean
+}
+
+/** Device tiers come from `/proc/meminfo` (Android/Linux) or a conservative default. */
+export interface LocalDeviceProfile {
+  totalMemoryMb: number | null
+  cores: number
+  tier: 'none' | 'low' | 'medium' | 'high' | 'unknown'
+  recommendedThreads: number
+  recommendedContext: number
+  maxModelMb: number
+  note: string
+}
+
+export interface LocalPowerSnapshot {
+  thermalCelsius: number | null
+  batteryPercent: number | null
+  charging: boolean | null
+}
+
+export interface LocalModelSnapshot {
+  supported: boolean
+  status: LocalModelStatus
+  config: LocalModelConfig
+  files: LocalModelFile[]
+  device: LocalDeviceProfile
+  power: LocalPowerSnapshot
+  /** `allow` or the suspension reason. */
+  gate: string
 }
 
 /** Data tier: 0 = S0, 1 = S1, 2 = S2. */

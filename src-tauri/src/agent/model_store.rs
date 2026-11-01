@@ -70,6 +70,10 @@ pub enum ApiFormat {
     /// ElevenLabs text-to-speech (`xi-api-key`).
     #[serde(rename = "elevenlabs-tts")]
     ElevenLabsTts,
+    /// Embedded llama.cpp runtime; `base_url` holds a `.gguf` file name inside
+    /// the app models directory and never leaves the device.
+    #[serde(rename = "local-llama")]
+    LocalLlama,
 }
 
 impl ApiFormat {
@@ -79,6 +83,9 @@ impl ApiFormat {
             Self::OpenAiChat => "openai-completions",
             Self::OpenAiResponses => "openai-responses",
             Self::AnthropicMessages => "anthropic-messages",
+            // Local requests reuse the OpenAI-compatible descriptor so pi-agent's
+            // stream loop is unchanged; Rust dispatches them before any HTTP call.
+            Self::LocalLlama => "openai-completions",
             // Media entries never flow through pi-agent; these values are unused.
             Self::OpenAiImages
             | Self::OpenAiAudio
@@ -97,8 +104,13 @@ impl ApiFormat {
     pub fn is_chat(self) -> bool {
         matches!(
             self,
-            Self::OpenAiChat | Self::OpenAiResponses | Self::AnthropicMessages
+            Self::OpenAiChat | Self::OpenAiResponses | Self::AnthropicMessages | Self::LocalLlama
         )
+    }
+
+    /// Local entries never touch the network; the egress gate is skipped.
+    pub fn is_local(self) -> bool {
+        matches!(self, Self::LocalLlama)
     }
 
     /// Path appended to a Base URL when Full URL mode is off.
@@ -119,6 +131,7 @@ impl ApiFormat {
             Self::VolcVideo => "/api/v3/contents/generations/tasks",
             Self::KlingVideo => "/v1/videos/text2video",
             Self::ElevenLabsTts => "/v1/text-to-speech",
+            Self::LocalLlama => "",
         }
     }
 
@@ -314,23 +327,26 @@ pub fn set_active(conn: &Connection, id: &str) -> Result<(), ToolError> {
 /// Create or edit a model entry. Editing keeps the existing id.
 pub fn save(conn: &Connection, input: ModelInput) -> Result<ModelEntry, ToolError> {
     let all = configs(conn)?;
+    // An existing id edits in place; an unknown explicit id is accepted for
+    // system-managed entries such as the stable local runtime slot.
     let existing = if input.id.trim().is_empty() {
         None
     } else {
         let id = validate_id(&input.id)?;
-        Some(
-            all.iter()
-                .find(|item| item.id == id)
-                .ok_or_else(|| ToolError::invalid("未找到要编辑的模型"))?,
-        )
+        all.iter().find(|item| item.id == id)
     };
     let model_id = validate_model_id(&input.model_id)?;
     validate_format_for_kind(input.kind, input.format)?;
-    let base_url = normalize_anthropic_base(
-        validate_base_url(&input.base_url)?,
-        input.format,
-        input.full_url,
-    );
+    let base_url = if input.format.is_local() {
+        // Local entries store a model file name, not a URL.
+        validate_local_file(&input.base_url)?
+    } else {
+        normalize_anthropic_base(
+            validate_base_url(&input.base_url)?,
+            input.format,
+            input.full_url,
+        )
+    };
     // Display name is optional: fall back to the model id.
     let label = if input.label.trim().is_empty() {
         model_id.clone()
@@ -339,7 +355,8 @@ pub fn save(conn: &Connection, input: ModelInput) -> Result<ModelEntry, ToolErro
     };
     let id = match existing {
         Some(item) => item.id.clone(),
-        None => next_custom_id(&all),
+        None if input.id.trim().is_empty() => next_custom_id(&all),
+        None => validate_id(&input.id)?,
     };
     let entry = ModelEntry {
         id: id.clone(),
@@ -471,9 +488,12 @@ fn validate_label(raw: &str) -> Result<String, ToolError> {
 
 fn validate_format_for_kind(kind: ModelKind, format: ApiFormat) -> Result<(), ToolError> {
     match kind {
+        // A local chat entry never leaves the device; other kinds stay network-only.
+        ModelKind::Chat if format.is_local() => Ok(()),
         ModelKind::Chat | ModelKind::Classify if !format.is_chat() => {
             Err(ToolError::invalid("对话与分类模型必须使用对话协议"))
         }
+        _ if format.is_local() => Err(ToolError::invalid("本地模型只能作为对话模型使用")),
         ModelKind::Image
             if !matches!(format, ApiFormat::OpenAiImages | ApiFormat::DashScopeImage) =>
         {
@@ -591,6 +611,17 @@ pub(crate) fn validate_base_url(raw: &str) -> Result<String, ToolError> {
     Ok(trimmed.trim_end_matches('/').to_string())
 }
 
+/// Local entries store a `.gguf` file name inside the app models directory.
+fn validate_local_file(raw: &str) -> Result<String, ToolError> {
+    let name = raw.trim();
+    if !super::local::runtime::is_valid_file_name(name) {
+        return Err(ToolError::invalid(
+            "本地模型必须是模型目录内的 .gguf 文件名",
+        ));
+    }
+    Ok(name.to_string())
+}
+
 fn next_custom_id(all: &[ModelEntry]) -> String {
     for n in 1..=u32::MAX {
         let candidate = format!("custom_{n}");
@@ -619,11 +650,18 @@ fn read_models(conn: &Connection) -> Vec<ModelEntry> {
             item.base_url = normalize_anthropic_base(item.base_url, item.format, item.full_url);
             item
         })
-        .filter(|item| match validate_base_url(&item.base_url) {
-            Ok(_) => true,
-            Err(e) => {
-                log::warn!("skip invalid stored model {}: {e}", item.id);
-                false
+        .filter(|item| {
+            let result = if item.format.is_local() {
+                validate_local_file(&item.base_url).map(|_| ())
+            } else {
+                validate_base_url(&item.base_url).map(|_| ())
+            };
+            match result {
+                Ok(()) => true,
+                Err(e) => {
+                    log::warn!("skip invalid stored model {}: {e}", item.id);
+                    false
+                }
             }
         })
         .collect()

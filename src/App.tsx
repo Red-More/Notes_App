@@ -3,6 +3,7 @@ import { ToastHost } from './components/ui'
 import ReminderScheduler from './components/ReminderScheduler'
 import { IconCalendar, IconChat, IconNote, IconTodo, IconUsers } from './components/Icons'
 import { applyTheme, getStoredTheme } from './theme'
+import { useLocalModelLifecycle } from './agent/localLifecycle'
 import NoteListPage from './pages/notes/NoteListPage'
 import FolderManagePage from './pages/notes/FolderManagePage'
 import TodoPage from './pages/todos/TodoPage'
@@ -69,6 +70,9 @@ function App() {
   useEffect(() => {
     applyTheme(getStoredTheme())
   }, [])
+
+  // Keep the optional local llama.cpp model in step with app visibility.
+  useLocalModelLifecycle()
 
   const closeOverlay = () => {
     setOverlay(null)
