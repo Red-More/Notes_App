@@ -12,5 +12,6 @@ pub mod fs;
 pub mod index;
 pub mod media;
 pub mod mcp;
+pub mod privacy;
 pub mod skill;
 pub mod version;

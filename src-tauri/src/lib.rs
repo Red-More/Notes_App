@@ -4,6 +4,7 @@ mod mcp;
 mod db;
 mod docs;
 mod media;
+mod privacy;
 mod skills;
 #[cfg(test)]
 mod tests;
@@ -142,6 +143,13 @@ pub fn run() {
             commands::agent::agent_params_set,
             commands::agent::agent_stream,
             commands::agent::agent_cancel,
+            commands::privacy::privacy_labels_list,
+            commands::privacy::privacy_label_set,
+            commands::privacy::privacy_label_delete,
+            commands::privacy::privacy_entities_list,
+            commands::privacy::privacy_entity_add,
+            commands::privacy::privacy_entity_delete,
+            commands::privacy::privacy_audit_list,
             commands::media::media_job_submit,
             commands::media::media_job_list,
             commands::media::media_job_get,

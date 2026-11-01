@@ -17,6 +17,7 @@ use crate::agent::model_store::{
 };
 use crate::agent::params::{self, LlmParams};
 use crate::agent::{conversations, discovery, llm, AgentState};
+use crate::privacy;
 use crate::vfs::error::ToolError;
 use crate::vfs::VfsState;
 
@@ -201,11 +202,13 @@ pub fn agent_model_activate(state: State<'_, VfsState>, id: String) -> Result<()
 pub async fn agent_stream(
     vfs_state: State<'_, VfsState>,
     state: State<'_, AgentState>,
-    request: llm::ProxyRequest,
+    mut request: llm::ProxyRequest,
     on_event: Channel<llm::StreamEvent>,
 ) -> Result<(), ToolError> {
-    // 只在查找配置时持锁，随后立刻释放，避免流式期间阻塞其它命令。
-    let (entry, params) = {
+    // Trim first: the egress gate must judge exactly what would be sent.
+    request.context.messages = llm::trim_messages(&request.context.messages);
+
+    let (entry, params, snapshot) = {
         let vfs = vfs_state.0.lock().unwrap();
         model_store::cleanup_legacy(vfs.conn(), &state.secrets);
         let entry = model_store::resolve(vfs.conn(), &request.model.provider)?;
@@ -214,8 +217,20 @@ pub async fn agent_stream(
             return Err(ToolError::invalid("该模型条目不是对话模型"));
         }
         let params = params::get(vfs.conn(), &entry.id);
-        (entry, params)
+        // Labels + decrypted EDM values; loading here keeps the lock short.
+        let snapshot = privacy::policy::Snapshot::load(vfs.conn(), &state.secrets)?;
+        (entry, params, snapshot)
     };
+
+    // The single egress gate: S0 and un-redacted S1 never reach the network.
+    let decision = privacy::egress::guard(&request.context.messages, &snapshot);
+    {
+        let vfs = vfs_state.0.lock().unwrap();
+        if let Err(e) = privacy::egress::record_audit(vfs.conn(), &entry.id, "chat", &decision) {
+            log::warn!("egress audit write failed: {e}");
+        }
+    }
+
     let request_id = request.request_id.clone();
     let cancel = state.register_cancel(&request_id);
     let emit = |event: llm::StreamEvent| {
@@ -223,6 +238,22 @@ pub async fn agent_stream(
             log::warn!("agent stream channel closed: {e}");
         }
     };
+
+    if decision.blocked() {
+        let message = decision
+            .message
+            .clone()
+            .unwrap_or_else(|| "隐私拦截：本次请求不允许发送到云端。".into());
+        emit(llm::StreamEvent::Start);
+        emit(llm::StreamEvent::Error {
+            reason: "error".into(),
+            error_message: message,
+            usage: llm::Usage::default(),
+        });
+        state.clear_cancel(&request_id);
+        return Ok(());
+    }
+
     let result = llm::run(state.inner(), request, &entry, &params, cancel, &emit).await;
     state.clear_cancel(&request_id);
     result

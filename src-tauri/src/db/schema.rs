@@ -14,12 +14,13 @@
 //! v8：消息表保存思考内容与签名（thinking / thinking_signature）。
 //! v9：用户消息记录附图资产 id（image_asset_ids）。
 //! v10：媒体作业记录用量与成本（units / cost_usd）。
+//! v11：隐私分级（sensitivity_labels / doc_classification / entity_vault / egress_audit）。
 //! FTS5 索引在应用层与 blobs 同事务维护（无触发器），schema 版本保持不变。
 
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// 当前 life.db schema 版本。
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 
 /// 虚拟文件系统的根路径，与 `vfs::cap_gate::ROOT` 保持一致。
 const ROOT: &str = "/life";
@@ -189,6 +190,47 @@ CREATE TABLE IF NOT EXISTS media_assets (
     created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_media_assets_created ON media_assets(created_at DESC);
+";
+
+const V11_TABLES: &str = "
+-- Declared sensitivity: longest path-prefix wins; a file entry overrides its folder.
+CREATE TABLE IF NOT EXISTS sensitivity_labels (
+    path_prefix TEXT PRIMARY KEY,
+    level       INTEGER NOT NULL CHECK (level IN (0, 1, 2)),  -- 0=S0 1=S1 2=S2
+    source      TEXT NOT NULL DEFAULT 'user',                  -- user | default | rule
+    updated_at  TEXT NOT NULL
+);
+
+-- Classification cache: any new rev or content hash invalidates the row.
+CREATE TABLE IF NOT EXISTS doc_classification (
+    inode         INTEGER PRIMARY KEY,
+    rev           INTEGER NOT NULL,
+    content_hash  TEXT NOT NULL,
+    level         INTEGER NOT NULL,
+    spans         TEXT NOT NULL,        -- JSON: type/start/end/score/source
+    engine_version TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+
+-- EDM entity vault: hashes and aliases only; plaintext stays in the secret store.
+CREATE TABLE IF NOT EXISTS entity_vault (
+    alias      TEXT PRIMARY KEY,
+    kind       TEXT NOT NULL,
+    norm_hash  TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL
+);
+
+-- Egress audit: decisions and counts only, never document text.
+CREATE TABLE IF NOT EXISTS egress_audit (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at   TEXT NOT NULL,
+    target       TEXT NOT NULL,
+    purpose      TEXT NOT NULL,
+    entity_kinds TEXT NOT NULL,        -- JSON: kind -> count
+    bytes        INTEGER NOT NULL,
+    decision     TEXT NOT NULL         -- allow | block
+);
+CREATE INDEX IF NOT EXISTS idx_egress_created ON egress_audit(created_at DESC);
 ";
 
 /// 迁移用的列探测：表/列名均为本模块常量，格式化进 SQL 安全。
@@ -369,6 +411,16 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
         if !table_has_column(&tx, "media_jobs", "cost_usd")? {
             tx.execute_batch("ALTER TABLE media_jobs ADD COLUMN cost_usd REAL;")?;
         }
+        tx.pragma_update(None, "user_version", 10)?;
+        tx.commit()?;
+        version = 10;
+    }
+
+    if version < 11 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V11_TABLES)?;
+        // Seed conservative defaults on first upgrade; user labels can override later.
+        crate::privacy::policy::seed_defaults(&tx)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         version = SCHEMA_VERSION;

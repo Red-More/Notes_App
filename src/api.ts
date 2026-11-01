@@ -25,7 +25,12 @@ import type {
   NewChatMessage,
   Note,
   NoteVersion,
+  PrivacyAuditEntry,
+  PrivacyEntity,
+  PrivacyEntityKind,
+  PrivacyLabel,
   Schedule,
+  SensitivityLevel,
   SkillDetail,
   SkillInput,
   SkillSummary,
@@ -585,6 +590,22 @@ export const chatApi = {
   paramsSet: (modelEntryId: string, params: LlmParams) =>
     invoke<void>('agent_params_set', { modelEntryId, params }),
   cancel: (requestId: string) => invoke<void>('agent_cancel', { requestId }),
+}
+
+/**
+ * Privacy API (phase A): declared tiers, EDM entity vault, egress audit.
+ * Entity plaintext never crosses this boundary; only aliases come back.
+ */
+export const privacyApi = {
+  labels: () => invoke<PrivacyLabel[]>('privacy_labels_list'),
+  setLabel: (path: string, level: SensitivityLevel) =>
+    invoke<PrivacyLabel>('privacy_label_set', { path, level }),
+  deleteLabel: (path: string) => invoke<void>('privacy_label_delete', { path }),
+  entities: () => invoke<PrivacyEntity[]>('privacy_entities_list'),
+  addEntity: (kind: PrivacyEntityKind, value: string) =>
+    invoke<PrivacyEntity>('privacy_entity_add', { kind, value }),
+  deleteEntity: (alias: string) => invoke<void>('privacy_entity_delete', { alias }),
+  audit: (limit?: number) => invoke<PrivacyAuditEntry[]>('privacy_audit_list', { limit }),
 }
 
 /**

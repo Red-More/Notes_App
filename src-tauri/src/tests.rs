@@ -11,6 +11,10 @@ use crate::agent::{conversations, discovery, llm, secrets};
 use crate::db;
 use crate::docs::{self, types::DocFields, versions};
 use crate::media::{assets, jobs};
+use crate::privacy::entity::EntityKind;
+use crate::privacy::policy::Level;
+use crate::privacy::recognizers::DetectedKind;
+use crate::privacy::{egress, entity, policy, recognizers};
 use crate::skills::{self, SkillInput};
 use crate::vfs::cap_gate;
 use crate::vfs::error::ToolError;
@@ -516,13 +520,21 @@ fn schema_creates_agent_and_media_tables() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 10, "media job cost columns require schema v10");
+    assert_eq!(
+        version,
+        db::schema::SCHEMA_VERSION,
+        "schema migrations must reach the latest version"
+    );
     for table in [
         "conversations",
         "messages",
         "settings",
         "media_jobs",
         "media_assets",
+        "sensitivity_labels",
+        "doc_classification",
+        "entity_vault",
+        "egress_audit",
     ] {
         let count: i64 = conn
             .query_row(
@@ -2368,4 +2380,204 @@ fn thousand_document_search_performance() {
         percentile(&index_samples, 0.95) < 100.0,
         "index_query must stay under 100ms at 1000 documents"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Phase A: privacy core (labels, recognizers, EDM vault, egress gate)
+// ---------------------------------------------------------------------------
+
+fn privacy_store(tag: &str) -> (std::path::PathBuf, secrets::SecretStore) {
+    let dir = std::env::temp_dir().join(format!("lifeos-privacy-{}-{}", std::process::id(), tag));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = secrets::SecretStore::new(dir.join("agent-secrets.json"));
+    (dir, store)
+}
+
+fn privacy_messages(tool_path: Option<&str>, text: &str) -> Vec<Value> {
+    let mut messages = vec![serde_json::json!({ "role": "user", "content": text })];
+    if let Some(path) = tool_path {
+        messages.push(serde_json::json!({
+            "role": "assistant",
+            "content": [{
+                "type": "toolCall",
+                "id": "call-1",
+                "name": "fs_read",
+                "arguments": { "path": path }
+            }]
+        }));
+        messages.push(serde_json::json!({
+            "role": "toolResult",
+            "toolCallId": "call-1",
+            "content": [{ "type": "text", "text": "doc body" }]
+        }));
+    }
+    messages
+}
+
+#[test]
+fn privacy_recognizers_validate_checksums_and_normalize_variants() {
+    let text = "身份证11010519491231002X，手机１３８００１３８０００，邮箱 a.b@example.com，卡号 4111 1111 1111 1111";
+    let spans = recognizers::scan(text);
+    assert!(spans.iter().any(|s| s.kind == DetectedKind::GovtId));
+    assert!(spans.iter().any(|s| s.kind == DetectedKind::Phone));
+    assert!(spans.iter().any(|s| s.kind == DetectedKind::Email));
+    assert!(spans.iter().any(|s| s.kind == DetectedKind::BankCard));
+
+    // A single wrong check digit must not be treated as a government ID.
+    let bad = recognizers::scan("110105194912310021");
+    assert!(!bad.iter().any(|s| s.kind == DetectedKind::GovtId));
+
+    assert_eq!(
+        recognizers::normalize_value(DetectedKind::Phone, "138-0013-8000"),
+        "13800138000"
+    );
+    assert_eq!(
+        recognizers::normalize_value(DetectedKind::Phone, "+86 138 0013 8000"),
+        "13800138000"
+    );
+    assert_eq!(recognizers::normalize_generic("张 三"), "张三");
+}
+
+#[test]
+fn privacy_labels_apply_longest_prefix_and_keep_defaults() {
+    let (dir, store) = privacy_store("labels");
+    let vfs = test_vfs();
+    let snapshot = policy::Snapshot::load(vfs.conn(), &store).unwrap();
+    assert_eq!(
+        snapshot.declared_level("/life/diary/2026-11-01.md"),
+        Level::S0
+    );
+    assert_eq!(snapshot.declared_level("/life/notes/a/b.md"), Level::S1);
+    assert_eq!(snapshot.declared_level("/life/random.md"), Level::S1);
+
+    policy::set_label(vfs.conn(), "/life/notes", 2).unwrap();
+    policy::set_label(vfs.conn(), "/life/notes/secret.md", 0).unwrap();
+    let snapshot = policy::Snapshot::load(vfs.conn(), &store).unwrap();
+    assert_eq!(snapshot.declared_level("/life/notes/a.md"), Level::S2);
+    assert_eq!(snapshot.declared_level("/life/notes/secret.md"), Level::S0);
+
+    assert!(
+        policy::delete_label(vfs.conn(), "/life/diary").is_err(),
+        "built-in S0 labels must not be deletable"
+    );
+    policy::delete_label(vfs.conn(), "/life/notes/secret.md").unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn privacy_egress_blocks_s0_paths_and_s1_text() {
+    let (dir, store) = privacy_store("egress-block");
+    let vfs = test_vfs();
+    let snapshot = policy::Snapshot::load(vfs.conn(), &store).unwrap();
+
+    let s0 = egress::guard(
+        &privacy_messages(Some("/life/diary/2026-11-01.md"), "帮我总结这篇日记"),
+        &snapshot,
+    );
+    assert!(s0.blocked(), "S0 document must never reach the cloud");
+    assert_eq!(s0.code.as_deref(), Some("s0"));
+    assert!(s0.paths.iter().any(|p| p == "/life/diary/2026-11-01.md"));
+
+    let s1 = egress::guard(
+        &privacy_messages(None, "我的手机号是 138 0013 8000"),
+        &snapshot,
+    );
+    assert!(s1.blocked(), "un-redacted S1 must be blocked in phase A");
+    assert_eq!(s1.code.as_deref(), Some("s1_unredacted"));
+    assert_eq!(s1.entity_kinds.get("phone"), Some(&1));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn privacy_egress_allows_s2_and_records_audit() {
+    let (dir, store) = privacy_store("egress-allow");
+    let vfs = test_vfs();
+    policy::set_label(vfs.conn(), "/life/notes", 2).unwrap();
+    let snapshot = policy::Snapshot::load(vfs.conn(), &store).unwrap();
+
+    let ok = egress::guard(
+        &privacy_messages(Some("/life/notes/a.md"), "请润色这段话"),
+        &snapshot,
+    );
+    assert!(!ok.blocked());
+    assert_eq!(ok.decision, "allow");
+    egress::record_audit(vfs.conn(), "entry-1", "chat", &ok).unwrap();
+    let rows = egress::list_audit(vfs.conn(), 5).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].decision, "allow");
+    assert_eq!(rows[0].target, "entry-1");
+
+    // A plain question with no document path and no entities stays S2.
+    let plain = egress::guard(&privacy_messages(None, "今天天气怎么样"), &snapshot);
+    assert!(!plain.blocked());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn privacy_entity_vault_matches_normalized_values() {
+    let (dir, store) = privacy_store("entity");
+    let vfs = test_vfs();
+    let record = entity::add(vfs.conn(), &store, EntityKind::Person, "张 三").unwrap();
+    assert_eq!(record.alias, "PERSON_01");
+
+    // The database only stores a salted hash, never the plaintext.
+    let hash: String = vfs
+        .conn()
+        .query_row(
+            "SELECT norm_hash FROM entity_vault WHERE alias = 'PERSON_01'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!hash.contains('张'));
+
+    let snapshot = policy::Snapshot::load(vfs.conn(), &store).unwrap();
+    let hit = egress::guard(&privacy_messages(None, "今天和张三一起吃饭"), &snapshot);
+    assert!(hit.blocked());
+    assert_eq!(hit.entity_kinds.get("person"), Some(&1));
+
+    entity::remove(vfs.conn(), &store, "PERSON_01").unwrap();
+    let snapshot = policy::Snapshot::load(vfs.conn(), &store).unwrap();
+    let miss = egress::guard(&privacy_messages(None, "今天和张三一起吃饭"), &snapshot);
+    assert!(!miss.blocked());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn privacy_egress_scopes_glob_and_grep_arguments() {
+    let (dir, store) = privacy_store("scope");
+    let vfs = test_vfs();
+    policy::set_label(vfs.conn(), "/life/notes", 2).unwrap();
+    let snapshot = policy::Snapshot::load(vfs.conn(), &store).unwrap();
+
+    let tool_call = |name: &str, arguments: Value| {
+        vec![
+            serde_json::json!({ "role": "user", "content": "帮我找一下" }),
+            serde_json::json!({
+                "role": "assistant",
+                "content": [{ "type": "toolCall", "id": "call-1", "name": name, "arguments": arguments }]
+            }),
+        ]
+    };
+
+    // A relative glob is anchored at `root`; it must not fall back to /life.
+    let glob = egress::guard(
+        &tool_call("fs_glob", serde_json::json!({ "pattern": "*.md", "root": "/life/notes" })),
+        &snapshot,
+    );
+    assert!(!glob.blocked());
+
+    // `fs_grep.pattern` is search text, not a path.
+    let grep = egress::guard(
+        &tool_call("fs_grep", serde_json::json!({ "pattern": "会议", "path": "/life/notes" })),
+        &snapshot,
+    );
+    assert!(!grep.blocked());
+
+    // Grep without a path can reach every S0 document, so it stays blocked.
+    let broad = egress::guard(&tool_call("fs_grep", serde_json::json!({ "pattern": "会议" })), &snapshot);
+    assert!(broad.blocked());
+    assert!(broad.paths.iter().any(|p| p == "/life"));
+    let _ = std::fs::remove_dir_all(&dir);
 }

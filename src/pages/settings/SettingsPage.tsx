@@ -33,6 +33,7 @@ import { api } from '../../api'
 import AgentSettingsSection from './AgentSettingsSection'
 import McpSection from './McpSection'
 import MediaUsageSection from './MediaUsageSection'
+import PrivacySection from './PrivacySection'
 import SkillsSection from './SkillsSection'
 import {
   getMermaidEnhance,
@@ -246,6 +247,8 @@ export default function SettingsPage({ onBack }: Props) {
         </div>
 
         <AgentSettingsSection />
+
+        <PrivacySection />
 
         <SkillsSection />
 

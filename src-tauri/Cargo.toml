@@ -37,6 +37,8 @@ futures-util = "0.3"
 url = "2"
 # 媒体资产：内容哈希去重与十六进制文件名。
 sha2 = "0.10"
+# 实体库加盐哈希需要每次安装唯一的随机盐。
+getrandom = "0.3"
 # 可灵 API 使用 AccessKey/SecretKey 签发 HS256 JWT。
 hmac = "0.12"
 hex = "0.4"

@@ -348,6 +348,44 @@ export interface AgentSettings {
   models: AgentModelInfo[]
 }
 
+/** Data tier: 0 = S0, 1 = S1, 2 = S2. */
+export type SensitivityLevel = 0 | 1 | 2
+
+/** One declared path-prefix rule; longest prefix wins. */
+export interface PrivacyLabel {
+  pathPrefix: string
+  level: SensitivityLevel
+  source: string
+  updatedAt: string
+}
+
+/** Entity kinds supported by the EDM vault. */
+export type PrivacyEntityKind =
+  | 'person'
+  | 'organization'
+  | 'address'
+  | 'phone'
+  | 'email'
+  | 'account'
+
+/** Vault row: the plaintext value is never returned to the WebView. */
+export interface PrivacyEntity {
+  alias: string
+  kind: PrivacyEntityKind
+  createdAt: string
+}
+
+/** One egress decision; counts only, never document text. */
+export interface PrivacyAuditEntry {
+  id: number
+  createdAt: string
+  target: string
+  purpose: string
+  entityKinds: string
+  bytes: number
+  decision: 'allow' | 'block'
+}
+
 /** Layered per-model generation parameters persisted by Rust. */
 export interface LlmParams {
   temperature?: number
