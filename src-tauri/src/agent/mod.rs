@@ -9,6 +9,7 @@
 pub mod conversations;
 pub mod discovery;
 pub mod llm;
+pub mod local_mnn;
 pub mod model_store;
 pub mod params;
 pub mod secrets;

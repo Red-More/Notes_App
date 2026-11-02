@@ -94,6 +94,8 @@ dependencies = [
  "hmac",
  "keyring-core",
  "log",
+ "mnn-rs",
+ "mnn-rs-sys",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",
@@ -2303,6 +2305,26 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mnn-rs"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93b2fbaec153bcaa97ea963273fa8a1b25c733b9fdd492b67e6f055d807fc156"
+dependencies = [
+ "mnn-rs-sys",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "mnn-rs-sys"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b315ac53ccb2f12d84ec40e95c626549036e78356d2fdd8aef974b09a736a87"
+dependencies = [
+ "cc",
+ "pkg-config",
 ]
 
 [[package]]
