@@ -119,15 +119,15 @@ impl Engine {
         let ctx_window = session.ctx.n_ctx() as usize;
         // The output limit is carved out of the same window, so cap it at half
         // the window; otherwise a large `max_tokens` leaves no room for the prompt.
-        let output_budget = (params.max_tokens as usize).min(ctx_window / 2).max(1);
-        let budget = ctx_window.saturating_sub(output_budget + 32).max(64);
+        let output_budget = super::budget::output_budget(params.max_tokens, ctx_window);
+        let prompt_token_budget = super::budget::prompt_budget(ctx_window, output_budget);
 
         // 超预算时从最旧的非 system 消息开始丢弃，system 与最后一轮始终保留。
         let mut kept: Vec<&LocalTurn> = turns.iter().collect();
         let (prompt_tokens, prompt) = loop {
             let prompt = render_prompt(&self.model, &template, &kept)?;
             let tokens = vocab.tokenize(prompt.as_bytes(), true, true);
-            if tokens.len() <= budget || kept.len() <= 2 {
+            if tokens.len() <= prompt_token_budget || kept.len() <= 2 {
                 break (tokens, prompt);
             }
             match kept.iter().position(|turn| turn.role != "system") {
@@ -243,7 +243,11 @@ impl Engine {
         );
 
         // Only tokens present in the KV cache may be remembered for reuse.
-        session.tokens = prompt_tokens.iter().chain(generated_tokens.iter()).copied().collect();
+        session.tokens = prompt_tokens
+            .iter()
+            .chain(generated_tokens.iter())
+            .copied()
+            .collect();
         *guard = Some(session);
 
         sink(LocalChunk::Done {

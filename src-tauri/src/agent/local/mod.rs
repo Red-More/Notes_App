@@ -8,6 +8,10 @@
 //! - 未启用 `local-llm` feature 时模块照常编译，状态返回 `unsupported`，
 //!   默认桌面构建因此不需要 clang/cmake。
 
+// Always compiled so the budget tests run without the llama.cpp toolchain;
+// only the feature-gated engine calls into it.
+#[cfg_attr(not(feature = "local-llm"), allow(dead_code))]
+pub mod budget;
 pub mod gating;
 pub mod runtime;
 
