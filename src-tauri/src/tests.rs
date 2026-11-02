@@ -608,7 +608,9 @@ fn conversation_lifecycle_persists_messages() {
     assert_eq!(messages[0].role, "user");
     assert_eq!(messages[0].image_asset_ids.as_deref(), Some("[7]"));
     assert!(messages[1].tool_calls.is_some());
-    let usage = messages[1].usage.expect("usage must survive the round trip");
+    let usage = messages[1]
+        .usage
+        .expect("usage must survive the round trip");
     assert_eq!(usage.input, 120);
     assert_eq!(usage.output, 45);
     assert_eq!(usage.total_tokens, 165);
@@ -948,10 +950,22 @@ fn media_assets_dedupe_by_content_hash() {
     let vfs = test_vfs();
     let dir = std::env::temp_dir().join(format!("notes-media-{}", std::process::id()));
     let bytes = b"fake-png-bytes";
-    let first =
-        assets::store(vfs.conn(), &dir, bytes, "image/png", assets::AssetMeta::default()).unwrap();
-    let second =
-        assets::store(vfs.conn(), &dir, bytes, "image/png", assets::AssetMeta::default()).unwrap();
+    let first = assets::store(
+        vfs.conn(),
+        &dir,
+        bytes,
+        "image/png",
+        assets::AssetMeta::default(),
+    )
+    .unwrap();
+    let second = assets::store(
+        vfs.conn(),
+        &dir,
+        bytes,
+        "image/png",
+        assets::AssetMeta::default(),
+    )
+    .unwrap();
     assert_eq!(first.id, second.id, "identical bytes share one asset row");
     assert_eq!(first.sha256, second.sha256);
     let file = assets::path(&dir, &first);
@@ -2564,20 +2578,29 @@ fn privacy_egress_scopes_glob_and_grep_arguments() {
 
     // A relative glob is anchored at `root`; it must not fall back to /life.
     let glob = egress::guard(
-        &tool_call("fs_glob", serde_json::json!({ "pattern": "*.md", "root": "/life/notes" })),
+        &tool_call(
+            "fs_glob",
+            serde_json::json!({ "pattern": "*.md", "root": "/life/notes" }),
+        ),
         &snapshot,
     );
     assert!(!glob.blocked());
 
     // `fs_grep.pattern` is search text, not a path.
     let grep = egress::guard(
-        &tool_call("fs_grep", serde_json::json!({ "pattern": "会议", "path": "/life/notes" })),
+        &tool_call(
+            "fs_grep",
+            serde_json::json!({ "pattern": "会议", "path": "/life/notes" }),
+        ),
         &snapshot,
     );
     assert!(!grep.blocked());
 
     // Grep without a path can reach every S0 document, so it stays blocked.
-    let broad = egress::guard(&tool_call("fs_grep", serde_json::json!({ "pattern": "会议" })), &snapshot);
+    let broad = egress::guard(
+        &tool_call("fs_grep", serde_json::json!({ "pattern": "会议" })),
+        &snapshot,
+    );
     assert!(broad.blocked());
     assert!(broad.paths.iter().any(|p| p == "/life"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -2709,6 +2732,7 @@ fn local_device_recommendation_follows_memory_tiers() {
     let high = gating::recommend(Some(12000), 12);
     assert_eq!(high.tier, "high");
     assert_eq!(high.recommended_threads, 4);
+    assert_eq!(high.recommended_context, 4096);
     assert_eq!(high.max_model_mb, 1600);
 
     let unknown = gating::recommend(None, 6);
@@ -2777,8 +2801,18 @@ fn local_config_requires_prompt_room() {
 #[test]
 fn local_file_names_are_directory_safe() {
     assert!(runtime::is_valid_file_name("qwen3-0.6b-iq4_xs.GGUF"));
-    for name in ["", "model", "a/b.gguf", "a b.gguf", "a\\b.gguf", "../x.gguf"] {
-        assert!(!runtime::is_valid_file_name(name), "{name} must be rejected");
+    for name in [
+        "",
+        "model",
+        "a/b.gguf",
+        "a b.gguf",
+        "a\\b.gguf",
+        "../x.gguf",
+    ] {
+        assert!(
+            !runtime::is_valid_file_name(name),
+            "{name} must be rejected"
+        );
     }
 }
 
