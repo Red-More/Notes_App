@@ -281,8 +281,8 @@ impl Runtime {
         let context = config.effective_context();
 
         // 先释放旧模型，切换时不会同时占用两份权重。
-        let previous = self.inner.loaded.lock().unwrap().take();
-        drop(previous);
+        // Release the old weights as soon as the lock yields them.
+        self.inner.loaded.lock().unwrap().take();
         self.publish(LocalState::Loading, 0, threads, context, None, None);
 
         #[cfg(feature = "local-llm")]
@@ -357,8 +357,8 @@ impl Runtime {
     /// 用户手动关闭：取消生成并释放权重。
     pub fn unload(&self) {
         self.cancel_current();
-        let previous = self.inner.loaded.lock().unwrap().take();
-        drop(previous);
+        // Release the old weights as soon as the lock yields them.
+        self.inner.loaded.lock().unwrap().take();
         let (threads, context) = self.layout();
         self.publish(LocalState::Unloaded, 0, threads, context, None, None);
     }
@@ -366,8 +366,8 @@ impl Runtime {
     /// 暂停：后台、热压或低电量；保留用户设置，仅释放权重。
     pub fn suspend(&self, reason: &str) {
         self.cancel_current();
-        let previous = self.inner.loaded.lock().unwrap().take();
-        drop(previous);
+        // Release the old weights as soon as the lock yields them.
+        self.inner.loaded.lock().unwrap().take();
         let (threads, context) = self.layout();
         self.publish(
             LocalState::Suspended,
@@ -444,10 +444,7 @@ impl Runtime {
         let power = gating::power_snapshot();
         let latched = self.inner.gate_latched.load(Ordering::SeqCst);
         let decision = gating::evaluate(&power, &GatePolicy::default(), latched);
-        let next_latched = match &decision {
-            GateDecision::Suspend { thermal: true, .. } => true,
-            _ => false,
-        };
+        let next_latched = matches!(&decision, GateDecision::Suspend { thermal: true, .. });
         self.inner
             .gate_latched
             .store(next_latched, Ordering::SeqCst);

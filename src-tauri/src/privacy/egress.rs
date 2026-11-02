@@ -175,10 +175,7 @@ fn referenced_paths(messages: &[Value]) -> Vec<String> {
                 "fs_grep" => {
                     // `pattern` is the search text, not a path; the optional
                     // `path` limits the search scope. No path means all of /life.
-                    let scope = args
-                        .get("path")
-                        .and_then(Value::as_str)
-                        .unwrap_or("/life");
+                    let scope = args.get("path").and_then(Value::as_str).unwrap_or("/life");
                     if let Some(scope) = normalize_ref(scope) {
                         paths.insert(scope);
                     }
@@ -213,9 +210,7 @@ fn normalize_ref(raw: &str) -> Option<String> {
     if raw.is_empty() {
         return None;
     }
-    let cut = raw
-        .find(|c| matches!(c, '*' | '?' | '['))
-        .unwrap_or(raw.len());
+    let cut = raw.find(['*', '?', '[']).unwrap_or(raw.len());
     let scope = raw[..cut].trim_end_matches('/');
     let scope = if scope.is_empty() { raw } else { scope };
     cap_gate::normalize_path(scope).ok()
