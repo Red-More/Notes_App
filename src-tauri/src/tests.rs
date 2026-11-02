@@ -2591,44 +2591,107 @@ fn privacy_egress_scopes_glob_and_grep_arguments() {
 fn local_gate_blocks_heat_and_low_battery() {
     let policy = gating::GatePolicy::default();
     // Unknown metrics never block: desktop builds have no sysfs source.
-    assert_eq!(
-        gating::evaluate(&gating::PowerSnapshot::default(), &policy),
+    assert!(matches!(
+        gating::evaluate(&gating::PowerSnapshot::default(), &policy, false),
         gating::GateDecision::Allow
-    );
-    // Heat wins even when charging.
-    assert_eq!(
-        gating::evaluate(
-            &gating::PowerSnapshot {
-                thermal_celsius: Some(48.0),
-                ..Default::default()
-            },
-            &policy
-        ),
-        gating::GateDecision::Suspend("设备温度过高")
-    );
+    ));
+
+    // 49°C is a normal CPU load temperature and must not block local loading.
+    let warm_cpu = gating::PowerSnapshot {
+        thermal_celsius: Some(49.0),
+        cpu_celsius: Some(49.0),
+        ..Default::default()
+    };
+    assert!(matches!(
+        gating::evaluate(&warm_cpu, &policy, false),
+        gating::GateDecision::Allow
+    ));
+
+    // CPU uses its own threshold instead of the 45°C battery/skin limit.
+    let hot_cpu = gating::PowerSnapshot {
+        thermal_celsius: Some(70.5),
+        cpu_celsius: Some(70.5),
+        ..Default::default()
+    };
+    assert!(matches!(
+        gating::evaluate(&hot_cpu, &policy, false),
+        gating::GateDecision::Suspend { thermal: true, .. }
+    ));
+
+    // Once paused, CPU must cool below 65°C before the gate reopens.
+    let cooling_cpu = gating::PowerSnapshot {
+        thermal_celsius: Some(66.0),
+        cpu_celsius: Some(66.0),
+        ..Default::default()
+    };
+    assert!(matches!(
+        gating::evaluate(&cooling_cpu, &policy, true),
+        gating::GateDecision::Suspend { thermal: true, .. }
+    ));
+    let cool_cpu = gating::PowerSnapshot {
+        thermal_celsius: Some(64.0),
+        cpu_celsius: Some(64.0),
+        ..Default::default()
+    };
+    assert!(matches!(
+        gating::evaluate(&cool_cpu, &policy, true),
+        gating::GateDecision::Allow
+    ));
+
+    // Battery heat blocks even when the CPU is cool.
+    let hot_battery = gating::PowerSnapshot {
+        thermal_celsius: Some(46.0),
+        battery_celsius: Some(46.0),
+        ..Default::default()
+    };
+    assert!(matches!(
+        gating::evaluate(&hot_battery, &policy, false),
+        gating::GateDecision::Suspend { thermal: true, .. }
+    ));
+
     // Low battery only blocks while discharging.
-    assert_eq!(
-        gating::evaluate(
-            &gating::PowerSnapshot {
-                battery_percent: Some(10),
-                charging: Some(false),
-                ..Default::default()
-            },
-            &policy
-        ),
-        gating::GateDecision::Suspend("电量过低")
-    );
-    assert_eq!(
+    let low_battery = gating::PowerSnapshot {
+        battery_percent: Some(10),
+        charging: Some(false),
+        ..Default::default()
+    };
+    assert!(matches!(
+        gating::evaluate(&low_battery, &policy, false),
+        gating::GateDecision::Suspend { thermal: false, .. }
+    ));
+    assert!(matches!(
         gating::evaluate(
             &gating::PowerSnapshot {
                 battery_percent: Some(10),
                 charging: Some(true),
                 ..Default::default()
             },
-            &policy
+            &policy,
+            false
         ),
         gating::GateDecision::Allow
-    );
+    ));
+}
+
+#[test]
+fn local_thermal_zones_are_classified_by_type() {
+    use gating::ThermalKind;
+
+    let cases = [
+        ("cpu-1-0-step", Some(ThermalKind::Cpu)),
+        ("cpuss-1-usr", Some(ThermalKind::Cpu)),
+        ("msm-scl-usr", Some(ThermalKind::Cpu)),
+        ("battery", Some(ThermalKind::Battery)),
+        ("sm5602_bat", Some(ThermalKind::Battery)),
+        ("sdm-skin-therm-usr", Some(ThermalKind::Skin)),
+        ("quiet-therm-usr", Some(ThermalKind::Skin)),
+        ("pm6125_tz", Some(ThermalKind::Power)),
+        ("sc8551_standalone", Some(ThermalKind::Power)),
+        ("modem-1-usr", None),
+    ];
+    for (zone, expected) in cases {
+        assert_eq!(gating::classify_thermal_kind(zone), expected, "{zone}");
+    }
 }
 
 #[test]

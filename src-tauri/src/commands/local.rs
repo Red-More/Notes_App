@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use tauri::State;
 
-use crate::agent::local::gating::{self, DeviceProfile, GateDecision, GatePolicy, PowerSnapshot};
+use crate::agent::local::gating::{self, DeviceProfile, GateDecision, PowerSnapshot};
 use crate::agent::local::runtime::{self, LocalConfig};
 use crate::agent::local::{LocalModelFile, LocalStatus};
 use crate::agent::model_store::{self, ApiFormat, ModelInput, ModelKind};
@@ -39,10 +39,10 @@ pub struct LocalSnapshot {
 #[tauri::command]
 pub fn local_model_status(agent_state: State<'_, AgentState>) -> Result<LocalSnapshot, ToolError> {
     let device = gating::device_profile();
-    let power = gating::power_snapshot();
-    let gate = match gating::evaluate(&power, &GatePolicy::default()) {
+    let (power, decision) = agent_state.local.gate_snapshot();
+    let gate = match decision {
         GateDecision::Allow => "allow".to_string(),
-        GateDecision::Suspend(reason) => reason.to_string(),
+        GateDecision::Suspend { reason, .. } => reason,
     };
     let files = runtime::list_files(agent_state.local.models_dir(), device.max_model_mb);
     Ok(LocalSnapshot {

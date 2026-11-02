@@ -201,6 +201,8 @@ struct Inner {
     loading: AtomicBool,
     busy: AtomicBool,
     current_cancel: Mutex<Option<Arc<AtomicBool>>>,
+    /// 热压暂停后保持到温度回落到恢复阈值，避免在边界反复启停。
+    gate_latched: AtomicBool,
     #[cfg(feature = "local-llm")]
     backend: std::sync::OnceLock<llama_cpp_2::llama_backend::LlamaBackend>,
 }
@@ -220,6 +222,7 @@ impl Runtime {
                 loading: AtomicBool::new(false),
                 busy: AtomicBool::new(false),
                 current_cancel: Mutex::new(None),
+                gate_latched: AtomicBool::new(false),
                 #[cfg(feature = "local-llm")]
                 backend: std::sync::OnceLock::new(),
             }),
@@ -432,23 +435,31 @@ impl Runtime {
         };
 
         self.inner.current_cancel.lock().unwrap().take();
-        self.publish(
-            LocalState::Ready,
-            bytes,
-            threads,
-            context,
-            model,
-            None,
-        );
+        self.publish(LocalState::Ready, bytes, threads, context, model, None);
         result.map_err(ToolError::invalid)
     }
 
-    fn require_gate(&self) -> Result<(), ToolError> {
+    /// 读取实时功耗并更新热压锁存；设置页和加载路径共用同一状态。
+    pub fn gate_snapshot(&self) -> (gating::PowerSnapshot, GateDecision) {
         let power = gating::power_snapshot();
-        match gating::evaluate(&power, &GatePolicy::default()) {
+        let latched = self.inner.gate_latched.load(Ordering::SeqCst);
+        let decision = gating::evaluate(&power, &GatePolicy::default(), latched);
+        let next_latched = match &decision {
+            GateDecision::Suspend { thermal: true, .. } => true,
+            _ => false,
+        };
+        self.inner
+            .gate_latched
+            .store(next_latched, Ordering::SeqCst);
+        (power, decision)
+    }
+
+    fn require_gate(&self) -> Result<(), ToolError> {
+        let (_, decision) = self.gate_snapshot();
+        match decision {
             GateDecision::Allow => Ok(()),
-            GateDecision::Suspend(reason) => {
-                self.suspend(reason);
+            GateDecision::Suspend { reason, .. } => {
+                self.suspend(&reason);
                 Err(ToolError::invalid(format!(
                     "{reason}，本地模型已暂停；恢复后可重新加载"
                 )))
