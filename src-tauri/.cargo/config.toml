@@ -1,0 +1,46 @@
+# Android cross-build environment for the `local-mnn` (and, after the merge,
+# `local-llm`) features.
+#
+# Kept in Cargo config so that a plain `pnpm tauri android build` works in any
+# shell and so the `cargo build` spawned by Gradle's rustBuild task inherits
+# the same values.
+#
+# Why each entry is needed:
+# * ANDROID_NDK: llama-cpp-sys ignores NDK_HOME and picks the lexicographically
+#   newest folder under ANDROID_HOME/ndk. `ndk/30.0.16248370` on this machine is
+#   an empty, incomplete install, so pin the complete r28c.
+# * ANDROID_NDK_HOME / NDK_HOME: mnn-rs-sys' build script requires one of these
+#   to locate the toolchain instead of guessing.
+# * CMake generator: CMake's default generator on Windows is Visual Studio, which
+#   cannot configure the NDK toolchain. Scoped to the Android target so desktop
+#   builds keep their default generator.
+# * CC/CXX/AR: `ring` (via reqwest/rustls) and the mnn-rs-sys C++ wrapper are
+#   compiled by the `cc` crate for Android. Debug artifacts may carry a prebuilt
+#   ring, but any release build recompiles it, and without these the build stops
+#   with "failed to find tool. Is `clang` installed?".
+#
+# The MNN archive itself is not in this repo. Build (or download) a static
+# libMNN for arm64-v8a and point `MNN_LIB_DIR` / `MNN_INCLUDE_DIR` at it before
+# enabling `local-mnn`:
+#
+#   setx MNN_LIB_DIR     "C:\path\to\mnn\lib"      # contains libMNN.a
+#   setx MNN_INCLUDE_DIR "C:\path\to\mnn\include"  # contains MNN/Interpreter.hpp
+#
+# Prefer a build made with `ANDROID_STL=c++_shared`: the Tauri APK already ships
+# `libc++_shared.so`, and a `c++_static` libMNN would duplicate the C++ runtime
+# symbols in the same process.
+#
+# Run one Android build at a time. Two concurrent cargo/gradle invocations race
+# on the same NDK and CMake temp files (os error 183) and on `target/` locks.
+[env]
+ANDROID_NDK = "C:/Users/16412/AppData/Local/Android/Sdk/ndk/28.2.13676358"
+ANDROID_NDK_HOME = "C:/Users/16412/AppData/Local/Android/Sdk/ndk/28.2.13676358"
+NDK_HOME = "C:/Users/16412/AppData/Local/Android/Sdk/ndk/28.2.13676358"
+"CMAKE_GENERATOR_aarch64_linux_android" = "Ninja"
+CC_aarch64_linux_android = "C:/Users/16412/AppData/Local/Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24-clang.cmd"
+CXX_aarch64_linux_android = "C:/Users/16412/AppData/Local/Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24-clang++.cmd"
+AR_aarch64_linux_android = "C:/Users/16412/AppData/Local/Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-ar.exe"
+# `setx` only affects new shells; these are the process-local equivalents for CI.
+
+[target.aarch64-linux-android]
+linker = "C:/Users/16412/AppData/Local/Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24-clang.cmd"
