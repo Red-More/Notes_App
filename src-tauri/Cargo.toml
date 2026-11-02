@@ -17,6 +17,16 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 # Embedded llama.cpp runtime (phase B). Off by default so `cargo check` and the
 # desktop dev loop do not need clang/cmake; enable for Android release builds.
 local-llm = ["dep:llama-cpp-2"]
+# Embedded MNN runtime for the Android comparison line. Off by default so the
+# desktop dev loop does not need the NDK-built libMNN archive.
+# `mnn-rs-sys` is used directly for streaming (`generate_init` / `generate_step` /
+# `stoped`), which the high-level `mnn-rs` crate does not expose.
+local-mnn = ["dep:mnn-rs", "dep:mnn-rs-sys"]
+
+[[example]]
+name = "mnn_smoke"
+path = "examples/mnn_smoke.rs"
+required-features = ["local-mnn"]
 
 [build-dependencies]
 tauri-build = { version = "2.7.2", features = [] }
@@ -52,6 +62,11 @@ tokio = { version = "1", features = ["time", "sync"] }
 
 # 阶段 B：内嵌 llama.cpp。仅 `local-llm` feature 启用，默认构建不引入 C/C++ 工具链依赖。
 llama-cpp-2 = { version = "0.1", optional = true }
+
+# MNN 推理引擎（对照线）：静态链接本地编译的 libMNN，禁用预编译下载。
+mnn-rs = { version = "0.1.7", optional = true, default-features = false, features = ["cpu", "static", "llm"] }
+# 原始 FFI：只有它能拿到 generate_init / generate_step / stoped，用于真流式与取消。
+mnn-rs-sys = { version = "0.1.7", optional = true, default-features = false, features = ["cpu", "static", "llm"] }
 
 # M2-4b：Android Keystore。凭据密文写 SharedPreferences，加密密钥由 Keystore 生成且不可导出。
 # 仅 Android 目标编译；其 ndk-context 依赖已由 Tauri 的 tao 运行时初始化。

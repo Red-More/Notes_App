@@ -11,6 +11,7 @@ pub mod folder;
 pub mod fs;
 pub mod index;
 pub mod local;
+pub mod local_mnn;
 pub mod mcp;
 pub mod media;
 pub mod privacy;

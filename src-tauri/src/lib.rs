@@ -69,6 +69,9 @@ pub fn run() {
             };
             agent_state.local.set_config(local_config);
             app.manage(agent_state);
+            // 本地 MNN 模型根目录：bundle 目录由用户/开发流程放入，命令只认目录名。
+            let mnn_root = app.path().app_data_dir()?.join("models").join("mnn");
+            app.manage(agent::local_mnn::LocalMnnState::new(mnn_root));
             // 媒体资产目录与作业取消标记；与 Agent run 生命周期解耦。
             let media_root = app.path().app_data_dir()?.join("media");
             std::fs::create_dir_all(&media_root)?;
@@ -183,6 +186,12 @@ pub fn run() {
             commands::mcp::mcp_server_tools,
             commands::mcp::mcp_all_tools,
             commands::mcp::mcp_tool_call,
+            commands::local_mnn::local_mnn_status,
+            commands::local_mnn::local_mnn_models,
+            commands::local_mnn::local_mnn_load,
+            commands::local_mnn::local_mnn_generate,
+            commands::local_mnn::local_mnn_cancel,
+            commands::local_mnn::local_mnn_unload,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
