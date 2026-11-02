@@ -485,7 +485,7 @@ CREATE TABLE egress_audit (
 | 引擎封装 | GGUF 加载、聊天模板、分块解码提示词、采样链、UTF-8 增量输出、停止串 | `src-tauri/src/agent/local/engine.rs` |
 | 生命周期 | `Unsupported/Unloaded/Loading/Ready/Generating/Suspended/Failed`；手动关闭、后台暂停、切换模型都先取消再释放权重 | `src-tauri/src/agent/local/mod.rs`、`runtime.rs` |
 | 线程与内存 | 加载/推理在 `tauri::async_runtime::spawn_blocking`；单实例 `busy` 互斥；每次生成新建 context，空闲只驻留权重 | `runtime.rs` |
-| 热/电量门控 | sysfs 读取 thermal_zone 与 battery；≥45°C 或 ≤15% 且未充电即暂停并释放 | `local/gating.rs` |
+| 热/电量门控 | sysfs 读取 thermal_zone 与 battery；按类型拆分 CPU/电池/外壳/电源阈值，热压暂停后需回落 5°C 才恢复；≤15% 且未充电即暂停 | `local/gating.rs` |
 | 设备推荐 | `/proc/meminfo` + 核数分档（<4GB 不推荐、4–6GB、6–8GB、≥8GB），只提示不自动下载 | `gating.rs` |
 | 模型条目 | 新增 `ApiFormat::LocalLlama`；本地条目 `base_url` 存 `.gguf` 文件名，跳过 HTTPS 校验，读取侧按格式分别校验 | `agent/model_store.rs` |
 | 请求分流 | `llm::run` 在发送前分流本地；本地请求不加载 EDM 快照、不写出境审计、不经过 HTTP | `agent/llm.rs`、`commands/agent.rs` |
@@ -503,7 +503,7 @@ CREATE TABLE egress_audit (
 | 当前模型为本地条目、已加载 | `agent_stream` 直接流式返回本地输出，全程无网络请求、无出境审计 |
 | 本地条目未启用 / 未加载 | 明确错误提示，不隐式回退到云端（避免 S0 意外出境） |
 | 本地条目被选为当前模型但从未加载 | `agent_stream` 触发一次异步加载（受热/电量门控约束） |
-| 设备 ≥45°C 或 ≤15% 且未充电 | 加载/生成前拒绝，状态转 `Suspended` 并释放权重 |
+| CPU ≥70°C、电池/外壳 ≥45°C、电源 ≥50°C，或 ≤15% 且未充电 | 加载/生成前拒绝，状态转 `Suspended` 并释放权重；热压恢复需再降 5°C |
 | 应用切到后台且未开启常驻 | `local_model_pause` 释放权重；开启常驻则保持 |
 | 导入模型 | 仅接受 `.gguf` 文件名（ASCII、无路径分隔符）、≤3GB、同名不覆盖；先写 `.part` 再原子重命名 |
 | 尝试删除使用中的模型 | 拒绝，要求先卸载 |
@@ -589,7 +589,7 @@ CREATE TABLE egress_audit (
 | 本地 prompt 档位 | 前端未新增紧凑 prompt；Rust 侧裁剪 system 与历史 | C/F |
 | `cloud_consult` 脱敏链路 | 未实现；本地模型仍只处理本会话 | C |
 | 预编译产物 | 未接入预编译 llama.cpp，仍走源码构建 | F（风险处置） |
-| 上下文与输出预算 | **已修**：`MIN_CONTEXT` 提到 2048；`save_config` 拒绝 `context < max_tokens + 512`；`engine.rs` 把输出预算压到窗口一半；读取旧配置时自动放大上下文而不是整份重置 | 已完成 |
+| 上下文与输出预算 | **已修**：`MIN_CONTEXT` 提到 2048；`save_config` 拒绝 `context < max_tokens + 512`；`engine.rs` 把输出预算压到窗口一半；读取旧配置时自动放大上下文而不是整份重置。上下文**留空（0）表示不向 llama.cpp 传 `n_ctx`**，由其按模型训练窗口决定；用户填写的较大值同样接受，仅由 UI 提示内存风险（8GB 机型约 4K 可用） | 已完成 |
 | KV 跨轮复用 | **已实现并验证增量 prefill**：`Engine` 持有持久 `LlamaContext`，按 token 公共前缀复用 KV，尾部用 `kv_cache_seq_rm` 截断后只 decode 差异部分；取消/失败时丢弃会话，避免脏 KV。真机复用率 97.6%–97.9%，prefill 1.2–1.6s | 已完成（14.4.2） |
 | 历史超窗口的滑动窗口策略 | 未实现；目前超预算时仍是丢弃最旧整轮，导致前缀截断、KV 从头重建 | F（见 14.6 第 5 条） |
 
