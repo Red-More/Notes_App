@@ -130,6 +130,9 @@ env.ANDROID_NDK = ndk;
 env.ANDROID_NDK_HOME = ndk;
 env.ANDROID_NDK_ROOT = ndk;
 env.CARGO_NDK_ANDROID_NDK = ndk;
+// tauri-cli / cargo-mobile2 resolve the NDK from `NDK_HOME`, not ANDROID_NDK.
+// Without it, the nested Gradle-triggered CLI falls back to scanning the SDK.
+env.NDK_HOME = ndk;
 env.ANDROID_API_LEVEL = apiLevel;
 env.CC_aarch64_linux_android = join(bin, `${suffix}-clang.cmd`);
 env.CXX_aarch64_linux_android = join(bin, `${suffix}-clang++.cmd`);
