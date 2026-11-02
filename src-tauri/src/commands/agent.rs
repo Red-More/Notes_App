@@ -243,7 +243,8 @@ pub async fn agent_stream(
         Some(snapshot) => {
             let decision = privacy::egress::guard(&request.context.messages, snapshot);
             let vfs = vfs_state.0.lock().unwrap();
-            if let Err(e) = privacy::egress::record_audit(vfs.conn(), &entry.id, "chat", &decision) {
+            if let Err(e) = privacy::egress::record_audit(vfs.conn(), &entry.id, "chat", &decision)
+            {
                 log::warn!("egress audit write failed: {e}");
             }
             Some(decision)
@@ -351,7 +352,9 @@ pub async fn agent_test_connection(
     input: TestConnectionInput,
 ) -> Result<ConnectionTest, ToolError> {
     if input.format.is_local() {
-        return Err(ToolError::invalid("本地模型在设置页加载后即可使用，无需连通性测试"));
+        return Err(ToolError::invalid(
+            "本地模型在设置页加载后即可使用，无需连通性测试",
+        ));
     }
     let entry = ModelEntry {
         id: if input.id.trim().is_empty() {

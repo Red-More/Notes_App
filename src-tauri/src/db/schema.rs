@@ -381,9 +381,7 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
         // Thinking text and provider signature; NULL when the model did not reason.
         for column in ["thinking", "thinking_signature"] {
             if !table_has_column(&tx, "messages", column)? {
-                tx.execute_batch(&format!(
-                    "ALTER TABLE messages ADD COLUMN {column} TEXT;"
-                ))?;
+                tx.execute_batch(&format!("ALTER TABLE messages ADD COLUMN {column} TEXT;"))?;
             }
         }
         tx.pragma_update(None, "user_version", 8)?;

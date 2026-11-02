@@ -69,7 +69,10 @@ pub fn media_job_cancel(
 }
 
 #[tauri::command]
-pub fn media_asset_get(vfs_state: State<'_, VfsState>, id: i64) -> Result<assets::Asset, ToolError> {
+pub fn media_asset_get(
+    vfs_state: State<'_, VfsState>,
+    id: i64,
+) -> Result<assets::Asset, ToolError> {
     let vfs = vfs_state.0.lock().unwrap();
     assets::get(vfs.conn(), id)
 }
@@ -82,7 +85,9 @@ pub fn media_asset_path(
 ) -> Result<String, ToolError> {
     let vfs = vfs_state.0.lock().unwrap();
     let asset = assets::get(vfs.conn(), id)?;
-    Ok(assets::path(&media.root, &asset).to_string_lossy().into_owned())
+    Ok(assets::path(&media.root, &asset)
+        .to_string_lossy()
+        .into_owned())
 }
 
 /// Base64 payload for one asset; used to rebuild image context after reload.

@@ -46,8 +46,7 @@ fn kling_token(raw: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())?
         .as_secs();
     let header = URL_SAFE_NO_PAD.encode(
-        serde_json::to_vec(&json!({ "alg": "HS256", "typ": "JWT" }))
-            .map_err(|e| e.to_string())?,
+        serde_json::to_vec(&json!({ "alg": "HS256", "typ": "JWT" })).map_err(|e| e.to_string())?,
     );
     let payload = URL_SAFE_NO_PAD.encode(
         serde_json::to_vec(&json!({
@@ -254,13 +253,18 @@ pub async fn dashscope_image(
     .await?;
     let url = dashscope_task_url(entry, &task_id);
     let auth = Auth::Bearer(key);
-    let result = poll_task(state, &url, &auth, cancel, progress, |payload| {
-        match status_text(payload).as_str() {
+    let result = poll_task(
+        state,
+        &url,
+        &auth,
+        cancel,
+        progress,
+        |payload| match status_text(payload).as_str() {
             "succeeded" | "success" | "completed" => Poll::Done(payload.clone()),
             "failed" | "error" | "canceled" | "cancelled" => Poll::Failed(vendor_error(payload)),
             _ => Poll::Pending(0),
-        }
-    })
+        },
+    )
     .await?;
     let image_url = result
         .get("output")
@@ -295,13 +299,18 @@ pub async fn dashscope_video(
     .await?;
     let url = dashscope_task_url(entry, &task_id);
     let auth = Auth::Bearer(key);
-    let result = poll_task(state, &url, &auth, cancel, progress, |payload| {
-        match status_text(payload).as_str() {
+    let result = poll_task(
+        state,
+        &url,
+        &auth,
+        cancel,
+        progress,
+        |payload| match status_text(payload).as_str() {
             "succeeded" | "success" | "completed" => Poll::Done(payload.clone()),
             "failed" | "error" | "canceled" | "cancelled" => Poll::Failed(vendor_error(payload)),
             _ => Poll::Pending(0),
-        }
-    })
+        },
+    )
     .await?;
     let video_url = result
         .get("output")
@@ -323,7 +332,13 @@ pub async fn dashscope_tts(
         "input": { "text": text, "voice": voice },
         "parameters": { "format": "mp3" },
     });
-    let payload = post_json(state, &model_store::endpoint(entry), &Auth::Bearer(key), &body).await?;
+    let payload = post_json(
+        state,
+        &model_store::endpoint(entry),
+        &Auth::Bearer(key),
+        &body,
+    )
+    .await?;
     let audio = payload
         .get("output")
         .and_then(|output| output.get("audio"))
@@ -365,13 +380,18 @@ pub async fn volc_video(
         .and_then(Value::as_str)
         .ok_or_else(|| "火山视频提交响应缺少任务 id".to_string())?;
     let poll_url = format!("{}/{}", submit_url.trim_end_matches('/'), task_id);
-    let result = poll_task(state, &poll_url, &auth, cancel, progress, |payload| {
-        match status_text(payload).as_str() {
+    let result = poll_task(
+        state,
+        &poll_url,
+        &auth,
+        cancel,
+        progress,
+        |payload| match status_text(payload).as_str() {
             "succeeded" | "success" | "completed" => Poll::Done(payload.clone()),
             "failed" | "error" | "cancelled" | "canceled" => Poll::Failed(vendor_error(payload)),
             _ => Poll::Pending(0),
-        }
-    })
+        },
+    )
     .await?;
     let video_url = result
         .get("content")
@@ -401,21 +421,25 @@ pub async fn kling_video(
         "duration": seconds_of(seconds).to_string(),
         "mode": "std",
     });
-    let submitted =
-        post_json(state, &model_store::endpoint(entry), &auth, &body).await?;
+    let submitted = post_json(state, &model_store::endpoint(entry), &auth, &body).await?;
     let task_id = submitted
         .get("data")
         .and_then(|data| data.get("task_id"))
         .and_then(Value::as_str)
         .ok_or_else(|| "可灵提交响应缺少 task_id".to_string())?;
     let poll_url = format!("{}/v1/videos/text2video/{task_id}", base(entry));
-    let result = poll_task(state, &poll_url, &auth, cancel, progress, |payload| {
-        match status_text(payload).as_str() {
+    let result = poll_task(
+        state,
+        &poll_url,
+        &auth,
+        cancel,
+        progress,
+        |payload| match status_text(payload).as_str() {
             "succeed" | "succeeded" | "success" | "completed" => Poll::Done(payload.clone()),
             "failed" | "error" | "cancelled" | "canceled" => Poll::Failed(vendor_error(payload)),
             _ => Poll::Pending(0),
-        }
-    })
+        },
+    )
     .await?;
     let video_url = result
         .get("data")

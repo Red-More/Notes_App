@@ -1,8 +1,8 @@
 mod agent;
 mod commands;
-mod mcp;
 mod db;
 mod docs;
+mod mcp;
 mod media;
 mod privacy;
 mod skills;

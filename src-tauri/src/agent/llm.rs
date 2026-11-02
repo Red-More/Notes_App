@@ -840,7 +840,11 @@ async fn run_local(
         Ok(Err(error)) => {
             let aborted = cancel.load(Ordering::SeqCst);
             emit(StreamEvent::Error {
-                reason: if aborted { "aborted".into() } else { "error".into() },
+                reason: if aborted {
+                    "aborted".into()
+                } else {
+                    "error".into()
+                },
                 error_message: error.to_string(),
                 usage: Usage::default(),
             });
