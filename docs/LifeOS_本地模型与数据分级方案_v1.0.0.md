@@ -512,10 +512,16 @@ CREATE TABLE egress_audit (
 ### 14.3 构建前置与已知风险
 
 1. **Windows 桌面构建已验证（2026-11-01）**：VS Build Tools 18 自带 CMake 4.3.1、Ninja 1.13.2 与 MSVC 14.51；bindgen 所需的 libclang 通过 PyPI `libclang 18.1.1` 提供（`C:\Users\16412\miniconda3\Lib\site-packages\clang\native`）。已把 VS 的 CMake/Ninja 目录写入用户 `PATH`，并设置用户级 `LIBCLANG_PATH`。首次 `cargo check --features local-llm` 用时 15m40s（含 llama.cpp 全量编译），增量 10s。
-2. **Android 交叉编译已验证（2026-11-01，NDK 升级至 28.2）**：使用 NDK `28.2.13676358`（16 KB page 基线，满足 Play 对 targetSdk 37 的要求）、`LIBCLANG_PATH` 指向 PyPI libclang 18.1.1；VS Build Tools 18 的 CMake/Ninja 目录已在用户 `PATH` 中。`llama-cpp-sys` 会扫描 SDK 取版本号最大的 NDK，本机 `30.0.16248370` 缺 `android.toolchain.cmake`，因此构建前须让 `ANDROID_NDK` 指向 28.2（应用级或当前终端内设置），否则会 panic。入口命令：`pnpm android:build:local`（debug）/ `pnpm android:build`（release），二者都是对 `tauri android build --target aarch64 --features local-llm` 的直接封装。`tauri-plugin-*` 的 build script 复制 `.tauri/tauri-api` 非幂等（`os error 183`），仅当插件 crate 重新编译后需要先执行 `pnpm android:prepare`。`jniLibs/<abi>/` 的 `.so` 符号链接在当前用户的非提权终端即可创建，无需管理员权限。
+2. **Android 交叉编译已验证（2026-11-01，NDK 升级至 28.2）**：使用 NDK `28.2.13676358`（16 KB page 基线，满足 Play 对 targetSdk 37 的要求）、`LIBCLANG_PATH` 指向 PyPI libclang 18.1.1；VS Build Tools 18 的 CMake/Ninja 目录已在用户 `PATH` 中。`llama-cpp-sys` 的 NDK 探测链依次是 `ANDROID_NDK` → `ANDROID_NDK_ROOT` → `NDK_ROOT` → `CARGO_NDK_ANDROID_NDK`，都不存在时才扫描 SDK 取版本号最大的 NDK；本机 `30.0.16248370` 缺 `android.toolchain.cmake`，且 `llama-cpp-sys` 不读 `NDK_HOME`，因此由 `src-tauri/.cargo/config.toml` 把 `ANDROID_NDK` 固定到 28.2，否则会 panic。入口命令：`pnpm android:build:local`（debug）/ `pnpm android:build`（release），二者都是对 `tauri android build --target aarch64 --features local-llm` 的直接封装；同一份 `.cargo/config.toml` 还按 Android 目标注入 CMake 的 Ninja 生成器。`tauri-plugin-*` 的 build script 复制 `.tauri/tauri-api` 非幂等（`os error 183`），仅当插件 crate 重新编译后需要手动删除对应 crate 的 `android/.tauri` 目录。`jniLibs/<abi>/` 的 `.so` 符号链接在当前用户的非提权终端即可创建，无需管理员权限。
 3. **llama-cpp-2 API 版本**：已按锁定版本 `0.1.160` 完整编译通过（`chat_template/apply_chat_template`、`LlamaVocab::tokenize/token_to_piece`、`LlamaSampler` 均匹配）；升级版本时仍需重新验证 `engine.rs`。
 4. **后台常驻**：Android 真正的后台常驻仍需要前台服务与通知；本轮只实现“默认后台卸载 / 用户可选保持”，前台服务归阶段 F。
 5. **小模型能力**：本地分支不注入工具声明，模型不会调用 `fs_*`；system 提示裁到 1200 字符，历史按 token 预算丢弃最旧轮次。
+6. **Android 构建环境固化与并发约束（2026-11-02 复核）**：Android 构建所需变量全部固化在 `src-tauri/.cargo/config.toml`，普通非提权终端直接执行构建命令即可，不需要任何临时环境变量：
+   - `[env] ANDROID_NDK` → NDK `28.2.13676358`：`llama-cpp-sys` 不读 `NDK_HOME`，且本机 `ndk/30.0.16248370` 是空目录，会因版本号排序被选中并 panic。
+   - `[env] CMAKE_GENERATOR_aarch64_linux_android = "Ninja"`：Windows 上 CMake 默认选 Visual Studio 生成器，无法配置 NDK 工具链；只作用于 Android 目标，桌面构建不受影响。
+   - `[env] CC_aarch64_linux_android` / `CXX_aarch64_linux_android` / `AR_aarch64_linux_android`：release 会用 `cc` crate 重新编译 `ring` 0.17.14，缺这三个变量即 “failed to find tool”。debug 的 `target/debug` 里 `ring` 已缓存，因此“debug 只设 `ANDROID_NDK` 也能成功”的结论不适用于 release。
+   - `[target.aarch64-linux-android] linker` → 与 `CC` 相同的 NDK clang 驱动；本 crate 不需要额外 `rustflags`。
+   - **并发约束**：`src-tauri/target` 与 Cargo registry 是共享状态，同一时间只能运行一条 Android 构建命令。两条并行会触发 `tauri-plugin-*` build script 复制 `.tauri/tauri-api` 的 `os error 183`（目录已存在）；需要验证多次时必须串行，且构建前先确认没有残留的 `cargo` / `tauri` / Gradle 任务。
 
 ### 14.4 验证
 
