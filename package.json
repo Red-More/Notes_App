@@ -10,8 +10,8 @@
     "test": "vitest run",
     "lint": "oxlint",
     "tauri": "tauri",
-    "android:build": "node scripts/build-android.mjs",
-    "android:build:local": "node scripts/build-android.mjs --debug --features local-llm",
+    "android:build": "tauri android build --target aarch64 --features local-llm",
+    "android:build:local": "tauri android build --target aarch64 --features local-llm --debug",
     "preview": "vite preview"
   },
   "dependencies": {

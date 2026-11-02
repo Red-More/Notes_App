@@ -1,0 +1,29 @@
+# Android cross-build environment for the `local-llm` feature.
+#
+# Kept in Cargo config (not in a wrapper script) so that a plain
+# `pnpm tauri android build` works in any shell, and so that the `cargo build`
+# spawned by Gradle's rustBuild task inherits the same values.
+#
+# Why each entry is needed:
+# * ANDROID_NDK: llama-cpp-sys ignores NDK_HOME and picks the lexicographically
+#   newest folder under ANDROID_HOME/ndk. `ndk/30.0.16248370` on this machine is
+#   an empty, incomplete install, which makes build.rs panic; pin the complete r28c.
+# * CMake generator: CMake's default generator on Windows is Visual Studio, which
+#   cannot configure the NDK toolchain. Scoped to the Android target so desktop
+#   builds keep their default generator.
+# * CC/CXX/AR: `ring` (via reqwest/rustls) is compiled by the `cc` crate for
+#   Android. Debug artifacts already carry a prebuilt ring, but any release build
+#   recompiles it, and without these the build stops with
+#   "failed to find tool. Is `clang` installed?".
+#
+# The linker below matches CC so rustc links with the NDK driver. No extra
+# rustflags are required for this crate.
+[env]
+ANDROID_NDK = "C:/Users/16412/AppData/Local/Android/Sdk/ndk/28.2.13676358"
+"CMAKE_GENERATOR_aarch64_linux_android" = "Ninja"
+CC_aarch64_linux_android = "C:/Users/16412/AppData/Local/Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24-clang.cmd"
+CXX_aarch64_linux_android = "C:/Users/16412/AppData/Local/Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24-clang++.cmd"
+AR_aarch64_linux_android = "C:/Users/16412/AppData/Local/Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-ar.exe"
+
+[target.aarch64-linux-android]
+linker = "C:/Users/16412/AppData/Local/Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24-clang.cmd"
