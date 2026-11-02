@@ -6,20 +6,31 @@
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use llama_cpp_2::context::params::LlamaContextParams;
+use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{LlamaChatMessage, LlamaChatTemplate, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_2::token::LlamaToken;
 
 use super::{LocalChunk, LocalParams, LocalTurn};
 
 pub struct Engine {
+    /// Cached KV state. Declared before `model` so it is dropped first.
+    session: Mutex<Option<Session>>,
     model: LlamaModel,
     context_size: u32,
     threads: u32,
+}
+
+struct Session {
+    ctx: LlamaContext<'static>,
+    /// Tokens already decoded into `ctx`, used to reuse the KV prefix.
+    tokens: Vec<LlamaToken>,
 }
 
 impl Engine {
@@ -37,12 +48,32 @@ impl Engine {
             .map_err(|e| format!("模型加载失败：{e}"))?;
         let trained = model.n_ctx_train();
         Ok(Self {
+            session: Mutex::new(None),
             model,
             // The floor only keeps `NonZeroU32` valid for stale or hand-edited
             // configs; the real minimum is enforced by `runtime::sanitize`.
             context_size: context_size.min(trained).max(512),
             threads: threads.max(1),
         })
+    }
+
+    /// Builds a context and erases its borrow. `LlamaContext` only holds a raw
+    /// pointer plus `PhantomData`, and `session` drops before `model`, so the
+    /// model always outlives the context.
+    fn new_session_context(&self, backend: &LlamaBackend) -> Result<LlamaContext<'static>, String> {
+        let ctx = self
+            .model
+            .new_context(
+                backend,
+                LlamaContextParams::default()
+                    .with_n_ctx(NonZeroU32::new(self.context_size))
+                    .with_n_threads(self.threads as i32)
+                    .with_n_threads_batch(self.threads as i32)
+                    .with_n_batch(self.context_size.min(512)),
+            )
+            .map_err(|e| format!("创建上下文失败：{e}"))?;
+        // SAFETY: see the note above; the pointer stays valid for `self`.
+        Ok(unsafe { std::mem::transmute::<LlamaContext<'_>, LlamaContext<'static>>(ctx) })
     }
 
     pub fn generate(
@@ -87,21 +118,36 @@ impl Engine {
         }
         let _ = prompt;
 
-        let mut ctx = self
-            .model
-            .new_context(
-                backend,
-                LlamaContextParams::default()
-                    .with_n_ctx(NonZeroU32::new(self.context_size))
-                    .with_n_threads(self.threads as i32)
-                    .with_n_threads_batch(self.threads as i32)
-                    .with_n_batch(self.context_size.min(512)),
-            )
-            .map_err(|e| format!("创建上下文失败：{e}"))?;
+        let mut guard = self
+            .session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut session = match guard.take() {
+            Some(session) => session,
+            None => Session {
+                ctx: self.new_session_context(backend)?,
+                tokens: Vec::new(),
+            },
+        };
+
+        // Reuse the cached KV prefix: only the divergent tail is re-decoded.
+        // At least one token must be decoded so the sampler has fresh logits.
+        let mut start = common_prefix_len(&session.tokens, &prompt_tokens);
+        if start >= prompt_tokens.len() {
+            start = prompt_tokens.len().saturating_sub(1);
+        }
+        if start < session.tokens.len() {
+            session
+                .ctx
+                .kv_cache_seq_rm(0, Some(start as u32), None)
+                .map_err(|e| format!("清理 KV 缓存失败：{e}"))?;
+        }
+        let reused = start;
+        let ctx = &mut session.ctx;
 
         let n_batch = self.context_size.min(512) as usize;
         let mut batch = LlamaBatch::new(n_batch, 1);
-        let mut pos = 0usize;
+        let mut pos = start;
         let prompt_started = std::time::Instant::now();
         while pos < prompt_tokens.len() {
             let end = (pos + n_batch).min(prompt_tokens.len());
@@ -122,6 +168,7 @@ impl Engine {
         let mut output = String::new();
         let mut pending: Vec<u8> = Vec::new();
         let mut generated = 0u32;
+        let mut generated_tokens: Vec<LlamaToken> = Vec::new();
         let mut next_pos = prompt_tokens.len() as i32;
         let decode_started = std::time::Instant::now();
         let mut length_limited = false;
@@ -130,7 +177,7 @@ impl Engine {
             if cancel.load(Ordering::SeqCst) {
                 return Err("已取消".to_string());
             }
-            let token = sampler.sample(&ctx, -1);
+            let token = sampler.sample(&*ctx, -1);
             if vocab.is_eog(token) {
                 break;
             }
@@ -162,6 +209,8 @@ impl Engine {
                 .map_err(|e| format!("写入 batch 失败：{e}"))?;
             ctx.decode(&mut batch)
                 .map_err(|e| format!("生成解码失败：{e}"))?;
+            // Only decoded tokens are part of the KV cache.
+            generated_tokens.push(token);
             next_pos += 1;
             // 防御：极端情况下 UTF-8 缓冲区残留，保证不会无限增长。
             if pending.len() > 64 {
@@ -173,12 +222,17 @@ impl Engine {
         // Phase F baseline: keep the three segments measurable so the KV sliding
         // window is only built when prefill actually dominates.
         log::info!(
-            "local perf: prompt_tokens={} prompt_ms={} output_tokens={} decode_ms={}",
+            "local perf: prompt_tokens={} prompt_ms={} reused={} output_tokens={} decode_ms={}",
             prompt_tokens.len(),
             prompt_ms,
+            reused,
             generated,
             decode_ms
         );
+
+        // Only tokens present in the KV cache may be remembered for reuse.
+        session.tokens = prompt_tokens.iter().chain(generated_tokens.iter()).copied().collect();
+        *guard = Some(session);
 
         sink(LocalChunk::Done {
             prompt_tokens: prompt_tokens.len() as u32,
@@ -186,6 +240,26 @@ impl Engine {
             reason: if length_limited { "length" } else { "stop" },
         });
         Ok(())
+    }
+}
+
+/// Length of the shared token prefix, i.e. the KV entries that can be reused.
+fn common_prefix_len(left: &[LlamaToken], right: &[LlamaToken]) -> usize {
+    left.iter().zip(right).take_while(|(a, b)| a == b).count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn common_prefix_stops_at_divergence() {
+        let cached: Vec<LlamaToken> = [11, 22, 33, 44].into_iter().map(LlamaToken).collect();
+        let next: Vec<LlamaToken> = [11, 22, 99, 77, 88].into_iter().map(LlamaToken).collect();
+        assert_eq!(common_prefix_len(&cached, &next), 2);
+        assert_eq!(common_prefix_len(&cached, &cached[..2]), 2);
+        assert_eq!(common_prefix_len(&[], &cached), 0);
+        assert_eq!(common_prefix_len(&cached, &cached), 4);
     }
 }
 
