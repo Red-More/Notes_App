@@ -37,8 +37,39 @@ function today(): string {
   }
 }
 
-/** 生成 system prompt；`skillsIndex` 为空时保留占位，M3 注入真实技能目录。 */
-export function buildSystemPrompt(skillsIndex = ''): string {
+/** localStorage key holding the user's rewritten system prompt. */
+const PROMPT_OVERRIDE_KEY = 'lifeos.systemPrompt.v1'
+
+export function hasPromptOverride(): boolean {
+  return getPromptOverride() !== ''
+}
+
+export function getPromptOverride(): string {
+  try {
+    return localStorage.getItem(PROMPT_OVERRIDE_KEY)?.trim() ?? ''
+  } catch {
+    return ''
+  }
+}
+
+export function savePromptOverride(text: string): void {
+  try {
+    localStorage.setItem(PROMPT_OVERRIDE_KEY, text)
+  } catch {
+    // Storage can be unavailable; the default prompt is still used.
+  }
+}
+
+export function clearPromptOverride(): void {
+  try {
+    localStorage.removeItem(PROMPT_OVERRIDE_KEY)
+  } catch {
+    // Ignore.
+  }
+}
+
+/** Built-in prompt; unchanged by user overrides. */
+export function defaultSystemPrompt(skillsIndex = ''): string {
   return [
     '你是 LifeOS 的离线个人助理，运行在用户手机本地。你帮用户记录生活、管理待办、查询笔记与联系人。',
     '',
@@ -53,4 +84,10 @@ export function buildSystemPrompt(skillsIndex = ''): string {
     '【技能索引】',
     skillsIndex.trim() === '' ? '（暂无已启用技能）' : skillsIndex,
   ].join('\n')
+}
+
+/** Effective prompt: the user's override when set, otherwise the built-in one. */
+export function buildSystemPrompt(skillsIndex = ''): string {
+  const override = getPromptOverride()
+  return override === '' ? defaultSystemPrompt(skillsIndex) : override
 }

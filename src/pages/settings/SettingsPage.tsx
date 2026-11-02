@@ -32,6 +32,7 @@ import { toast } from '../../toast'
 import { api } from '../../api'
 import AgentSettingsSection from './AgentSettingsSection'
 import LocalModelSection from './LocalModelSection'
+import PromptSection from './PromptSection'
 import McpSection from './McpSection'
 import MediaUsageSection from './MediaUsageSection'
 import PrivacySection from './PrivacySection'
@@ -252,6 +253,8 @@ export default function SettingsPage({ onBack }: Props) {
         <AgentSettingsSection reloadToken={modelsReloadToken} />
 
         <LocalModelSection onModelsChanged={() => setModelsReloadToken((n) => n + 1)} />
+
+        <PromptSection />
 
         <PrivacySection />
 
