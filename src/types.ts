@@ -352,13 +352,7 @@ export interface AgentSettings {
 
 /** Local llama.cpp lifecycle state; `unsupported` means the build lacks the engine. */
 export type LocalModelState =
-  | 'unsupported'
-  | 'unloaded'
-  | 'loading'
-  | 'ready'
-  | 'generating'
-  | 'suspended'
-  | 'failed'
+  'unsupported' | 'unloaded' | 'loading' | 'ready' | 'generating' | 'suspended' | 'failed'
 
 /** Runtime snapshot; never contains prompt text or model bytes. */
 export interface LocalModelStatus {
@@ -398,8 +392,12 @@ export interface LocalDeviceProfile {
   note: string
 }
 
+export type LocalThermalKind = 'cpu' | 'battery' | 'skin' | 'power'
+
 export interface LocalPowerSnapshot {
   thermalCelsius: number | null
+  thermalZone: string | null
+  thermalKind: LocalThermalKind | null
   batteryPercent: number | null
   charging: boolean | null
 }
@@ -428,12 +426,7 @@ export interface PrivacyLabel {
 
 /** Entity kinds supported by the EDM vault. */
 export type PrivacyEntityKind =
-  | 'person'
-  | 'organization'
-  | 'address'
-  | 'phone'
-  | 'email'
-  | 'account'
+  'person' | 'organization' | 'address' | 'phone' | 'email' | 'account'
 
 /** Vault row: the plaintext value is never returned to the WebView. */
 export interface PrivacyEntity {

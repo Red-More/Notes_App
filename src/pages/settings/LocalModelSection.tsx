@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
 import { localApi } from '../../api'
-import type { LocalModelConfig, LocalModelSnapshot } from '../../types'
+import type { LocalModelConfig, LocalModelSnapshot, LocalPowerSnapshot } from '../../types'
 import { toast } from '../../toast'
 import { friendlyError } from '../../utils'
 import { ConfirmDialog } from '../../components/ui'
@@ -16,9 +16,28 @@ const STATE_TEXT: Record<string, string> = {
   failed: '加载失败',
 }
 
+const THERMAL_KIND_TEXT: Record<string, string> = {
+  cpu: 'CPU',
+  battery: '电池',
+  skin: '外壳',
+  power: '电源',
+}
+
 function mb(bytes: number | null | undefined): string {
   if (!bytes) return '—'
   return `${Math.round(bytes / 1024 / 1024)} MB`
+}
+
+function thermalText(power: LocalPowerSnapshot | undefined): string {
+  if (!power || power.thermalCelsius == null) return ''
+  const kind = power.thermalKind ? (THERMAL_KIND_TEXT[power.thermalKind] ?? '温度') : '温度'
+  const zone = power.thermalZone ? `（${power.thermalZone}）` : ''
+  return ` · 最高 ${kind}${zone} ${power.thermalCelsius.toFixed(1)}°C`
+}
+
+/** ~112 KiB per 1K tokens for a 0.6B-class model (28 layers, 8 KV heads, f16). */
+function kvEstimateMb(context: number): number {
+  return Math.round((context * 112) / 1024)
 }
 
 function tierText(tier: string): string {
@@ -58,17 +77,18 @@ export default function LocalModelSection({ onModelsChanged }: { onModelsChanged
       .catch((e) => console.error('读取本地模型状态失败', e))
   }, [])
 
-  // Loading and generation are short transitions; poll only while active.
-  const active =
-    snapshot?.status.state === 'loading' || snapshot?.status.state === 'generating'
+  // Keep the gate fresh even when idle; polling faster during loading/generation.
+  const active = snapshot?.status.state === 'loading' || snapshot?.status.state === 'generating'
   useEffect(() => {
-    if (!active) return
-    const timer = window.setInterval(() => {
-      localApi
-        .status()
-        .then((next) => setSnapshot(next))
-        .catch(() => {})
-    }, 1500)
+    const timer = window.setInterval(
+      () => {
+        localApi
+          .status()
+          .then((next) => setSnapshot(next))
+          .catch(() => {})
+      },
+      active ? 1500 : 3000,
+    )
     return () => window.clearInterval(timer)
   }, [active])
 
@@ -98,7 +118,10 @@ export default function LocalModelSection({ onModelsChanged }: { onModelsChanged
     if (!config) return
     const next = { ...config, enabled }
     setConfig(next)
-    void run(() => localApi.configSet(next).then(() => undefined), enabled ? '已启用' : '已关闭本地模型')
+    void run(
+      () => localApi.configSet(next).then(() => undefined),
+      enabled ? '已启用' : '已关闭本地模型',
+    )
   }
 
   const toggleKeepAlive = (keepAlive: boolean) => {
@@ -148,6 +171,7 @@ export default function LocalModelSection({ onModelsChanged }: { onModelsChanged
   const status = snapshot?.status
   const device = snapshot?.device
   const gate = snapshot?.gate ?? 'allow'
+  const effectiveContext = config?.contextSize ?? 0
 
   return (
     <>
@@ -159,8 +183,8 @@ export default function LocalModelSection({ onModelsChanged }: { onModelsChanged
 
       {!supported && (
         <p className="settings-note">
-          当前构建未包含本地推理引擎（未启用 local-llm feature）；其余设置仍可保存，
-          换用启用该 feature 的构建后即可加载。
+          当前构建未包含本地推理引擎（未启用 local-llm feature）；其余设置仍可保存， 换用启用该
+          feature 的构建后即可加载。
         </p>
       )}
 
@@ -176,7 +200,7 @@ export default function LocalModelSection({ onModelsChanged }: { onModelsChanged
               <div className="model-meta">
                 {status.model ? `体积 ${mb(status.modelBytes)} · ` : ''}
                 线程 {status.threads || device?.recommendedThreads || 0} · 上下文{' '}
-                {status.contextSize || device?.recommendedContext || 0}
+                {status.contextSize ? status.contextSize : '自动'}
               </div>
               {status.error && <div className="model-meta">{status.error}</div>}
               <div className="model-meta">
@@ -186,10 +210,8 @@ export default function LocalModelSection({ onModelsChanged }: { onModelsChanged
               </div>
               {device && <div className="model-meta">{device.note}</div>}
               <div className="model-meta">
-                热/电量门控：{gate === 'allow' ? '允许运行' : `已暂停（${gate}）`}
-                {snapshot?.power.thermalCelsius
-                  ? ` · ${snapshot.power.thermalCelsius.toFixed(1)}°C`
-                  : ''}
+                热/电量门控：{gate === 'allow' ? '允许运行' : `已暂停 · ${gate}`}
+                {thermalText(snapshot?.power)}
                 {snapshot?.power.batteryPercent != null
                   ? ` · 电量 ${snapshot.power.batteryPercent}%`
                   : ''}
@@ -225,7 +247,10 @@ export default function LocalModelSection({ onModelsChanged }: { onModelsChanged
           </p>
         )}
         {snapshot?.files.map((file) => (
-          <div key={file.name} className={`model-row ${config?.file === file.name ? 'active' : ''}`}>
+          <div
+            key={file.name}
+            className={`model-row ${config?.file === file.name ? 'active' : ''}`}
+          >
             <div className="model-info">
               <div className="model-title">
                 {file.name}
@@ -261,7 +286,12 @@ export default function LocalModelSection({ onModelsChanged }: { onModelsChanged
             </div>
           </div>
         ))}
-        <button type="button" className="restore-default" disabled={busy} onClick={() => void importFile()}>
+        <button
+          type="button"
+          className="restore-default"
+          disabled={busy}
+          onClick={() => void importFile()}
+        >
           导入 GGUF 文件
         </button>
         <p className="settings-note">
@@ -284,7 +314,9 @@ export default function LocalModelSection({ onModelsChanged }: { onModelsChanged
                 value={config.threads || ''}
                 placeholder={`推荐 ${device?.recommendedThreads ?? 2}`}
                 onChange={(e) =>
-                  patchConfig({ threads: e.target.value.trim() === '' ? 0 : Number(e.target.value) })
+                  patchConfig({
+                    threads: e.target.value.trim() === '' ? 0 : Number(e.target.value),
+                  })
                 }
               />
             </div>
@@ -294,10 +326,9 @@ export default function LocalModelSection({ onModelsChanged }: { onModelsChanged
                 className="param-number wide"
                 type="number"
                 min={2048}
-                max={8192}
                 step={512}
                 value={config.contextSize || ''}
-                placeholder={`推荐 ${device?.recommendedContext ?? 2048}`}
+                placeholder={`推荐 ${device?.recommendedContext ?? 4096}，留空自动`}
                 onChange={(e) =>
                   patchConfig({
                     contextSize: e.target.value.trim() === '' ? 0 : Number(e.target.value),
@@ -324,7 +355,15 @@ export default function LocalModelSection({ onModelsChanged }: { onModelsChanged
             >
               保存参数
             </button>
-            <p className="settings-note">留空的线程/上下文按设备推荐值使用；参数在下一次加载时生效。</p>
+            <p className="settings-note">
+              留空的线程按设备推荐值使用；上下文留空则交给 llama.cpp 决定；参数在下一次加载时生效。
+              {effectiveContext === 0
+                ? '上下文留空时交给 llama.cpp 按模型训练窗口决定，内存占用可能较大。'
+                : `当前窗口约占用 ${kvEstimateMb(effectiveContext)} MB 内存（按 0.6B 级模型估算，实际随层数与 KV 头变化）。`}
+              {effectiveContext > 8192
+                ? ` 注意：${effectiveContext} 窗口很可能超出中低端设备的可用内存，加载会失败；此设置不会被禁止，请自行确认设备余量。`
+                : ''}
+            </p>
           </div>
 
           <div className="form-field">
