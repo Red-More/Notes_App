@@ -63,14 +63,7 @@ pub async fn run(app: AppHandle, job_id: i64) {
     let entry = match entry {
         Ok(entry) => entry,
         Err(e) => {
-            finish(
-                &app,
-                job_id,
-                jobs::JobStatus::Failed,
-                None,
-                None,
-                Some(&e.to_string()),
-            );
+            finish_with_cost(&app, job_id, jobs::Completion::failed(&e.to_string()));
             return;
         }
     };
@@ -78,14 +71,7 @@ pub async fn run(app: AppHandle, job_id: i64) {
     let job_params = match job_params {
         Ok(value) => value,
         Err(e) => {
-            finish(
-                &app,
-                job_id,
-                jobs::JobStatus::Failed,
-                None,
-                None,
-                Some(&e.to_string()),
-            );
+            finish_with_cost(&app, job_id, jobs::Completion::failed(&e.to_string()));
             return;
         }
     };
@@ -108,24 +94,18 @@ pub async fn run(app: AppHandle, job_id: i64) {
         match app.state::<AgentState>().secrets.get(&entry.id) {
             Ok(Some(key)) if !key.trim().is_empty() => key,
             Ok(_) => {
-                finish(
+                finish_with_cost(
                     &app,
                     job_id,
-                    jobs::JobStatus::Failed,
-                    None,
-                    None,
-                    Some("尚未配置该模型的 API Key"),
+                    jobs::Completion::failed("尚未配置该模型的 API Key"),
                 );
                 return;
             }
             Err(e) => {
-                finish(
+                finish_with_cost(
                     &app,
                     job_id,
-                    jobs::JobStatus::Failed,
-                    None,
-                    None,
-                    Some(&format!("密钥存储不可用：{e}")),
+                    jobs::Completion::failed(&format!("密钥存储不可用：{e}")),
                 );
                 return;
             }
@@ -133,7 +113,17 @@ pub async fn run(app: AppHandle, job_id: i64) {
     };
 
     let cancel = app.state::<MediaState>().register_cancel(job_id);
-    let outcome = execute(&app, job_id, kind, &entry, &params, &job_params, &key, &cancel).await;
+    let outcome = execute(
+        &app,
+        job_id,
+        kind,
+        &entry,
+        &params,
+        &job_params,
+        &key,
+        &cancel,
+    )
+    .await;
     app.state::<MediaState>().release(job_id);
     // The cancel command already wrote the terminal state; do not overwrite it.
     if cancel.load(Ordering::SeqCst) {
@@ -145,12 +135,7 @@ pub async fn run(app: AppHandle, job_id: i64) {
             finish_with_cost(
                 &app,
                 job_id,
-                jobs::JobStatus::Succeeded,
-                None,
-                Some(&text),
-                None,
-                Some(units),
-                Some(cost),
+                jobs::Completion::succeeded(None, Some(&text), units, cost),
             )
         }
         Ok(Outcome::Asset { bytes, mime, meta }) => {
@@ -166,42 +151,18 @@ pub async fn run(app: AppHandle, job_id: i64) {
                     finish_with_cost(
                         &app,
                         job_id,
-                        jobs::JobStatus::Succeeded,
-                        Some(asset.id),
-                        None,
-                        None,
-                        Some(units),
-                        Some(cost),
+                        jobs::Completion::succeeded(Some(asset.id), None, units, cost),
                     )
                 }
-                Err(e) => finish(
-                    &app,
-                    job_id,
-                    jobs::JobStatus::Failed,
-                    None,
-                    None,
-                    Some(&e.to_string()),
-                ),
+                Err(e) => finish_with_cost(&app, job_id, jobs::Completion::failed(&e.to_string())),
             }
         }
-        Err(message) => finish(
-            &app,
-            job_id,
-            jobs::JobStatus::Failed,
-            None,
-            None,
-            Some(&message),
-        ),
+        Err(message) => finish_with_cost(&app, job_id, jobs::Completion::failed(&message)),
     }
 }
 
 /// Billable units and USD cost for one successful job.
-fn job_usage(
-    app: &AppHandle,
-    kind: jobs::JobKind,
-    params: &LlmParams,
-    job: &Value,
-) -> (f64, f64) {
+fn job_usage(app: &AppHandle, kind: jobs::JobKind, params: &LlmParams, job: &Value) -> (f64, f64) {
     match kind {
         jobs::JobKind::Image => {
             let units = 1.0;
@@ -239,6 +200,9 @@ fn job_usage(
     }
 }
 
+/// Every kind needs the same run context; a wrapper struct would only move the
+/// argument list elsewhere, so the flat signature is kept.
+#[allow(clippy::too_many_arguments)]
 async fn execute(
     app: &AppHandle,
     job_id: i64,
@@ -651,8 +615,7 @@ async fn video(
     }
     let submit_url = model_store::endpoint(entry);
     let payload = post_json(app, entry, params, key, &body, cancel).await?;
-    let task_id =
-        video_task_id(&payload).ok_or_else(|| "视频提交响应缺少任务 id".to_string())?;
+    let task_id = video_task_id(&payload).ok_or_else(|| "视频提交响应缺少任务 id".to_string())?;
     let poll_url = format!("{}/{}", submit_url.trim_end_matches('/'), task_id);
 
     for _ in 0..VIDEO_POLL_LIMIT {
@@ -671,7 +634,10 @@ async fn video(
             update_progress(app, job_id, percent);
         }
         let state = video_status(&status);
-        if matches!(state.as_str(), "completed" | "succeeded" | "success" | "done") {
+        if matches!(
+            state.as_str(),
+            "completed" | "succeeded" | "success" | "done"
+        ) {
             if let Some(url) = video_url(&status) {
                 // Signed media URLs are foreign hosts: never forward the API key.
                 let bytes = get_bytes(app, &url, None).await?;
@@ -716,11 +682,7 @@ async fn get_bytes(app: &AppHandle, url: &str, key: Option<&str>) -> Result<Vec<
     Ok(bytes.to_vec())
 }
 
-async fn get(
-    app: &AppHandle,
-    url: &str,
-    key: Option<&str>,
-) -> Result<reqwest::Response, String> {
+async fn get(app: &AppHandle, url: &str, key: Option<&str>) -> Result<reqwest::Response, String> {
     let state = app.state::<AgentState>();
     let Some(client) = &state.client else {
         return Err("HTTP 客户端初始化失败，请重启应用".to_string());
@@ -788,9 +750,11 @@ fn video_url(payload: &Value) -> Option<String> {
 }
 
 fn video_progress(payload: &Value) -> Option<u32> {
-    let raw = payload
-        .get("progress")
-        .or_else(|| payload.get("output").and_then(|output| output.get("progress")))?;
+    let raw = payload.get("progress").or_else(|| {
+        payload
+            .get("output")
+            .and_then(|output| output.get("progress"))
+    })?;
     if let Some(percent) = raw.as_u64() {
         return Some(percent.min(100) as u32);
     }
@@ -865,31 +829,11 @@ async fn post(
     .await
 }
 
-fn finish(
-    app: &AppHandle,
-    job_id: i64,
-    status: jobs::JobStatus,
-    asset_id: Option<i64>,
-    result: Option<&str>,
-    error: Option<&str>,
-) {
-    finish_with_cost(app, job_id, status, asset_id, result, error, None, None);
-}
-
-fn finish_with_cost(
-    app: &AppHandle,
-    job_id: i64,
-    status: jobs::JobStatus,
-    asset_id: Option<i64>,
-    result: Option<&str>,
-    error: Option<&str>,
-    units: Option<f64>,
-    cost_usd: Option<f64>,
-) {
+fn finish_with_cost(app: &AppHandle, job_id: i64, completion: jobs::Completion<'_>) {
     let event = {
         let vfs = app.state::<VfsState>();
         let db = vfs.0.lock().unwrap();
-        match jobs::finish(db.conn(), job_id, status, asset_id, result, error, units, cost_usd) {
+        match jobs::finish(db.conn(), job_id, completion) {
             Ok(job) => Some(jobs::JobEvent::from(&job)),
             Err(e) => {
                 // A cancelled job is already terminal; nothing to persist.
@@ -1036,7 +980,8 @@ mod tests {
             video_url(&poll).as_deref(),
             Some("https://cdn.example/v.mp4")
         );
-        let nested = json!({"output": {"status": "in_progress", "url": "https://cdn.example/w.mp4"}});
+        let nested =
+            json!({"output": {"status": "in_progress", "url": "https://cdn.example/w.mp4"}});
         assert_eq!(video_status(&nested), "in_progress");
         assert_eq!(
             video_url(&nested).as_deref(),

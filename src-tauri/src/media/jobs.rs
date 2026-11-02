@@ -170,7 +170,8 @@ struct RawJob {
     updated_at: String,
 }
 
-const SELECT_JOB: &str = "SELECT id, kind, model_entry, status, progress, asset_id, error, result, \
+const SELECT_JOB: &str =
+    "SELECT id, kind, model_entry, status, progress, asset_id, error, result, \
                           units, cost_usd, created_at, updated_at FROM media_jobs";
 
 pub fn submit(conn: &Connection, input: NewJob) -> Result<Job, ToolError> {
@@ -215,9 +216,7 @@ pub fn get(conn: &Connection, id: i64) -> Result<Job, ToolError> {
 
 pub fn list(conn: &Connection, limit: i64) -> Result<Vec<Job>, ToolError> {
     let limit = limit.clamp(1, MAX_LIST);
-    let mut stmt = conn.prepare(&format!(
-        "{SELECT_JOB} ORDER BY id DESC LIMIT ?1"
-    ))?;
+    let mut stmt = conn.prepare(&format!("{SELECT_JOB} ORDER BY id DESC LIMIT ?1"))?;
     let rows = stmt.query_map(params![limit], row_to_raw)?;
     let mut jobs = Vec::new();
     for row in rows {
@@ -256,22 +255,56 @@ pub fn set_progress(conn: &Connection, id: i64, percent: u32) -> Result<Job, Too
     get(conn, id)
 }
 
+/// Terminal state written when a job finishes. The fields always travel
+/// together, so they are passed as one value rather than eight arguments.
+#[derive(Debug, Clone, Copy)]
+pub struct Completion<'a> {
+    pub status: JobStatus,
+    pub asset_id: Option<i64>,
+    pub result: Option<&'a str>,
+    pub error: Option<&'a str>,
+    pub units: Option<f64>,
+    pub cost_usd: Option<f64>,
+}
+
+impl<'a> Completion<'a> {
+    /// Successful job: optional asset or text result plus billable usage.
+    pub fn succeeded(
+        asset_id: Option<i64>,
+        result: Option<&'a str>,
+        units: f64,
+        cost_usd: f64,
+    ) -> Self {
+        Self {
+            status: JobStatus::Succeeded,
+            asset_id,
+            result,
+            error: None,
+            units: Some(units),
+            cost_usd: Some(cost_usd),
+        }
+    }
+
+    /// Failed job with a user-facing message and no billing data.
+    pub fn failed(error: &'a str) -> Self {
+        Self {
+            status: JobStatus::Failed,
+            asset_id: None,
+            result: None,
+            error: Some(error),
+            units: None,
+            cost_usd: None,
+        }
+    }
+}
+
 /// Finish a running/pending job with a terminal status.
-pub fn finish(
-    conn: &Connection,
-    id: i64,
-    status: JobStatus,
-    asset_id: Option<i64>,
-    result: Option<&str>,
-    error: Option<&str>,
-    units: Option<f64>,
-    cost_usd: Option<f64>,
-) -> Result<Job, ToolError> {
+pub fn finish(conn: &Connection, id: i64, completion: Completion<'_>) -> Result<Job, ToolError> {
     let job = get(conn, id)?;
     if job.status.is_terminal() {
         return Err(ToolError::invalid("作业已结束"));
     }
-    if !status.is_terminal() {
+    if !completion.status.is_terminal() {
         return Err(ToolError::invalid("必须使用终态结束作业"));
     }
     conn.execute(
@@ -282,7 +315,15 @@ pub fn finish(
              units = ?6, cost_usd = ?7,
              updated_at = datetime('now','localtime')
          WHERE id = ?1",
-        params![id, status.as_str(), asset_id, result, error, units, cost_usd],
+        params![
+            id,
+            completion.status.as_str(),
+            completion.asset_id,
+            completion.result,
+            completion.error,
+            completion.units,
+            completion.cost_usd
+        ],
     )?;
     get(conn, id)
 }

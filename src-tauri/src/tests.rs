@@ -900,12 +900,14 @@ fn media_jobs_persist_cancel_and_recover() {
     let done = jobs::finish(
         vfs.conn(),
         third.id,
-        jobs::JobStatus::Succeeded,
-        None,
-        None,
-        None,
-        Some(1.0),
-        Some(0.04),
+        jobs::Completion {
+            status: jobs::JobStatus::Succeeded,
+            asset_id: None,
+            result: None,
+            error: None,
+            units: Some(1.0),
+            cost_usd: Some(0.04),
+        },
     )
     .unwrap();
     assert_eq!(done.status, jobs::JobStatus::Succeeded);
