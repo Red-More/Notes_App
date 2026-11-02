@@ -12,7 +12,13 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use super::gating::{self, GateDecision, GatePolicy};
-use super::{LocalChunk, LocalModelFile, LocalParams, LocalState, LocalStatus, LocalTurn};
+use super::{LocalModelFile, LocalState, LocalStatus};
+use crate::agent::inference::{
+    EngineError, EngineInput, EngineKind, EngineMetrics, GenerateParams, InferenceEngine,
+    LoadOptions, ModelAsset,
+};
+#[cfg(feature = "local-llm")]
+use crate::agent::inference::EngineTurn;
 use crate::vfs::error::ToolError;
 
 const KEY_LOCAL: &str = "agent.local.v1";
@@ -201,6 +207,8 @@ struct Inner {
     loading: AtomicBool,
     busy: AtomicBool,
     current_cancel: Mutex<Option<Arc<AtomicBool>>>,
+    /// 最近一轮的统一指标，供状态页读取。
+    last_metrics: Mutex<Option<EngineMetrics>>,
     /// 热压暂停后保持到温度回落到恢复阈值，避免在边界反复启停。
     gate_latched: AtomicBool,
     #[cfg(feature = "local-llm")]
@@ -212,7 +220,7 @@ impl Runtime {
         if let Err(e) = std::fs::create_dir_all(&models_dir) {
             log::warn!("local model directory create failed: {e}");
         }
-        let supported = cfg!(feature = "local-llm");
+        let supported = EngineKind::LlamaCpp.available();
         Self {
             inner: Arc::new(Inner {
                 models_dir,
@@ -222,6 +230,7 @@ impl Runtime {
                 loading: AtomicBool::new(false),
                 busy: AtomicBool::new(false),
                 current_cancel: Mutex::new(None),
+                last_metrics: Mutex::new(None),
                 gate_latched: AtomicBool::new(false),
                 #[cfg(feature = "local-llm")]
                 backend: std::sync::OnceLock::new(),
@@ -230,7 +239,7 @@ impl Runtime {
     }
 
     pub fn supported(&self) -> bool {
-        cfg!(feature = "local-llm")
+        EngineKind::LlamaCpp.available()
     }
 
     pub fn models_dir(&self) -> &Path {
@@ -325,6 +334,7 @@ impl Runtime {
                     Ok(())
                 }
                 Err(message) => {
+                    let message = message.to_string();
                     self.publish(
                         LocalState::Failed,
                         0,
@@ -382,23 +392,24 @@ impl Runtime {
     /// 阻塞生成；调用方负责把 chunk 转发到异步通道。
     pub fn generate_blocking(
         &self,
-        turns: &[LocalTurn],
-        params: &LocalParams,
+        input: EngineInput,
+        params: &GenerateParams,
         cancel: &Arc<AtomicBool>,
-        sink: &mut dyn FnMut(LocalChunk),
-    ) -> Result<(), ToolError> {
+        sink: &mut dyn FnMut(&str),
+    ) -> Result<EngineMetrics, EngineError> {
         if !self.supported() {
-            return Err(ToolError::invalid(
-                "当前构建未启用本地模型（编译时未包含 local-llm）",
-            ));
+            return Err(EngineError::Unsupported {
+                message: "当前构建未启用本地模型（编译时未包含 local-llm）".to_string(),
+            });
         }
-        self.require_gate()?;
+        self.require_gate()
+            .map_err(|e| EngineError::invalid(e.to_string()))?;
         // Resolve the backend before publishing state so an init failure cannot
         // leave the status stuck in `Generating`.
         #[cfg(feature = "local-llm")]
-        let backend = self.backend()?;
+        let backend = self.backend().map_err(|e| EngineError::invalid(e.to_string()))?;
         if self.inner.busy.swap(true, Ordering::SeqCst) {
-            return Err(ToolError::invalid("本地模型正忙，请稍后再试"));
+            return Err(EngineError::Busy);
         }
         let _guard = FlagGuard(&self.inner.busy);
         *self.inner.current_cancel.lock().unwrap() = Some(cancel.clone());
@@ -421,22 +432,35 @@ impl Runtime {
 
         #[cfg(feature = "local-llm")]
         let result = {
+            let turns: Vec<EngineTurn> = match input {
+                EngineInput::Turns(turns) => turns,
+                EngineInput::Prompt(_) => {
+                    return Err(EngineError::invalid(
+                        "llama.cpp 引擎需要结构化消息，而不是预渲染 prompt",
+                    ))
+                }
+            };
             let loaded = self.inner.loaded.lock().unwrap();
             match loaded.as_ref() {
-                Some(engine) => engine.generate(backend, turns, params, cancel, sink),
-                None => Err("本地模型未加载，请先在设置页加载".to_string()),
+                Some(engine) => engine.generate(backend, &turns, params, cancel, sink),
+                None => Err(EngineError::invalid("本地模型未加载，请先在设置页加载")),
             }
         };
 
         #[cfg(not(feature = "local-llm"))]
-        let result: Result<(), String> = {
-            let _ = (turns, params, cancel, sink);
-            Err("当前构建未启用本地模型".to_string())
+        let result: Result<EngineMetrics, EngineError> = {
+            let _ = (input, params, cancel, sink);
+            Err(EngineError::Unsupported {
+                message: "当前构建未启用本地模型".to_string(),
+            })
         };
 
+        if let Ok(metrics) = &result {
+            *self.inner.last_metrics.lock().unwrap() = Some(metrics.clone());
+        }
         self.inner.current_cancel.lock().unwrap().take();
         self.publish(LocalState::Ready, bytes, threads, context, model, None);
-        result.map_err(ToolError::invalid)
+        result
     }
 
     /// 读取实时功耗并更新热压锁存；设置页和加载路径共用同一状态。
@@ -469,9 +493,13 @@ impl Runtime {
         (status.threads, status.context_size)
     }
 
-    fn cancel_current(&self) {
-        if let Some(flag) = self.inner.current_cancel.lock().unwrap().take() {
-            flag.store(true, Ordering::SeqCst);
+    fn cancel_current(&self) -> bool {
+        match self.inner.current_cancel.lock().unwrap().take() {
+            Some(flag) => {
+                flag.store(true, Ordering::SeqCst);
+                true
+            }
+            None => false,
         }
     }
 
@@ -504,6 +532,59 @@ impl Runtime {
         status.threads = threads;
         status.context_size = context;
         status.error = error;
+    }
+}
+
+/// llama.cpp 适配器：对外只暴露统一 trait，业务层不接触 `Engine` 类型。
+impl InferenceEngine for Runtime {
+    fn kind(&self) -> EngineKind {
+        EngineKind::LlamaCpp
+    }
+
+    fn load(&self, model: &ModelAsset, options: &LoadOptions) -> Result<(), EngineError> {
+        let file = match model {
+            ModelAsset::SingleFile { path } => path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            ModelAsset::Bundle { .. } => {
+                return Err(EngineError::invalid("llama.cpp 需要单个 .gguf 文件"))
+            }
+        };
+        if file.trim().is_empty() {
+            return Err(EngineError::invalid("请先选择要加载的 GGUF 文件"));
+        }
+        let config = LocalConfig {
+            file,
+            threads: options.threads,
+            context_size: options.context_size,
+            ..LocalConfig::default()
+        };
+        self.load_blocking(config)
+            .map_err(|e| EngineError::invalid(e.to_string()))
+    }
+
+    fn generate(
+        &self,
+        input: EngineInput,
+        params: &GenerateParams,
+        cancel: &Arc<AtomicBool>,
+        mut sink: Box<dyn FnMut(&str) + Send>,
+    ) -> Result<EngineMetrics, EngineError> {
+        self.generate_blocking(input, params, cancel, &mut *sink)
+    }
+
+    fn cancel(&self) -> bool {
+        self.cancel_current()
+    }
+
+    fn unload(&self) -> Result<(), EngineError> {
+        Runtime::unload(self);
+        Ok(())
+    }
+
+    fn metrics(&self) -> Option<EngineMetrics> {
+        self.inner.last_metrics.lock().unwrap().clone()
     }
 }
 

@@ -17,7 +17,9 @@ use llama_cpp_2::model::{LlamaChatMessage, LlamaChatTemplate, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
 
-use super::{LocalChunk, LocalParams, LocalTurn};
+use crate::agent::inference::{
+    EngineError, EngineMetrics, EngineTurn, GenerateParams, StopReason,
+};
 
 pub struct Engine {
     /// Cached KV state. Declared before `model` so it is dropped first.
@@ -39,13 +41,13 @@ impl Engine {
         path: &Path,
         context_size: u32,
         threads: u32,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, EngineError> {
         let params = LlamaModelParams::default()
             .with_n_gpu_layers(0)
             .with_use_mmap(true)
             .with_use_mlock(false);
         let model = LlamaModel::load_from_file(backend, path, &params)
-            .map_err(|e| format!("模型加载失败：{e}"))?;
+            .map_err(|e| EngineError::engine(format!("模型加载失败：{e}")))?;
         let trained = model.n_ctx_train();
         Ok(Self {
             session: Mutex::new(None),
@@ -66,7 +68,10 @@ impl Engine {
     /// Builds a context and erases its borrow. `LlamaContext` only holds a raw
     /// pointer plus `PhantomData`, and `session` drops before `model`, so the
     /// model always outlives the context.
-    fn new_session_context(&self, backend: &LlamaBackend) -> Result<LlamaContext<'static>, String> {
+    fn new_session_context(
+        &self,
+        backend: &LlamaBackend,
+    ) -> Result<LlamaContext<'static>, EngineError> {
         // `None` keeps llama.cpp's own default (the model's training window);
         // `0` is our sentinel for "left empty by the user".
         let n_ctx = NonZeroU32::new(self.context_size);
@@ -80,7 +85,7 @@ impl Engine {
                     .with_n_threads_batch(self.threads as i32)
                     .with_n_batch(512),
             )
-            .map_err(|e| format!("创建上下文失败：{e}"))?;
+            .map_err(|e| EngineError::engine(format!("创建上下文失败：{e}")))?;
         // SAFETY: see the note above; the pointer stays valid for `self`.
         Ok(unsafe { std::mem::transmute::<LlamaContext<'_>, LlamaContext<'static>>(ctx) })
     }
@@ -88,18 +93,18 @@ impl Engine {
     pub fn generate(
         &self,
         backend: &LlamaBackend,
-        turns: &[LocalTurn],
-        params: &LocalParams,
+        turns: &[EngineTurn],
+        params: &GenerateParams,
         cancel: &AtomicBool,
-        sink: &mut dyn FnMut(LocalChunk),
-    ) -> Result<(), String> {
+        sink: &mut dyn FnMut(&str),
+    ) -> Result<EngineMetrics, EngineError> {
         if turns.is_empty() {
-            return Err("没有可发送的消息".to_string());
+            return Err(EngineError::invalid("没有可发送的消息"));
         }
         let template = self
             .model
             .chat_template(None)
-            .map_err(|e| format!("模型缺少聊天模板：{e}"))?;
+            .map_err(|e| EngineError::engine(format!("模型缺少聊天模板：{e}")))?;
         let vocab = self.model.vocab();
 
         let mut guard = self
@@ -123,7 +128,7 @@ impl Engine {
         let prompt_token_budget = super::budget::prompt_budget(ctx_window, output_budget);
 
         // 超预算时从最旧的非 system 消息开始丢弃，system 与最后一轮始终保留。
-        let mut kept: Vec<&LocalTurn> = turns.iter().collect();
+        let mut kept: Vec<&EngineTurn> = turns.iter().collect();
         let (prompt_tokens, prompt) = loop {
             let prompt = render_prompt(&self.model, &template, &kept)?;
             let tokens = vocab.tokenize(prompt.as_bytes(), true, true);
@@ -138,7 +143,9 @@ impl Engine {
             }
         };
         if prompt_tokens.len() > ctx_window {
-            return Err("输入超出本地模型上下文，请缩短问题或调大上下文".to_string());
+            return Err(EngineError::invalid(
+                "输入超出本地模型上下文，请缩短问题或调大上下文",
+            ));
         }
         let _ = prompt;
 
@@ -152,7 +159,7 @@ impl Engine {
             session
                 .ctx
                 .kv_cache_seq_rm(0, Some(start as u32), None)
-                .map_err(|e| format!("清理 KV 缓存失败：{e}"))?;
+                .map_err(|e| EngineError::engine(format!("清理 KV 缓存失败：{e}")))?;
         }
         let reused = start;
         let ctx = &mut session.ctx;
@@ -168,10 +175,10 @@ impl Engine {
                 let last = index + 1 == prompt_tokens.len();
                 batch
                     .add(prompt_tokens[index], index as i32, &[0], last)
-                    .map_err(|e| format!("写入 batch 失败：{e}"))?;
+                    .map_err(|e| EngineError::engine(format!("写入 batch 失败：{e}")))?;
             }
             ctx.decode(&mut batch)
-                .map_err(|e| format!("提示词解码失败：{e}"))?;
+                .map_err(|e| EngineError::engine(format!("提示词解码失败：{e}")))?;
             pos = end;
         }
         let prompt_ms = prompt_started.elapsed().as_millis();
@@ -183,11 +190,12 @@ impl Engine {
         let mut generated_tokens: Vec<LlamaToken> = Vec::new();
         let mut next_pos = prompt_tokens.len() as i32;
         let decode_started = std::time::Instant::now();
+        let mut first_chunk_ms = 0u64;
         let mut length_limited = false;
 
         loop {
             if cancel.load(Ordering::SeqCst) {
-                return Err("已取消".to_string());
+                return Err(EngineError::Cancelled);
             }
             let token = sampler.sample(&*ctx, -1);
             if vocab.is_eog(token) {
@@ -198,12 +206,16 @@ impl Engine {
             if !text.is_empty() {
                 if let Some(cut) = stop_prefix(&output, &text, &params.stop) {
                     if cut > 0 {
-                        sink(LocalChunk::Token(text[..cut].to_string()));
+                        sink(&text[..cut]);
                     }
                     break;
                 }
                 output.push_str(&text);
-                sink(LocalChunk::Token(text));
+                if first_chunk_ms == 0 {
+                    // TTFT: prefill plus the first decoded token, from request start.
+                    first_chunk_ms = prompt_started.elapsed().as_millis() as u64;
+                }
+                sink(&text);
             }
 
             generated += 1;
@@ -218,9 +230,9 @@ impl Engine {
             batch.clear();
             batch
                 .add(token, next_pos, &[0], true)
-                .map_err(|e| format!("写入 batch 失败：{e}"))?;
+                .map_err(|e| EngineError::engine(format!("写入 batch 失败：{e}")))?;
             ctx.decode(&mut batch)
-                .map_err(|e| format!("生成解码失败：{e}"))?;
+                .map_err(|e| EngineError::engine(format!("生成解码失败：{e}")))?;
             // Only decoded tokens are part of the KV cache.
             generated_tokens.push(token);
             next_pos += 1;
@@ -230,7 +242,7 @@ impl Engine {
             }
         }
 
-        let decode_ms = decode_started.elapsed().as_millis();
+        let decode_ms = decode_started.elapsed().as_millis() as u64;
         // Phase F baseline: keep the three segments measurable so the KV sliding
         // window is only built when prefill actually dominates.
         log::info!(
@@ -250,12 +262,27 @@ impl Engine {
             .collect();
         *guard = Some(session);
 
-        sink(LocalChunk::Done {
+        let decode_tok_s = if decode_ms > 0 {
+            generated as f64 / (decode_ms as f64 / 1000.0)
+        } else {
+            0.0
+        };
+        Ok(EngineMetrics {
             prompt_tokens: prompt_tokens.len() as u32,
             output_tokens: generated,
-            reason: if length_limited { "length" } else { "stop" },
-        });
-        Ok(())
+            prefill_ms: prompt_ms as u64,
+            decode_ms,
+            sample_ms: 0,
+            first_chunk_ms,
+            decode_tok_s,
+            stop_reason: if length_limited {
+                StopReason::Length
+            } else {
+                StopReason::Stop
+            }
+            .as_str()
+            .to_string(),
+        })
     }
 }
 
@@ -282,19 +309,19 @@ mod tests {
 fn render_prompt(
     model: &LlamaModel,
     template: &LlamaChatTemplate,
-    turns: &[&LocalTurn],
-) -> Result<String, String> {
+    turns: &[&EngineTurn],
+) -> Result<String, EngineError> {
     let messages = turns
         .iter()
         .map(|turn| LlamaChatMessage::new(turn.role.to_string(), turn.content.clone()))
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("消息包含非法字符：{e}"))?;
+        .map_err(|e| EngineError::engine(format!("消息包含非法字符：{e}")))?;
     model
         .apply_chat_template(template, &messages, true)
-        .map_err(|e| format!("应用聊天模板失败：{e}"))
+        .map_err(|e| EngineError::engine(format!("应用聊天模板失败：{e}")))
 }
 
-fn sampler_for(params: &LocalParams) -> LlamaSampler {
+fn sampler_for(params: &GenerateParams) -> LlamaSampler {
     if params.temperature <= 0.0 {
         return LlamaSampler::greedy();
     }

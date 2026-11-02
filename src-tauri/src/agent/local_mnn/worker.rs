@@ -1,8 +1,8 @@
 //! MNN worker thread: owns the `!Send` native handle and serialises requests.
 //!
-//! Only compiled with the `local-mnn` feature. The native `MNNLlm` handle is
-//! created and destroyed on this thread exclusively; callers get a `Worker`
-//! clone (just an `mpsc::Sender`) and block on a one-shot reply channel.
+//! Only compiled with the `local-mnn` feature. The thread plumbing lives in
+//! `agent::inference::worker` and is shared with any future backend; this
+//! module only knows how to drive the MNN C API.
 //!
 //! Why raw FFI instead of `mnn_rs::Llm`: the safe wrapper only exposes a
 //! blocking `generate_stream(prompt, max_tokens, cb)`. Two consequences break
@@ -14,14 +14,12 @@
 //! Driving `generate_init` + `generate_step(1)` + `stoped` ourselves gives
 //! exact cumulative truncation and a cancel check between every token.
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
-use std::thread;
 use std::time::Instant;
 
 use mnn_rs_sys::{
@@ -30,85 +28,18 @@ use mnn_rs_sys::{
     MNNLlmContext,
 };
 
-use super::{step_decision, LocalMnnResult, MnnError, MnnStopReason};
+use crate::agent::inference::worker::Worker;
+use crate::agent::inference::{EngineMetrics, StopReason};
+
+use super::{step_decision, MnnError};
 
 /// Streaming sink; `'static + Send` because it moves into the worker thread.
 pub type ChunkSink = Box<dyn FnMut(&str) + Send>;
 
-enum Request {
-    Load {
-        dir: PathBuf,
-        threads: u32,
-        reply: Sender<Result<(), MnnError>>,
-    },
-    Generate {
-        prompt: String,
-        max_tokens: u32,
-        cancel: Arc<AtomicBool>,
-        sink: ChunkSink,
-        reply: Sender<Result<LocalMnnResult, MnnError>>,
-    },
-    Unload {
-        reply: Sender<Result<(), MnnError>>,
-    },
-}
-
-/// Handle to the worker thread; cloning it is cheap (it only clones a `Sender`).
+/// Handle to the shared worker; cloning it only clones an `mpsc::Sender`.
 #[derive(Clone)]
-pub struct Worker {
-    tx: Sender<Request>,
-}
-
-impl Worker {
-    pub fn spawn() -> Result<Self, MnnError> {
-        let (tx, rx) = mpsc::channel::<Request>();
-        thread::Builder::new()
-            .name("mnn-llm".to_string())
-            .spawn(move || run(rx))
-            .map_err(|e| MnnError::engine(format!("MNN 线程创建失败：{e}")))?;
-        Ok(Self { tx })
-    }
-
-    pub fn load(&self, dir: PathBuf, threads: u32) -> Result<(), MnnError> {
-        self.request(|reply| Request::Load {
-            dir,
-            threads,
-            reply,
-        })
-    }
-
-    pub fn generate(
-        &self,
-        prompt: String,
-        max_tokens: u32,
-        cancel: Arc<AtomicBool>,
-        sink: ChunkSink,
-    ) -> Result<LocalMnnResult, MnnError> {
-        self.request(|reply| Request::Generate {
-            prompt,
-            max_tokens,
-            cancel,
-            sink,
-            reply,
-        })
-    }
-
-    pub fn unload(&self) -> Result<(), MnnError> {
-        self.request(|reply| Request::Unload { reply })
-    }
-
-    fn request<T>(
-        &self,
-        build: impl FnOnce(Sender<Result<T, MnnError>>) -> Request,
-    ) -> Result<T, MnnError> {
-        let (reply_tx, reply_rx) = mpsc::channel();
-        self.tx
-            .send(build(reply_tx))
-            .map_err(|_| MnnError::engine("MNN 线程已退出"))?;
-        reply_rx
-            .recv()
-            .map_err(|_| MnnError::engine("MNN 线程未返回结果"))?
-    }
+pub struct MnnWorker {
+    worker: Worker<Handle>,
 }
 
 /// Owns the native handle. Constructed and dropped on the worker thread only.
@@ -125,45 +56,45 @@ impl Drop for Handle {
     }
 }
 
-fn run(rx: Receiver<Request>) {
-    let mut engine: Option<Handle> = None;
-    while let Ok(request) = rx.recv() {
-        match request {
-            Request::Load {
-                dir,
-                threads,
-                reply,
-            } => {
-                // Release the old weights first so two models never coexist.
-                engine = None;
-                let result = create_and_load(&dir, threads);
-                let outcome = match result {
-                    Ok(handle) => {
-                        engine = Some(handle);
-                        Ok(())
-                    }
-                    Err(error) => Err(error),
-                };
-                let _ = reply.send(outcome);
+impl MnnWorker {
+    pub fn spawn() -> Result<Self, MnnError> {
+        Ok(Self {
+            worker: Worker::spawn("mnn-llm")?,
+        })
+    }
+
+    pub fn load(&self, dir: PathBuf, threads: u32) -> Result<(), MnnError> {
+        self.worker.call(move |slot| {
+            // Release the old weights first so two models never coexist.
+            *slot = None;
+            match create_and_load(&dir, threads) {
+                Ok(handle) => {
+                    *slot = Some(handle);
+                    Ok(())
+                }
+                Err(error) => Err(error),
             }
-            Request::Generate {
-                prompt,
-                max_tokens,
-                cancel,
-                sink,
-                reply,
-            } => {
-                let result = match engine.as_mut() {
-                    Some(handle) => generate(handle, &prompt, max_tokens, &cancel, sink),
-                    None => Err(MnnError::not_loaded()),
-                };
-                let _ = reply.send(result);
-            }
-            Request::Unload { reply } => {
-                engine = None;
-                let _ = reply.send(Ok(()));
-            }
-        }
+        })
+    }
+
+    pub fn generate(
+        &self,
+        prompt: String,
+        max_tokens: u32,
+        cancel: Arc<AtomicBool>,
+        sink: ChunkSink,
+    ) -> Result<EngineMetrics, MnnError> {
+        self.worker.call(move |slot| match slot.as_mut() {
+            Some(handle) => generate(handle, &prompt, max_tokens, &cancel, sink),
+            None => Err(MnnError::not_loaded()),
+        })
+    }
+
+    pub fn unload(&self) -> Result<(), MnnError> {
+        self.worker.call(|slot| {
+            *slot = None;
+            Ok(())
+        })
     }
 }
 
@@ -200,7 +131,6 @@ struct StreamState {
     sink: ChunkSink,
     started: Instant,
     first_chunk_ms: Option<u64>,
-    text: String,
 }
 
 /// C callback invoked synchronously from inside `generate_step`.
@@ -212,7 +142,7 @@ unsafe extern "C" fn stream_callback(text: *const c_char, userdata: *mut c_void)
     // and MNN only calls back synchronously inside the same call stack.
     let state = &mut *userdata.cast::<StreamState>();
     // SAFETY: `text` is a NUL-terminated C string owned by MNN for this call.
-    let chunk = std::ffi::CStr::from_ptr(text).to_str();
+    let chunk = CStr::from_ptr(text).to_str();
     let Ok(chunk) = chunk else {
         log::warn!("mnn stream chunk is not valid UTF-8; skipped");
         return;
@@ -223,7 +153,6 @@ unsafe extern "C" fn stream_callback(text: *const c_char, userdata: *mut c_void)
     if state.first_chunk_ms.is_none() {
         state.first_chunk_ms = Some(state.started.elapsed().as_millis() as u64);
     }
-    state.text.push_str(chunk);
     (state.sink)(chunk);
 }
 
@@ -233,14 +162,13 @@ fn generate(
     max_tokens: u32,
     cancel: &AtomicBool,
     sink: ChunkSink,
-) -> Result<LocalMnnResult, MnnError> {
+) -> Result<EngineMetrics, MnnError> {
     let c_prompt = cstring(prompt, "prompt")?;
     let started = Instant::now();
     let mut state = StreamState {
         sink,
         started,
         first_chunk_ms: None,
-        text: String::new(),
     };
 
     // SAFETY: every pointer below refers to `handle.raw` (live) or to `state`
@@ -257,13 +185,13 @@ fn generate(
         let prefill_ms = started.elapsed().as_millis() as u64;
 
         let mut steps = 0u32;
-        let mut stop_reason = MnnStopReason::Stop;
+        let mut stop_reason = StopReason::Stop;
         loop {
             let cancelled = cancel.load(Ordering::SeqCst);
             if let Some(reason) =
                 step_decision(steps, max_tokens, cancelled, mnn_llm_stoped(handle.raw))
             {
-                stop_reason = reason;
+                stop_reason = reason.into();
                 break;
             }
             mnn_llm_generate_step(handle.raw, 1);
@@ -289,8 +217,8 @@ fn generate(
     unsafe { mnn_llm_reset(handle.raw) };
     let wall_ms = started.elapsed().as_millis() as u64;
 
-    let result = build_result(
-        state,
+    let metrics = build_metrics(
+        &state,
         context,
         context_ok,
         steps,
@@ -301,29 +229,29 @@ fn generate(
     );
     log::info!(
         "mnn perf: prompt_tokens={} output_tokens={} prefill_ms={} decode_ms={} sample_ms={} first_chunk_ms={} total_ms={} stop={}",
-        result.prompt_tokens,
-        result.output_tokens,
-        result.prefill_ms,
-        result.decode_ms,
-        result.sample_ms,
-        result.first_chunk_ms,
+        metrics.prompt_tokens,
+        metrics.output_tokens,
+        metrics.prefill_ms,
+        metrics.decode_ms,
+        metrics.sample_ms,
+        metrics.first_chunk_ms,
         wall_ms,
-        result.stop_reason
+        metrics.stop_reason
     );
-    Ok(result)
+    Ok(metrics)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_result(
-    state: StreamState,
+/// Convert MNN's counters into the shared metric shape.
+fn build_metrics(
+    state: &StreamState,
     context: MNNLlmContext,
     context_ok: bool,
     steps: u32,
     max_tokens: u32,
     prefill_wall_ms: u64,
     wall_ms: u64,
-    stop_reason: MnnStopReason,
-) -> LocalMnnResult {
+    stop_reason: StopReason,
+) -> EngineMetrics {
     let prompt_tokens = if context_ok {
         context.prompt_len.max(0) as u32
     } else {
@@ -356,15 +284,14 @@ fn build_result(
     } else {
         0.0
     };
-    LocalMnnResult {
-        text: state.text,
+    EngineMetrics {
         prompt_tokens,
         output_tokens,
         prefill_ms,
         decode_ms,
         sample_ms,
-        decode_tok_s,
         first_chunk_ms: state.first_chunk_ms.unwrap_or(0),
+        decode_tok_s,
         stop_reason: stop_reason.as_str().to_string(),
     }
 }

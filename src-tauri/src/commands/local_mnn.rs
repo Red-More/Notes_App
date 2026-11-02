@@ -7,8 +7,14 @@
 //! `local_mnn_generate` 仍返回整段结果，但引擎侧已经按 chunk 回调实现；
 //! 需要真流式时只在这里换成 `mpsc::Sender<String>` 或 `app.emit`，不改引擎。
 
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+
 use tauri::State;
 
+use crate::agent::inference::{
+    EngineInput, GenerateParams, InferenceEngine, LoadOptions, ModelAsset,
+};
 use crate::agent::local_mnn::{
     LocalMnnModel, LocalMnnResult, LocalMnnState, LocalMnnStatus, MnnError,
 };
@@ -48,7 +54,10 @@ fn validate_generate(prompt: &str, max_tokens: u32) -> Result<(), MnnError> {
 
 #[tauri::command]
 pub fn local_mnn_status(state: State<'_, LocalMnnState>) -> LocalMnnStatus {
-    state.status()
+    let mut status = state.status();
+    status.engine = InferenceEngine::kind(&*state);
+    status.metrics = InferenceEngine::metrics(&*state);
+    status
 }
 
 #[tauri::command]
@@ -64,9 +73,18 @@ pub async fn local_mnn_load(
 ) -> Result<(), MnnError> {
     validate_threads(threads)?;
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || state.load(&model, threads))
-        .await
-        .map_err(|e| MnnError::thread(e.to_string()))?
+    tauri::async_runtime::spawn_blocking(move || {
+        let asset = ModelAsset::Bundle {
+            dir: std::path::PathBuf::from(&model),
+        };
+        let options = LoadOptions {
+            threads,
+            context_size: 0,
+        };
+        InferenceEngine::load(&state, &asset, &options)
+    })
+    .await
+    .map_err(|e| MnnError::thread(e.to_string()))?
 }
 
 #[tauri::command]
@@ -77,23 +95,36 @@ pub async fn local_mnn_generate(
 ) -> Result<LocalMnnResult, MnnError> {
     validate_generate(&prompt, max_tokens)?;
     let state = state.inner().clone();
-    // Chunks are not forwarded yet; the sink is wired so the streaming
-    // command can subscribe without touching the engine.
-    tauri::async_runtime::spawn_blocking(move || state.generate_stream(&prompt, max_tokens, |_| {}))
-        .await
-        .map_err(|e| MnnError::thread(e.to_string()))?
+    let params = GenerateParams {
+        max_tokens,
+        ..GenerateParams::default()
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    // Chunks are forwarded through a channel so the engine can own the sink.
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let sink: Box<dyn FnMut(&str) + Send> = Box::new(move |chunk| {
+        let _ = tx.send(chunk.to_string());
+    });
+    tauri::async_runtime::spawn_blocking(move || {
+        let metrics =
+            InferenceEngine::generate(&state, EngineInput::Prompt(prompt), &params, &cancel, sink)?;
+        let text: String = rx.into_iter().collect();
+        Ok(LocalMnnResult::from_metrics(text, metrics))
+    })
+    .await
+    .map_err(|e| MnnError::thread(e.to_string()))?
 }
 
 /// 中止当前生成；返回 `false` 表示没有正在执行的轮次。
 #[tauri::command]
 pub fn local_mnn_cancel(state: State<'_, LocalMnnState>) -> bool {
-    state.cancel()
+    InferenceEngine::cancel(&*state)
 }
 
 #[tauri::command]
 pub async fn local_mnn_unload(state: State<'_, LocalMnnState>) -> Result<(), MnnError> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || state.unload())
+    tauri::async_runtime::spawn_blocking(move || InferenceEngine::unload(&state))
         .await
         .map_err(|e| MnnError::thread(e.to_string()))?
 }

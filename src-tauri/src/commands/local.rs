@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use tauri::State;
 
+use crate::agent::inference::{EngineKind, EngineMetrics, InferenceEngine};
 use crate::agent::local::gating::{self, DeviceProfile, GateDecision, PowerSnapshot};
 use crate::agent::local::runtime::{self, LocalConfig};
 use crate::agent::local::{LocalModelFile, LocalStatus};
@@ -34,6 +35,9 @@ pub struct LocalSnapshot {
     pub power: PowerSnapshot,
     /// `allow` 或暂停原因。
     pub gate: String,
+    /// 统一引擎标识与最近一轮指标；新增字段，前端可忽略。
+    pub engine: EngineKind,
+    pub metrics: Option<EngineMetrics>,
 }
 
 #[tauri::command]
@@ -47,6 +51,8 @@ pub fn local_model_status(agent_state: State<'_, AgentState>) -> Result<LocalSna
     let files = runtime::list_files(agent_state.local.models_dir(), device.max_model_mb);
     Ok(LocalSnapshot {
         supported: agent_state.local.supported(),
+        engine: InferenceEngine::kind(&agent_state.local),
+        metrics: InferenceEngine::metrics(&agent_state.local),
         status: agent_state.local.status(),
         config: agent_state.local.config(),
         files,

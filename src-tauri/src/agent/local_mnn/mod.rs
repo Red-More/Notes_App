@@ -21,6 +21,10 @@ pub mod worker;
 
 pub use error::MnnError;
 
+use crate::agent::inference::{
+    EngineError, EngineInput, EngineKind, EngineMetrics, GenerateParams, InferenceEngine,
+    LoadOptions, ModelAsset, StopReason,
+};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -82,12 +86,12 @@ pub enum MnnStopReason {
     Cancel,
 }
 
-impl MnnStopReason {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Stop => "stop",
-            Self::Length => "length",
-            Self::Cancel => "cancel",
+impl From<MnnStopReason> for StopReason {
+    fn from(value: MnnStopReason) -> Self {
+        match value {
+            MnnStopReason::Stop => Self::Stop,
+            MnnStopReason::Length => Self::Length,
+            MnnStopReason::Cancel => Self::Cancel,
         }
     }
 }
@@ -120,21 +124,27 @@ pub fn step_decision(
 #[serde(rename_all = "camelCase")]
 pub struct LocalMnnStatus {
     pub available: bool,
+    /// 统一引擎标识；新增字段，前端可忽略。
+    pub engine: EngineKind,
     pub phase: MnnPhase,
     /// 兼容既有前端字段；始终等于 `phase.is_loaded()`。
     pub loaded: bool,
     pub model: Option<String>,
     pub threads: u32,
+    /// 最近一轮的统一指标；新增字段，前端可忽略。
+    pub metrics: Option<EngineMetrics>,
 }
 
 impl LocalMnnStatus {
     fn new(available: bool) -> Self {
         Self {
             available,
+            engine: EngineKind::Mnn,
             phase: MnnPhase::Unloaded,
             loaded: false,
             model: None,
             threads: 0,
+            metrics: None,
         }
     }
 
@@ -166,6 +176,23 @@ pub struct LocalMnnResult {
     pub first_chunk_ms: u64,
     /// `stop` | `length` | `cancel`
     pub stop_reason: String,
+}
+
+impl LocalMnnResult {
+    /// 命令层把流式文本与统一指标组装成既有返回结构，前端契约不变。
+    pub fn from_metrics(text: String, metrics: EngineMetrics) -> Self {
+        Self {
+            text,
+            prompt_tokens: metrics.prompt_tokens,
+            output_tokens: metrics.output_tokens,
+            prefill_ms: metrics.prefill_ms,
+            decode_ms: metrics.decode_ms,
+            sample_ms: metrics.sample_ms,
+            decode_tok_s: metrics.decode_tok_s,
+            first_chunk_ms: metrics.first_chunk_ms,
+            stop_reason: metrics.stop_reason,
+        }
+    }
 }
 
 /// 只接受 bundle 目录名：无路径分隔符、不以点开头、仅 ASCII 安全字符。
@@ -284,9 +311,11 @@ struct Inner {
     root: PathBuf,
     status: Mutex<LocalMnnStatus>,
     #[cfg(feature = "local-mnn")]
-    worker: Mutex<Option<worker::Worker>>,
+    worker: Mutex<Option<worker::MnnWorker>>,
     /// 当前生成轮的取消标记；`None` 表示没有正在执行的生成。
     cancel: Mutex<Option<Arc<AtomicBool>>>,
+    /// 最近一轮的统一指标，供状态页读取。
+    last_metrics: Mutex<Option<EngineMetrics>>,
 }
 
 impl LocalMnnState {
@@ -294,7 +323,7 @@ impl LocalMnnState {
         if let Err(e) = std::fs::create_dir_all(&root) {
             log::warn!("mnn model directory create failed: {e}");
         }
-        let available = cfg!(feature = "local-mnn");
+        let available = EngineKind::Mnn.available();
         Self {
             inner: Arc::new(Inner {
                 root,
@@ -302,6 +331,7 @@ impl LocalMnnState {
                 #[cfg(feature = "local-mnn")]
                 worker: Mutex::new(None),
                 cancel: Mutex::new(None),
+                last_metrics: Mutex::new(None),
             }),
         }
     }
@@ -385,16 +415,17 @@ impl LocalMnnState {
         }
     }
 
-    /// 流式生成；`sink` 在 worker 线程里逐块调用，最终全文仍通过返回值给出。
+    /// 流式生成；`sink` 在 worker 线程里逐块调用，结束后返回统一指标。
     ///
-    /// 签名固定为 `FnMut(&str) + Send + 'static`，命令层可直接换成
-    /// `mpsc::Sender<String>` 或 Tauri 事件通道，无需改动引擎侧。
+    /// `cancel` 同时保存到运行时槽位，命令层的 `local_mnn_cancel` 可在
+    /// token 之间置位，无需再经 worker 队列。
     pub fn generate_stream<F>(
         &self,
         prompt: &str,
         max_tokens: u32,
+        cancel: Arc<AtomicBool>,
         sink: F,
-    ) -> Result<LocalMnnResult, MnnError>
+    ) -> Result<EngineMetrics, MnnError>
     where
         F: FnMut(&str) + Send + 'static,
     {
@@ -417,19 +448,22 @@ impl LocalMnnState {
                 let next = transition(status.phase, MnnEvent::GenerateStart);
                 status.apply(next);
             }
-            let cancel = Arc::new(AtomicBool::new(false));
-            *self.inner.cancel.lock().unwrap() = Some(cancel.clone());
+            let cancel_for_slot = cancel.clone();
+            *self.inner.cancel.lock().unwrap() = Some(cancel_for_slot);
             let result = self.worker().and_then(|worker| {
                 worker.generate(prompt.to_string(), max_tokens, cancel, Box::new(sink))
             });
             *self.inner.cancel.lock().unwrap() = None;
             self.set_phase(MnnEvent::GenerateDone);
+            if let Ok(metrics) = &result {
+                *self.inner.last_metrics.lock().unwrap() = Some(metrics.clone());
+            }
             result
         }
 
         #[cfg(not(feature = "local-mnn"))]
         {
-            let _ = sink;
+            let _ = (cancel, sink);
             Err(MnnError::Unsupported {
                 message: "当前构建未启用 MNN 本地模型（编译时未包含 local-mnn）".to_string(),
             })
@@ -460,12 +494,65 @@ impl LocalMnnState {
     }
 
     #[cfg(feature = "local-mnn")]
-    fn worker(&self) -> Result<worker::Worker, MnnError> {
+    fn worker(&self) -> Result<worker::MnnWorker, MnnError> {
         let mut guard = self.inner.worker.lock().unwrap();
         if guard.is_none() {
-            *guard = Some(worker::Worker::spawn()?);
+            *guard = Some(worker::MnnWorker::spawn()?);
         }
         Ok(guard.as_ref().expect("worker just created").clone())
+    }
+}
+
+/// MNN 适配器：对外只暴露统一 trait，业务层不接触原生句柄或 worker。
+impl InferenceEngine for LocalMnnState {
+    fn kind(&self) -> EngineKind {
+        EngineKind::Mnn
+    }
+
+    fn load(&self, model: &ModelAsset, options: &LoadOptions) -> Result<(), EngineError> {
+        let name = match model {
+            ModelAsset::Bundle { dir } => dir
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            ModelAsset::SingleFile { .. } => {
+                return Err(EngineError::invalid("MNN 需要多文件 bundle 目录"))
+            }
+        };
+        if name.trim().is_empty() {
+            return Err(EngineError::ModelNotFound {
+                model: String::new(),
+            });
+        }
+        self.load(&name, options.threads)
+    }
+
+    fn generate(
+        &self,
+        input: EngineInput,
+        params: &GenerateParams,
+        cancel: &Arc<AtomicBool>,
+        sink: Box<dyn FnMut(&str) + Send>,
+    ) -> Result<EngineMetrics, EngineError> {
+        let prompt = match input {
+            EngineInput::Prompt(prompt) => prompt,
+            EngineInput::Turns(_) => {
+                return Err(EngineError::invalid("MNN 只接受预渲染的 prompt"))
+            }
+        };
+        self.generate_stream(&prompt, params.max_tokens, cancel.clone(), sink)
+    }
+
+    fn cancel(&self) -> bool {
+        LocalMnnState::cancel(self)
+    }
+
+    fn unload(&self) -> Result<(), EngineError> {
+        LocalMnnState::unload(self)
+    }
+
+    fn metrics(&self) -> Option<EngineMetrics> {
+        self.inner.last_metrics.lock().unwrap().clone()
     }
 }
 
@@ -627,7 +714,10 @@ mod tests {
         assert_eq!(status.phase, MnnPhase::Unloaded);
         assert!(!status.loaded);
         assert_eq!(
-            state.generate_stream("hi", 4, |_| {}).unwrap_err().to_string(),
+            state
+                .generate_stream("hi", 4, Arc::new(AtomicBool::new(false)), |_| {})
+                .unwrap_err()
+                .to_string(),
             if cfg!(feature = "local-mnn") {
                 "本地模型尚未加载".to_string()
             } else {

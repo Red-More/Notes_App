@@ -23,7 +23,10 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-use super::local::{LocalChunk, LocalParams, LocalState, LocalTurn};
+use super::inference::{
+    EngineInput, EngineTurn, GenerateParams, InferenceEngine, LoadOptions, ModelAsset,
+};
+use super::local::LocalState;
 use super::model_store::{self, ApiFormat, ModelEntry};
 use super::params::{CacheRetention, LlmParams, ThinkingMode};
 use super::{AgentState, TOOL_ALLOWLIST};
@@ -763,8 +766,18 @@ async fn run_local(
     let status = state.local.status();
     if !matches!(status.state, LocalState::Ready | LocalState::Generating) {
         let runtime = state.local.clone();
+        let asset = ModelAsset::SingleFile {
+            path: state.local.models_dir().join(load_config.file.trim()),
+        };
+        let options = LoadOptions {
+            threads: load_config.threads,
+            context_size: load_config.context_size,
+        };
         let loaded =
-            tauri::async_runtime::spawn_blocking(move || runtime.load_blocking(load_config)).await;
+            tauri::async_runtime::spawn_blocking(move || {
+                InferenceEngine::load(&runtime, &asset, &options)
+            })
+            .await;
         match loaded {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
@@ -785,7 +798,7 @@ async fn run_local(
         emit_error(emit, "本地模型没有收到可回答的问题", "error");
         return Ok(());
     }
-    let local_params = LocalParams {
+    let local_params = GenerateParams {
         max_tokens: params
             .output_limit()
             .unwrap_or(config.max_tokens)
@@ -797,44 +810,36 @@ async fn run_local(
         stop: params.stop.clone().unwrap_or_default(),
     };
 
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<LocalChunk>();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let runtime = state.local.clone();
     let cancel_local = cancel.clone();
     let handle = tauri::async_runtime::spawn_blocking(move || {
-        let mut sink = |chunk: LocalChunk| {
-            let _ = tx.send(chunk);
-        };
-        runtime.generate_blocking(&local_turns, &local_params, &cancel_local, &mut sink)
+        let sink: Box<dyn FnMut(&str) + Send> = Box::new(move |text| {
+            let _ = tx.send(text.to_string());
+        });
+        InferenceEngine::generate(
+            &runtime,
+            EngineInput::Turns(local_turns),
+            &local_params,
+            &cancel_local,
+            sink,
+        )
     });
 
     emit(StreamEvent::TextStart { content_index: 0 });
-    let mut prompt_tokens = 0u32;
-    let mut output_tokens = 0u32;
-    let mut reason = "stop";
-    while let Some(chunk) = rx.recv().await {
-        match chunk {
-            LocalChunk::Token(text) => emit(StreamEvent::TextDelta {
-                content_index: 0,
-                delta: text,
-            }),
-            LocalChunk::Done {
-                prompt_tokens: prompt,
-                output_tokens: output,
-                reason: stop_reason,
-            } => {
-                prompt_tokens = prompt;
-                output_tokens = output;
-                reason = stop_reason;
-            }
-        }
+    while let Some(text) = rx.recv().await {
+        emit(StreamEvent::TextDelta {
+            content_index: 0,
+            delta: text,
+        });
     }
     emit(StreamEvent::TextEnd { content_index: 0 });
 
     match handle.await {
-        Ok(Ok(())) => {
+        Ok(Ok(metrics)) => {
             emit(StreamEvent::Done {
-                reason: reason.to_string(),
-                usage: local_usage(prompt_tokens, output_tokens),
+                reason: metrics.stop_reason,
+                usage: local_usage(metrics.prompt_tokens, metrics.output_tokens),
             });
         }
         Ok(Err(error)) => {
@@ -861,11 +866,11 @@ async fn run_local(
 }
 
 /// 把 pi transcript 折叠成聊天模板可接受的角色；工具结果并入 user。
-fn build_local_turns(system: &str, turns: &[Turn]) -> Vec<LocalTurn> {
+fn build_local_turns(system: &str, turns: &[Turn]) -> Vec<EngineTurn> {
     let mut out = Vec::new();
     let system = clip_chars(system.trim(), LOCAL_SYSTEM_CHARS);
     if !system.is_empty() {
-        out.push(LocalTurn {
+        out.push(EngineTurn {
             role: "system",
             content: system,
         });
@@ -900,7 +905,7 @@ fn build_local_turns(system: &str, turns: &[Turn]) -> Vec<LocalTurn> {
         } else {
             "user"
         };
-        out.push(LocalTurn { role, content });
+        out.push(EngineTurn { role, content });
     }
     out
 }

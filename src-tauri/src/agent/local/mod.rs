@@ -63,39 +63,6 @@ impl LocalStatus {
     }
 }
 
-/// 一条送往 GGUF 聊天模板的消息。
-#[cfg_attr(not(feature = "local-llm"), allow(dead_code))]
-#[derive(Debug, Clone)]
-pub struct LocalTurn {
-    /// `system` / `user` / `assistant`；工具结果统一折叠为 `user`。
-    pub role: &'static str,
-    pub content: String,
-}
-
-/// 本地采样参数；由 `LlmParams` 收敛而来，避免把厂商字段带进引擎。
-#[cfg_attr(not(feature = "local-llm"), allow(dead_code))]
-#[derive(Debug, Clone)]
-pub struct LocalParams {
-    pub max_tokens: u32,
-    pub temperature: f32,
-    pub top_p: f32,
-    pub top_k: u32,
-    pub seed: u32,
-    pub stop: Vec<String>,
-}
-
-/// 引擎回传的流式结果；异步侧负责转成 `StreamEvent`。
-#[cfg_attr(not(feature = "local-llm"), allow(dead_code))]
-#[derive(Debug, Clone)]
-pub enum LocalChunk {
-    Token(String),
-    Done {
-        prompt_tokens: u32,
-        output_tokens: u32,
-        reason: &'static str,
-    },
-}
-
 /// 模型文件；`recommended` 只用于 UI 提示，不触发自动下载。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

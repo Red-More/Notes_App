@@ -8,6 +8,7 @@
 
 pub mod conversations;
 pub mod discovery;
+pub mod inference;
 pub mod llm;
 pub mod local;
 pub mod local_mnn;
