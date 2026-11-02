@@ -294,6 +294,64 @@ KV cache 估算：`2 × dtype_bytes × n_layer × n_kv_heads × head_dim × n_ct
 
 ---
 
+## 11. 双推理引擎并存（2026-11-02）
+
+llama.cpp 与 MNN 现在共用一层 `agent::inference` 契约，业务层（Tauri 命令、聊天链路）只依赖 `InferenceEngine` trait。
+
+### 11.1 模块边界
+
+| 层 | 位置 | 职责 |
+| --- | --- | --- |
+| 统一契约 | `src-tauri/src/agent/inference/` | `InferenceEngine` trait、`EngineKind`、`ModelAsset`、`LoadOptions`、`EngineInput`、`GenerateParams`、`StopReason`、`EngineMetrics`、`EngineError`、通用 `Worker<H>` |
+| llama.cpp 适配 | `src-tauri/src/agent/local/` | GGUF 单文件；`engine.rs` 包 context/sampler，`runtime.rs` 实现 trait |
+| MNN 适配 | `src-tauri/src/agent/local_mnn/` | `.mnn` 多文件 bundle；worker 独占 `!Send` 句柄，`mod.rs` 实现 trait |
+
+两个引擎的错误统一为 `EngineError`（序列化 `{ code, message }`），流式块统一为 `Box<dyn FnMut(&str) + Send>`，指标统一为 `EngineMetrics`（prompt/output token、prefill/decode/sample、TTFT、decode tok/s、stop reason）。
+
+### 11.2 feature 组合
+
+| 组合 | 行为 | 构建前置 |
+| --- | --- | --- |
+| 无 feature（默认） | 仅远端模型；本地状态 `supported=false` | 无 C/C++ 工具链 |
+| `local-llm` | GGUF 单文件本地推理；原有 llama.cpp 路径不变 | clang + CMake + NDK（Android） |
+| `local-mnn` | `.mnn` bundle 本地推理；`local_mnn_*` 命令 | 额外需要静态 `libMNN.a` 与 MNN 头文件 |
+| `local-llm,local-mnn` | 两套注册同时保留，状态页返回 `engine` 字段区分 | 同时具备上述两套前置 |
+
+`local-mnn` 默认关闭；两个 feature 互不依赖，代码中没有“启用 A 必须同时启用 B”的耦合。
+
+### 11.3 目录约定
+
+- GGUF：模型目录下的单个 `.gguf` 文件，文件名白名单校验（无路径分隔符）。
+- MNN：模型目录下的一个子目录（bundle），必需 `config.json` 与至少一个 `*.mnn`；`tokenizer.mtok`、`*.mnn.weight`、`llm_config.json` 可选。目录名同样走白名单，解析后做 canonicalize 前缀校验，拒绝越界。
+
+### 11.4 构建与环境
+
+```powershell
+# 桌面验证：四种组合
+cargo check --locked
+cargo check --locked --features local-llm
+cargo check --locked --features local-mnn
+cargo check --locked --features local-llm,local-mnn
+
+# Android：debug（现有脚本已启用 local-llm）
+pnpm android:build:local
+# Android：release
+pnpm android:build
+# 双引擎（需先准备 libMNN）
+pnpm tauri android build --target aarch64 --features local-llm,local-mnn --debug
+```
+
+Windows 上需一次性写入的环境变量（`src-tauri/.cargo/config.toml` 已固化 NDK 路径，换机时改这里即可）：
+
+```powershell
+setx MNN_LIB_DIR     "C:\path\to\mnn\lib"      # 含 libMNN.a，建议 c++_shared 构建
+setx MNN_INCLUDE_DIR "C:\path\to\mnn\include"  # 含 MNN/Interpreter.hpp
+```
+
+注意：构建必须单进程串行（并发 gradle/cargo 会触发 os error 183）；`ANDROID_NDK` 必须显式指向完整的 r28c，否则 `llama-cpp-sys` 会探测到残缺目录。
+
+---
+
 ## 附：核查方法与局限
 
 - 版本、feature、许可证、平台限制均来自官方页面或仓库文件，可信度高。
