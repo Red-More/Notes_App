@@ -64,6 +64,7 @@ impl MnnWorker {
     }
 
     pub fn load(&self, dir: PathBuf, threads: u32) -> Result<(), MnnError> {
+        // `call` wraps the job's own `Result`, so one `?` flattens the two layers.
         self.worker.call(move |slot| {
             // Release the old weights first so two models never coexist.
             *slot = None;
@@ -74,7 +75,7 @@ impl MnnWorker {
                 }
                 Err(error) => Err(error),
             }
-        })
+        })?
     }
 
     pub fn generate(
@@ -84,17 +85,18 @@ impl MnnWorker {
         cancel: Arc<AtomicBool>,
         sink: ChunkSink,
     ) -> Result<EngineMetrics, MnnError> {
-        self.worker.call(move |slot| match slot.as_mut() {
-            Some(handle) => generate(handle, &prompt, max_tokens, &cancel, sink),
-            None => Err(MnnError::not_loaded()),
-        })
+        self.worker
+            .call(move |slot| match slot.as_mut() {
+                Some(handle) => generate(handle, &prompt, max_tokens, &cancel, sink),
+                None => Err(MnnError::not_loaded()),
+            })?
     }
 
     pub fn unload(&self) -> Result<(), MnnError> {
         self.worker.call(|slot| {
             *slot = None;
             Ok(())
-        })
+        })?
     }
 }
 
@@ -185,18 +187,16 @@ fn generate(
         let prefill_ms = started.elapsed().as_millis() as u64;
 
         let mut steps = 0u32;
-        let mut stop_reason = StopReason::Stop;
-        loop {
+        let stop_reason = loop {
             let cancelled = cancel.load(Ordering::SeqCst);
             if let Some(reason) =
                 step_decision(steps, max_tokens, cancelled, mnn_llm_stoped(handle.raw))
             {
-                stop_reason = reason.into();
-                break;
+                break reason.into();
             }
             mnn_llm_generate_step(handle.raw, 1);
             steps += 1;
-        }
+        };
         (prefill_ms, stop_reason, steps)
     };
 

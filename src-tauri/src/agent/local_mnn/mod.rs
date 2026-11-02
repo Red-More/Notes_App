@@ -510,15 +510,10 @@ impl InferenceEngine for LocalMnnState {
     }
 
     fn load(&self, model: &ModelAsset, options: &LoadOptions) -> Result<(), EngineError> {
-        let name = match model {
-            ModelAsset::Bundle { dir } => dir
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            ModelAsset::SingleFile { .. } => {
-                return Err(EngineError::invalid("MNN 需要多文件 bundle 目录"))
-            }
-        };
+        if matches!(model, ModelAsset::SingleFile { .. }) {
+            return Err(EngineError::invalid("MNN 需要多文件 bundle 目录"));
+        }
+        let name = model.display_name();
         if name.trim().is_empty() {
             return Err(EngineError::ModelNotFound {
                 model: String::new(),
