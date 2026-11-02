@@ -18,7 +18,17 @@
 //
 // Usage: `pnpm android:build -- --debug --features local-llm`
 
-import { existsSync, lstatSync, readdirSync, renameSync, rmSync, statSync, unlinkSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -80,9 +90,35 @@ function clearJniLibs() {
   return removed;
 }
 
+/** Keeps the generated Gradle project arm64-only. `src-tauri/gen` is ignored by
+ *  git, so the filter has to be re-applied on every build instead of committed. */
+function ensureArm64Only() {
+  const gradle = join(
+    process.cwd(),
+    "src-tauri",
+    "gen",
+    "android",
+    "app",
+    "build.gradle.kts",
+  );
+  if (!existsSync(gradle)) return "no gradle project yet";
+
+  const source = readFileSync(gradle, "utf8");
+  if (source.includes("abiFilters")) return "already arm64-only";
+
+  const patched = source.replace(
+    /defaultConfig\s*\{/,
+    (match) => `${match}\n        ndk { abiFilters += listOf("arm64-v8a") }`,
+  );
+  if (patched === source) return "defaultConfig not found";
+  writeFileSync(gradle, patched);
+  return "arm64 filter added";
+}
+
 function main() {
   const unlinked = clearJniLibs();
   console.log(`[prepare-android] removed ${unlinked} jniLibs symlink(s)`);
+  console.log(`[prepare-android] abi filter: ${ensureArm64Only()}`);
 
   if (!existsSync(registrySrc)) {
     console.log(`[prepare-android] no Cargo registry at ${registrySrc}, nothing to do`);
