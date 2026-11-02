@@ -8,6 +8,8 @@
 use serde::Serialize;
 
 /// 门控按热区用途分组，避免 CPU 的正常负载温度误伤电池/外壳的安全阈值。
+/// 变体只在能读取 sysfs 的移动端构造，桌面构建通过 `allow(dead_code)` 保留定义。
+#[cfg_attr(not(any(target_os = "android", target_os = "linux")), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ThermalKind {
@@ -263,6 +265,8 @@ impl ThermalReadings {
 }
 
 /// 按热区 `type` 归类；未识别的热区（modem、camera、ddr 等）不参与本地模型门控。
+/// 仅移动端的 sysfs 读取会调用它，桌面构建由单测覆盖。
+#[cfg_attr(not(any(target_os = "android", target_os = "linux")), allow(dead_code))]
 pub(crate) fn classify_thermal_kind(zone_type: &str) -> Option<ThermalKind> {
     let name = zone_type.to_ascii_lowercase();
     if name.contains("battery") || name.contains("bat") {
