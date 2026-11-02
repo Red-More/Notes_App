@@ -2731,7 +2731,12 @@ fn local_config_persists_and_rejects_path_traversal() {
     assert_eq!(saved, config);
     assert_eq!(runtime::load_config(vfs.conn()), config);
 
-    for file in ["../evil.gguf", "/etc/passwd.gguf", "dir/model.gguf", "model.bin"] {
+    for file in [
+        "../evil.gguf",
+        "/etc/passwd.gguf",
+        "dir/model.gguf",
+        "model.bin",
+    ] {
         let bad = runtime::LocalConfig {
             file: file.into(),
             ..config.clone()

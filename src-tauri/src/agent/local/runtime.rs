@@ -12,16 +12,13 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use super::gating::{self, GateDecision, GatePolicy};
-use super::{
-    LocalChunk, LocalModelFile, LocalParams, LocalState, LocalStatus, LocalTurn,
-};
+use super::{LocalChunk, LocalModelFile, LocalParams, LocalState, LocalStatus, LocalTurn};
 use crate::vfs::error::ToolError;
 
 const KEY_LOCAL: &str = "agent.local.v1";
 const MAX_FILE_CHARS: usize = 120;
 const MAX_THREADS: u32 = 8;
 const MIN_CONTEXT: u32 = 2048;
-const MAX_CONTEXT: u32 = 8192;
 const MIN_MAX_TOKENS: u32 = 32;
 const MAX_MAX_TOKENS: u32 = 4096;
 /// Prompt budget kept free when the output limit is checked against context.
@@ -67,11 +64,14 @@ impl LocalConfig {
         }
     }
 
-    pub fn effective_context(&self, recommended: u32) -> u32 {
+    /// `0` means "leave it to llama.cpp"; otherwise the user value with the
+    /// minimum enforced. Large values are accepted with a UI warning instead of
+    /// being rejected here.
+    pub fn effective_context(&self) -> u32 {
         if self.context_size == 0 {
-            recommended.clamp(MIN_CONTEXT, MAX_CONTEXT)
+            0
         } else {
-            self.context_size.clamp(MIN_CONTEXT, MAX_CONTEXT)
+            self.context_size.max(MIN_CONTEXT)
         }
     }
 }
@@ -95,9 +95,9 @@ fn sanitize(mut config: LocalConfig) -> Result<LocalConfig, ToolError> {
     if config.threads > MAX_THREADS {
         return Err(ToolError::invalid(format!("线程数不能超过 {MAX_THREADS}")));
     }
-    if config.context_size != 0 && !(MIN_CONTEXT..=MAX_CONTEXT).contains(&config.context_size) {
+    if config.context_size != 0 && config.context_size < MIN_CONTEXT {
         return Err(ToolError::invalid(format!(
-            "上下文长度必须在 {MIN_CONTEXT}–{MAX_CONTEXT} 之间"
+            "上下文长度不能低于 {MIN_CONTEXT}；留空则交给 llama.cpp 自动决定"
         )));
     }
     if !(MIN_MAX_TOKENS..=MAX_MAX_TOKENS).contains(&config.max_tokens) {
@@ -133,7 +133,7 @@ pub fn load_config(conn: &Connection) -> LocalConfig {
                 config.context_size = config
                     .context_size
                     .max(config.max_tokens.saturating_add(MIN_INPUT_TOKENS))
-                    .clamp(MIN_CONTEXT, MAX_CONTEXT);
+                    .max(MIN_CONTEXT);
                 sanitize(config).unwrap_or_default()
             }
         },
@@ -278,7 +278,7 @@ impl Runtime {
         self.require_gate()?;
         let device = gating::device_profile();
         let threads = config.effective_threads(device.recommended_threads);
-        let context = config.effective_context(device.recommended_context);
+        let context = config.effective_context();
 
         // 先释放旧模型，切换时不会同时占用两份权重。
         let previous = self.inner.loaded.lock().unwrap().take();

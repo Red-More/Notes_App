@@ -50,9 +50,15 @@ impl Engine {
         Ok(Self {
             session: Mutex::new(None),
             model,
-            // The floor only keeps `NonZeroU32` valid for stale or hand-edited
-            // configs; the real minimum is enforced by `runtime::sanitize`.
-            context_size: context_size.min(trained).max(512),
+            // `0` means "llama.cpp decides" (its default is the training window);
+            // otherwise cap to the training window. The 512 floor only keeps
+            // `NonZeroU32` valid for stale configs — the real minimum lives in
+            // `runtime::sanitize`.
+            context_size: if context_size == 0 {
+                0
+            } else {
+                context_size.min(trained).max(512)
+            },
             threads: threads.max(1),
         })
     }
@@ -61,15 +67,18 @@ impl Engine {
     /// pointer plus `PhantomData`, and `session` drops before `model`, so the
     /// model always outlives the context.
     fn new_session_context(&self, backend: &LlamaBackend) -> Result<LlamaContext<'static>, String> {
+        // `None` keeps llama.cpp's own default (the model's training window);
+        // `0` is our sentinel for "left empty by the user".
+        let n_ctx = NonZeroU32::new(self.context_size);
         let ctx = self
             .model
             .new_context(
                 backend,
                 LlamaContextParams::default()
-                    .with_n_ctx(NonZeroU32::new(self.context_size))
+                    .with_n_ctx(n_ctx)
                     .with_n_threads(self.threads as i32)
                     .with_n_threads_batch(self.threads as i32)
-                    .with_n_batch(self.context_size.min(512)),
+                    .with_n_batch(512),
             )
             .map_err(|e| format!("创建上下文失败：{e}"))?;
         // SAFETY: see the note above; the pointer stays valid for `self`.
@@ -92,7 +101,22 @@ impl Engine {
             .chat_template(None)
             .map_err(|e| format!("模型缺少聊天模板：{e}"))?;
         let vocab = self.model.vocab();
-        let ctx_window = self.context_size as usize;
+
+        let mut guard = self
+            .session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut session = match guard.take() {
+            Some(session) => session,
+            None => Session {
+                ctx: self.new_session_context(backend)?,
+                tokens: Vec::new(),
+            },
+        };
+
+        // Effective window: the user's value, or llama.cpp's own default when
+        // the setting was left empty.
+        let ctx_window = session.ctx.n_ctx() as usize;
         // The output limit is carved out of the same window, so cap it at half
         // the window; otherwise a large `max_tokens` leaves no room for the prompt.
         let output_budget = (params.max_tokens as usize).min(ctx_window / 2).max(1);
@@ -113,22 +137,10 @@ impl Engine {
                 None => break (tokens, prompt),
             }
         };
-        if prompt_tokens.len() > self.context_size as usize {
+        if prompt_tokens.len() > ctx_window {
             return Err("输入超出本地模型上下文，请缩短问题或调大上下文".to_string());
         }
         let _ = prompt;
-
-        let mut guard = self
-            .session
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut session = match guard.take() {
-            Some(session) => session,
-            None => Session {
-                ctx: self.new_session_context(backend)?,
-                tokens: Vec::new(),
-            },
-        };
 
         // Reuse the cached KV prefix: only the divergent tail is re-decoded.
         // At least one token must be decoded so the sampler has fresh logits.
@@ -145,7 +157,7 @@ impl Engine {
         let reused = start;
         let ctx = &mut session.ctx;
 
-        let n_batch = self.context_size.min(512) as usize;
+        let n_batch = ctx_window.min(512);
         let mut batch = LlamaBatch::new(n_batch, 1);
         let mut pos = start;
         let prompt_started = std::time::Instant::now();
@@ -199,7 +211,7 @@ impl Engine {
                 length_limited = true;
                 break;
             }
-            if next_pos + 1 >= self.context_size as i32 {
+            if next_pos + 1 >= ctx_window as i32 {
                 length_limited = true;
                 break;
             }
