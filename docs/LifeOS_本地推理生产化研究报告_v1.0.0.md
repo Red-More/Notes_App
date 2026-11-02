@@ -324,31 +324,60 @@ llama.cpp 与 MNN 现在共用一层 `agent::inference` 契约，业务层（Tau
 - GGUF：模型目录下的单个 `.gguf` 文件，文件名白名单校验（无路径分隔符）。
 - MNN：模型目录下的一个子目录（bundle），必需 `config.json` 与至少一个 `*.mnn`；`tokenizer.mtok`、`*.mnn.weight`、`llm_config.json` 可选。目录名同样走白名单，解析后做 canonicalize 前缀校验，拒绝越界。
 
-### 11.4 构建与环境
+### 11.4 构建与环境（2026-11-02 实测，非推测）
+
+桌面四种组合全部跑到 rustc 阶段，无 warning：
 
 ```powershell
-# 桌面验证：四种组合
-cargo check --locked
-cargo check --locked --features local-llm
-cargo check --locked --features local-mnn
-cargo check --locked --features local-llm,local-mnn
-
-# Android：debug（现有脚本已启用 local-llm）
-pnpm android:build:local
-# Android：release
-pnpm android:build
-# 双引擎（需先准备 libMNN）
-pnpm tauri android build --target aarch64 --features local-llm,local-mnn --debug
+cargo check --locked                                # 59.73s
+cargo check --locked --features local-llm           # 24.22s
+$env:MNN_LIB_DIR     = "C:\Users\16412\AppData\Local\Temp\mnn-workspace\staging\lib"
+$env:MNN_INCLUDE_DIR = "C:\Users\16412\AppData\Local\Temp\mnn-workspace\staging\include"
+cargo check --locked --features local-mnn            # 20.78s
+cargo check --locked --features local-llm,local-mnn  # 20.05s
 ```
 
-Windows 上需一次性写入的环境变量（`src-tauri/.cargo/config.toml` 已固化 NDK 路径，换机时改这里即可）：
+MNN 原生库是本机已有产物，不入版本控制：
+
+| 项 | 实测值 |
+| --- | --- |
+| 静态库 | `C:\Users\16412\AppData\Local\Temp\mnn-workspace\staging\lib\libmnn.a`（222,366,740 bytes，`libMNN.a` 的小写副本） |
+| 头文件 | `...\staging\include`（含 `MNN/Interpreter.hpp`、`llm/llm.hpp`） |
+| 源码 / 构建目录 / 日志 | `...\mnn-workspace\MNN-3.6.1\`、`build-android\`、`cmake-build.log` / `cmake-config.log` / `cmake-install.log` |
+| 构建参数 | MNN 3.6.1（`d407447e`）、NDK 28.2.13676358 + Ninja、arm64-v8a、android-24、`ANDROID_STL=c++_static`、`MNN_BUILD_LLM=ON` |
+
+`mnn-rs-sys` 的 `build.rs` 只认小写 `libmnn.a`，staging 目录里放的是复制后的小写文件名。
+
+符号与链接（`llvm-nm -f posix` 实测）：
+
+- 已定义强符号交集为 **0**：`libmnn.a` 2345 个（T/D/B/R/S 去重），llama.cpp 侧 5 个静态库（`llama`、`ggml`、`ggml-base`、`ggml-cpu`、`llama_cpp_sys_2_common_wrapper`）3973 个。
+- 弱符号交集 292 个，全部是 `std::__ndk1` 模板实例（`llvm-cxxfilt` 分类：std 292、flatbuffers 0、miniz/zlib 0、stb 0、其他 0），属 ODR 可合并项。
+- 因此**不需要** `--allow-multiple-definition`、`-Wl,--exclude-libs,ALL`，也**不需要**把 MNN 重建为 `c++_shared`：`c++_static` 构建的 `libMNN.a` 直接与 llama.cpp 同库链接成功。
+- 混合运行时仍成立：双引擎 `.so` 的 `NEEDED` 仍含 `libc++_shared.so`，`.so` 内未定义 `_Znwm` / `_ZdlPv`（0 个），libc++ 运行时来自共享库而非静态嵌入。
+
+Android 双引擎构建（单进程串行）：
 
 ```powershell
-setx MNN_LIB_DIR     "C:\path\to\mnn\lib"      # 含 libMNN.a，建议 c++_shared 构建
-setx MNN_INCLUDE_DIR "C:\path\to\mnn\include"  # 含 MNN/Interpreter.hpp
+$env:MNN_LIB_DIR = "...\staging\lib"; $env:MNN_INCLUDE_DIR = "...\staging\include"
+cargo build --locked --target aarch64-linux-android --features local-llm,local-mnn   # Finished in 7m 44s
+pnpm android:build:local   # 仅 llama（现有脚本）
 ```
 
-注意：构建必须单进程串行（并发 gradle/cargo 会触发 os error 183）；`ANDROID_NDK` 必须显式指向完整的 r28c，否则 `llama-cpp-sys` 会探测到残缺目录。
+产物与打包结果：
+
+| 项 | 实测值 |
+| --- | --- |
+| `target\aarch64-linux-android\debug\libapp_lib.so` | 422,323,792 bytes |
+| 双引擎 APK | `src-tauri\gen\android\app\build\outputs\apk\universal\debug\app-universal-debug.apk`，439,654,085 bytes（≈419.3 MiB） |
+| `lib/arm64-v8a` | `libapp_lib.so` 422,323,792（STORED）+ `libc++_shared.so` 9,236,352（STORED） |
+| 与仅 llama APK 对比 | 297,637,573 → 439,654,085，增量 +142,016,512 bytes（+135.4 MiB），与 `.so` 增量 +142,010,840 基本一致（差 5,672 bytes 为打包开销） |
+| 16 KB 对齐 | `zipalign -c -P 16 -v 4` → `Verification successful`；APK 内 `.so` 的 4 个 LOAD 段 p_align 均为 `0x4000` |
+
+为什么增量不是 212 MB：链接器只抽取实际被引用的 object。双引擎 `.so` 里 MNN 侧链入 2353 个 `_ZN3MNN` 符号与 9 个 `mnn_llm_*` C API 符号，不是整包 222 MB 归档。
+
+打包注意：Gradle 的 `packageUniversalDebug` 是增量重写 APK，必须删除旧 APK 后重新打包才能得到真实体积（否则会保留上一版 dead space，曾测得 719,968,801 bytes 的假值）。
+
+环境注意：`src-tauri/.cargo/config.toml` 已固化 NDK 路径，但 `MNN_LIB_DIR` / `MNN_INCLUDE_DIR` 仍需按会话设置或 `setx` 持久化。构建必须单进程串行（并发 gradle/cargo 会触发 `os error 183`）；`ANDROID_NDK` 必须显式指向完整的 r28c，否则 `llama-cpp-sys` 会探测到残缺目录。
 
 ---
 
