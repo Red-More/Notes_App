@@ -181,21 +181,23 @@ impl Outcome {
         }
     }
 
-    pub fn failed(code: &str, message: String) -> Self {
+    pub fn failed(code: &str, message: String, stop_reason: Option<String>) -> Self {
         Self {
             status: ChatJobStatus::Failed,
             usage: None,
-            stop_reason: None,
+            // Always terminal-explicit: readers can classify the ending from
+            // this field alone instead of cross-checking status and metrics.
+            stop_reason: Some(stop_reason.unwrap_or_else(|| "error".to_string())),
             error_code: Some(code.to_string()),
             error_message: Some(message),
         }
     }
 
-    pub fn cancelled() -> Self {
+    pub fn cancelled(stop_reason: Option<String>) -> Self {
         Self {
             status: ChatJobStatus::Cancelled,
             usage: None,
-            stop_reason: None,
+            stop_reason: Some(stop_reason.unwrap_or_else(|| "cancel".to_string())),
             error_code: None,
             error_message: None,
         }
@@ -376,9 +378,19 @@ impl JobBuffer {
         }
     }
 
+    /// Engine-reported terminal reason, reused for the job's own `stop_reason`.
+    fn metrics_stop_reason(&self) -> Option<String> {
+        self.metrics
+            .as_ref()?
+            .get("stopReason")?
+            .as_str()
+            .map(str::to_string)
+    }
+
     fn terminal_outcome(&self, cancelled: bool) -> Outcome {
+        let metric_reason = self.metrics_stop_reason();
         if cancelled {
-            return Outcome::cancelled();
+            return Outcome::cancelled(metric_reason);
         }
         match (&self.error_code, &self.stop_reason) {
             (Some(code), _) => Outcome::failed(
@@ -386,9 +398,14 @@ impl JobBuffer {
                 self.error_message
                     .clone()
                     .unwrap_or_else(|| "生成失败".to_string()),
+                metric_reason,
             ),
             (None, Some(reason)) => Outcome::done(self.usage.clone(), Some(reason.clone())),
-            (None, None) => Outcome::failed("error", "流式响应在完成前结束".to_string()),
+            (None, None) => Outcome::failed(
+                "error",
+                "流式响应在完成前结束".to_string(),
+                metric_reason,
+            ),
         }
     }
 }
@@ -896,7 +913,7 @@ pub fn mark_running(conn: &Connection, id: i64) -> Result<bool, ToolError> {
 pub fn cancel_queued(conn: &Connection, id: i64) -> Result<bool, ToolError> {
     let changed = conn.execute(
         "UPDATE chat_jobs
-         SET status = 'cancelled', finished_at = datetime('now','localtime'),
+         SET status = 'cancelled', stop_reason = 'cancel', finished_at = datetime('now','localtime'),
              updated_at = datetime('now','localtime')
          WHERE id = ?1 AND status = 'queued'",
         params![id],
@@ -943,7 +960,7 @@ pub fn finish(conn: &Connection, id: i64, outcome: &Outcome) -> Result<ChatJob, 
 pub fn recover(conn: &Connection) -> Result<usize, ToolError> {
     let changed = conn.execute(
         "UPDATE chat_jobs
-         SET status = 'failed', error_code = 'interrupted', error_message = ?1,
+         SET status = 'failed', stop_reason = 'error', error_code = 'interrupted', error_message = ?1,
              finished_at = datetime('now','localtime'), updated_at = datetime('now','localtime')
          WHERE status IN ('queued', 'running', 'cancelling')",
         params![INTERRUPTED],
@@ -1036,7 +1053,7 @@ mod tests {
         mark_running(&conn, job.id).unwrap();
         finish(&conn, job.id, &Outcome::done(None, Some("stop".into()))).unwrap();
         // Second completion must not change the terminal status or fields.
-        finish(&conn, job.id, &Outcome::failed("error", "late".into())).unwrap();
+        finish(&conn, job.id, &Outcome::failed("error", "late".into(), None)).unwrap();
         let job = get(&conn, job.id).unwrap();
         assert_eq!(job.status, ChatJobStatus::Done);
         assert!(job.error_code.is_none());
@@ -1054,8 +1071,77 @@ mod tests {
             get(&conn, job.id).unwrap().status,
             ChatJobStatus::Cancelling
         );
-        let job = finish(&conn, job.id, &Outcome::cancelled()).unwrap();
+        let job = finish(&conn, job.id, &Outcome::cancelled(None)).unwrap();
         assert_eq!(job.status, ChatJobStatus::Cancelled);
+        assert_eq!(job.stop_reason.as_deref(), Some("cancel"));
+    }
+
+    #[test]
+    fn terminal_stop_reason_matches_every_ending() {
+        let conn = conn();
+
+        // queued -> cancelled
+        let job = submit(&conn, 1, &entry(), &request("t1")).unwrap();
+        assert!(cancel_queued(&conn, job.id).unwrap());
+        let job = get(&conn, job.id).unwrap();
+        assert_eq!(job.status, ChatJobStatus::Cancelled);
+        assert_eq!(job.stop_reason.as_deref(), Some("cancel"));
+
+        // running -> done
+        let job = submit(&conn, 1, &entry(), &request("t2")).unwrap();
+        mark_running(&conn, job.id).unwrap();
+        let job = finish(&conn, job.id, &Outcome::done(None, Some("stop".into()))).unwrap();
+        assert_eq!(job.status, ChatJobStatus::Done);
+        assert_eq!(job.stop_reason.as_deref(), Some("stop"));
+
+        // running -> cancelling -> cancelled
+        let job = submit(&conn, 1, &entry(), &request("t3")).unwrap();
+        mark_running(&conn, job.id).unwrap();
+        assert!(mark_cancelling(&conn, job.id).unwrap());
+        let job = finish(&conn, job.id, &Outcome::cancelled(None)).unwrap();
+        assert_eq!(job.status, ChatJobStatus::Cancelled);
+        assert_eq!(job.stop_reason.as_deref(), Some("cancel"));
+
+        // running -> failed
+        let job = submit(&conn, 1, &entry(), &request("t4")).unwrap();
+        mark_running(&conn, job.id).unwrap();
+        let job = finish(&conn, job.id, &Outcome::failed("error", "boom".into(), None)).unwrap();
+        assert_eq!(job.status, ChatJobStatus::Failed);
+        assert_eq!(job.stop_reason.as_deref(), Some("error"));
+    }
+
+    #[test]
+    fn terminal_outcome_reuses_engine_metrics_reason() {
+        let mut buffer = JobBuffer {
+            blocks: std::collections::BTreeMap::new(),
+            last_seq: 0,
+            usage: None,
+            metrics: Some(serde_json::json!({ "stopReason": "length" })),
+            stop_reason: None,
+            error_code: None,
+            error_message: None,
+            terminal: false,
+            pending_bytes: 0,
+            last_flush: None,
+        };
+        assert_eq!(
+            buffer.terminal_outcome(true).stop_reason.as_deref(),
+            Some("length")
+        );
+        buffer.error_code = Some("error".into());
+        assert_eq!(
+            buffer.terminal_outcome(false).stop_reason.as_deref(),
+            Some("length")
+        );
+        buffer.metrics = None;
+        assert_eq!(
+            buffer.terminal_outcome(true).stop_reason.as_deref(),
+            Some("cancel")
+        );
+        assert_eq!(
+            buffer.terminal_outcome(false).stop_reason.as_deref(),
+            Some("error")
+        );
     }
 
     #[test]
