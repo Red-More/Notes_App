@@ -1111,10 +1111,7 @@ async fn run_local(
         return Ok(());
     }
     let local_params = GenerateParams {
-        max_tokens: params
-            .output_limit()
-            .unwrap_or(config.max_tokens)
-            .clamp(1, 4096),
+        max_tokens: local_output_limit(&req.options, params, config.max_tokens),
         temperature: params.temperature.map_or(0.7, |value| value as f32),
         top_p: params.top_p.map_or(0.8, |value| value as f32),
         top_k: params.top_k.unwrap_or(20),
@@ -1219,7 +1216,7 @@ async fn run_mnn(
     let turns = to_turns(&req.context.messages);
     let prompt = render_mnn_prompt(&build_local_turns(&system, &turns));
     let local_params = GenerateParams {
-        max_tokens: params.output_limit().unwrap_or(2048).clamp(1, 4096),
+        max_tokens: local_output_limit(&req.options, params, 2048),
         temperature: params.temperature.map_or(0.7, |value| value as f32),
         top_p: params.top_p.map_or(0.8, |value| value as f32),
         top_k: params.top_k.unwrap_or(20),
@@ -1379,7 +1376,15 @@ fn build_local_turns(system: &str, turns: &[Turn]) -> Vec<EngineTurn> {
     }
 
     let mut out = Vec::new();
-    let system = clip_chars(system.trim(), LOCAL_SYSTEM_CHARS);
+    let raw_system = system.trim();
+    let system = clip_chars(raw_system, LOCAL_SYSTEM_CHARS);
+    if system.chars().count() < raw_system.chars().count() {
+        log::warn!(
+            "local system prompt truncated from {} to {} chars",
+            raw_system.chars().count(),
+            system.chars().count()
+        );
+    }
     if !system.is_empty() {
         out.push(EngineTurn {
             role: "system",
@@ -1388,6 +1393,16 @@ fn build_local_turns(system: &str, turns: &[Turn]) -> Vec<EngineTurn> {
     }
     out.extend(items.drain(keep_from..));
     out
+}
+
+/// Output budget for local engines: the request-level `maxTokens` wins, then
+/// the per-entry settings, then the engine default.
+fn local_output_limit(options: &Options, params: &LlmParams, fallback: u32) -> u32 {
+    options
+        .max_tokens
+        .or_else(|| params.output_limit())
+        .unwrap_or(fallback)
+        .clamp(1, 4096)
 }
 
 fn clip_chars(text: &str, limit: usize) -> String {
@@ -3266,6 +3281,44 @@ mod local_budget_tests {
             content: long.clone(),
         }];
         let prompt = render_mnn_prompt(&turns);
-        assert!(prompt.contains(&long), "the current question is never cut");
+        assert!(
+            prompt.contains(long.as_str()),
+            "the current question is never cut"
+        );
+    }
+
+    #[test]
+    fn request_max_tokens_beats_per_entry_settings() {
+        let options = Options {
+            max_tokens: Some(1),
+            ..Options::default()
+        };
+        let params = LlmParams {
+            max_tokens: Some(577),
+            ..LlmParams::default()
+        };
+        assert_eq!(
+            local_output_limit(&options, &params, 2048),
+            1,
+            "maxTokens: 1 must reach the engine as exactly 1"
+        );
+    }
+
+    #[test]
+    fn per_entry_settings_are_used_when_the_request_is_silent() {
+        let options = Options::default();
+        let params = LlmParams {
+            max_tokens: Some(256),
+            ..LlmParams::default()
+        };
+        assert_eq!(local_output_limit(&options, &params, 2048), 256);
+    }
+
+    #[test]
+    fn engine_default_is_the_last_resort() {
+        assert_eq!(
+            local_output_limit(&Options::default(), &LlmParams::default(), 2048),
+            2048
+        );
     }
 }
