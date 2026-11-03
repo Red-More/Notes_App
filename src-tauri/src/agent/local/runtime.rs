@@ -458,9 +458,12 @@ impl Runtime {
             })
         };
 
-        if let Ok(metrics) = &result {
-            *self.inner.last_metrics.lock().unwrap() = Some(metrics.clone());
-        }
+        // A failed turn produced no metrics; keeping the previous round's
+        // numbers would make the status page report a turn that never finished.
+        *self.inner.last_metrics.lock().unwrap() = match &result {
+            Ok(metrics) => Some(metrics.clone()),
+            Err(_) => None,
+        };
         self.inner.current_cancel.lock().unwrap().take();
         // A concurrent suspend/unload may have published its own state while
         // this turn was winding down; only restore Ready if we still own it.

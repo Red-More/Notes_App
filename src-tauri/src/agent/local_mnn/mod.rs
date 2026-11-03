@@ -455,9 +455,12 @@ impl LocalMnnState {
             });
             *self.inner.cancel.lock().unwrap() = None;
             self.set_phase(MnnEvent::GenerateDone);
-            if let Ok(metrics) = &result {
-                *self.inner.last_metrics.lock().unwrap() = Some(metrics.clone());
-            }
+            // A failed turn produced no metrics; keeping the previous round's
+            // numbers would make the status page report a turn that never finished.
+            *self.inner.last_metrics.lock().unwrap() = match &result {
+                Ok(metrics) => Some(metrics.clone()),
+                Err(_) => None,
+            };
             result
         }
 
