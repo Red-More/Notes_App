@@ -291,21 +291,6 @@ fn common_prefix_len(left: &[LlamaToken], right: &[LlamaToken]) -> usize {
     left.iter().zip(right).take_while(|(a, b)| a == b).count()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn common_prefix_stops_at_divergence() {
-        let cached: Vec<LlamaToken> = [11, 22, 33, 44].into_iter().map(LlamaToken).collect();
-        let next: Vec<LlamaToken> = [11, 22, 99, 77, 88].into_iter().map(LlamaToken).collect();
-        assert_eq!(common_prefix_len(&cached, &next), 2);
-        assert_eq!(common_prefix_len(&cached, &cached[..2]), 2);
-        assert_eq!(common_prefix_len(&[], &cached), 0);
-        assert_eq!(common_prefix_len(&cached, &cached), 4);
-    }
-}
-
 fn render_prompt(
     model: &LlamaModel,
     template: &LlamaChatTemplate,
@@ -380,4 +365,19 @@ fn stop_prefix(output: &str, text: &str, stops: &[String]) -> Option<usize> {
         cut -= 1;
     }
     Some(cut)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn common_prefix_stops_at_divergence() {
+        let cached: Vec<LlamaToken> = [11, 22, 33, 44].into_iter().map(LlamaToken).collect();
+        let next: Vec<LlamaToken> = [11, 22, 99, 77, 88].into_iter().map(LlamaToken).collect();
+        assert_eq!(common_prefix_len(&cached, &next), 2);
+        assert_eq!(common_prefix_len(&cached, &cached[..2]), 2);
+        assert_eq!(common_prefix_len(&[], &cached), 0);
+        assert_eq!(common_prefix_len(&cached, &cached), 4);
+    }
 }

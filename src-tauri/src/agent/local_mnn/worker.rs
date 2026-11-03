@@ -221,10 +221,12 @@ fn generate(
         &state,
         context,
         context_ok,
-        steps,
-        max_tokens,
-        prefill_ms,
-        wall_ms,
+        TurnTimings {
+            steps,
+            max_tokens,
+            prefill_wall_ms: prefill_ms,
+            wall_ms,
+        },
         stop_reason,
     );
     log::info!(
@@ -241,15 +243,20 @@ fn generate(
     Ok(metrics)
 }
 
+/// Wall-clock counters captured around the native calls.
+struct TurnTimings {
+    steps: u32,
+    max_tokens: u32,
+    prefill_wall_ms: u64,
+    wall_ms: u64,
+}
+
 /// Convert MNN's counters into the shared metric shape.
 fn build_metrics(
     state: &StreamState,
     context: MNNLlmContext,
     context_ok: bool,
-    steps: u32,
-    max_tokens: u32,
-    prefill_wall_ms: u64,
-    wall_ms: u64,
+    timings: TurnTimings,
     stop_reason: StopReason,
 ) -> EngineMetrics {
     let prompt_tokens = if context_ok {
@@ -260,19 +267,19 @@ fn build_metrics(
     // `gen_seq_len` counts real tokens; clamp again so a per-step overshoot
     // can never leak past the caller's cap.
     let output_tokens = if context_ok {
-        (context.gen_seq_len.max(0) as u32).min(max_tokens)
+        (context.gen_seq_len.max(0) as u32).min(timings.max_tokens)
     } else {
-        steps
+        timings.steps
     };
     let prefill_ms = if context_ok && context.prefill_us > 0 {
         context.prefill_us as u64 / 1000
     } else {
-        prefill_wall_ms
+        timings.prefill_wall_ms
     };
     let decode_ms = if context_ok && context.decode_us > 0 {
         context.decode_us as u64 / 1000
     } else {
-        wall_ms
+        timings.wall_ms
     };
     let sample_ms = if context_ok {
         context.sample_us.max(0) as u64 / 1000
