@@ -25,7 +25,7 @@ use serde_json::{json, Map, Value};
 
 use super::inference::{
     EngineInput, EngineMetrics, EngineTurn, GenerateParams, InferenceEngine, LoadOptions,
-    ModelAsset,
+    ModelAsset, StopReason,
 };
 use super::local::LocalState;
 use super::local_mnn::{LocalMnnState, MnnPhase};
@@ -749,6 +749,303 @@ pub async fn run(
 }
 
 // ---------------------------------------------------------------------------
+// 本地推理：把 `<think>…</think>` 拆成独立的思考块
+// ---------------------------------------------------------------------------
+
+const THINK_OPEN_TAG: &str = "<think>";
+const THINK_CLOSE_TAG: &str = "</think>";
+/// Thinking renders before the answer, matching the cloud content order.
+const THINK_INDEX: usize = 0;
+const LOCAL_TEXT_INDEX: usize = 1;
+/// Semantic stop reason for "reasoning ended without an answer"; only used when
+/// the engine itself reported `stop`. `chat_jobs.stop_reason` is TEXT, so old
+/// databases keep working with the new value.
+const STOP_REASON_EMPTY_ANSWER: &str = "empty_answer";
+const EMPTY_ANSWER_NOTE: &str = "（思考已结束，但模型没有给出答案）";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThinkPhase {
+    /// Before the opening tag; only plain text is possible.
+    Before,
+    /// Inside `<think>…`; the closing tag may still arrive.
+    Thinking,
+    /// After `</think>`; the rest is the answer.
+    After,
+}
+
+/// Streaming-safe `<think>` splitter. It holds back tag prefixes so a marker
+/// cut across chunks never leaks into the visible answer.
+struct ThinkSplit<'a> {
+    phase: ThinkPhase,
+    /// Suffix held back because it may still become a tag.
+    pending: String,
+    thinking_started: bool,
+    thinking_ended: bool,
+    text_started: bool,
+    text_chars: usize,
+    emit: Emit<'a>,
+}
+
+impl<'a> ThinkSplit<'a> {
+    fn new(emit: Emit<'a>) -> Self {
+        Self {
+            phase: ThinkPhase::Before,
+            pending: String::new(),
+            thinking_started: false,
+            thinking_ended: false,
+            text_started: false,
+            text_chars: 0,
+            emit,
+        }
+    }
+
+    fn feed(&mut self, chunk: &str) {
+        self.pending.push_str(chunk);
+        loop {
+            let progressed = match self.phase {
+                ThinkPhase::Before => self.step_before(),
+                ThinkPhase::Thinking => self.step_thinking(),
+                ThinkPhase::After => self.step_after(),
+            };
+            if !progressed {
+                break;
+            }
+        }
+    }
+
+    /// Flush the tail and close every open block.
+    /// Returns `true` when reasoning was produced but the answer is empty.
+    fn finish(&mut self) -> bool {
+        let tail = std::mem::take(&mut self.pending);
+        match self.phase {
+            ThinkPhase::Before => {
+                // Only a tag prefix can remain; a truncated `<think` still means
+                // the model intended to think.
+                if !tail.is_empty() && THINK_OPEN_TAG.starts_with(&tail) {
+                    self.start_thinking();
+                }
+            }
+            // The tail is a truncated `</think>` prefix, never answer text.
+            ThinkPhase::Thinking => {}
+            ThinkPhase::After => {
+                // The tail is a tag prefix; drop it to avoid leaking markers.
+            }
+        }
+        self.end_thinking();
+        if self.text_started {
+            (self.emit)(StreamEvent::TextEnd {
+                content_index: LOCAL_TEXT_INDEX,
+            });
+            self.text_started = false;
+        }
+        self.thinking_started && self.text_chars == 0
+    }
+
+    /// Returns `true` when input was consumed and the loop should keep going.
+    fn step_before(&mut self) -> bool {
+        let open = self.pending.find(THINK_OPEN_TAG);
+        let close = self.pending.find(THINK_CLOSE_TAG);
+        let found = match (open, close) {
+            (Some(o), Some(c)) if o <= c => Some((o, THINK_OPEN_TAG.len(), true)),
+            (Some(_), Some(c)) => Some((c, THINK_CLOSE_TAG.len(), false)),
+            (Some(o), None) => Some((o, THINK_OPEN_TAG.len(), true)),
+            (None, Some(c)) => Some((c, THINK_CLOSE_TAG.len(), false)),
+            (None, None) => None,
+        };
+        match found {
+            Some((at, len, is_open)) => {
+                let head = self.pending[..at].to_string();
+                if is_open {
+                    self.push_text(&head);
+                    self.start_thinking();
+                    self.phase = ThinkPhase::Thinking;
+                } else {
+                    // A closing tag without an opener: treat the text before it
+                    // as reasoning that lost its opening marker.
+                    self.push_thinking(&head);
+                    self.end_thinking();
+                    self.phase = ThinkPhase::After;
+                }
+                self.pending.drain(..at + len);
+                true
+            }
+            None => {
+                let cut = self.pending.len()
+                    - held_tag_len(&self.pending, &[THINK_OPEN_TAG, THINK_CLOSE_TAG]);
+                if cut == 0 {
+                    return false;
+                }
+                let head = self.pending[..cut].to_string();
+                self.push_text(&head);
+                self.pending.drain(..cut);
+                false
+            }
+        }
+    }
+
+    fn step_thinking(&mut self) -> bool {
+        if let Some(at) = self.pending.find(THINK_CLOSE_TAG) {
+            let head = self.pending[..at].to_string();
+            self.push_thinking(&head);
+            self.end_thinking();
+            self.phase = ThinkPhase::After;
+            self.pending.drain(..at + THINK_CLOSE_TAG.len());
+            return true;
+        }
+        let cut = self.pending.len() - held_tag_len(&self.pending, &[THINK_CLOSE_TAG]);
+        if cut == 0 {
+            return false;
+        }
+        let head = self.pending[..cut].to_string();
+        self.push_thinking(&head);
+        self.pending.drain(..cut);
+        false
+    }
+
+    /// After the closing tag any further marker is stripped, never rendered.
+    fn step_after(&mut self) -> bool {
+        let open = self.pending.find(THINK_OPEN_TAG);
+        let close = self.pending.find(THINK_CLOSE_TAG);
+        let found = match (open, close) {
+            (Some(o), Some(c)) => Some((
+                o.min(c),
+                if o <= c {
+                    THINK_OPEN_TAG.len()
+                } else {
+                    THINK_CLOSE_TAG.len()
+                },
+            )),
+            (Some(o), None) => Some((o, THINK_OPEN_TAG.len())),
+            (None, Some(c)) => Some((c, THINK_CLOSE_TAG.len())),
+            (None, None) => None,
+        };
+        match found {
+            Some((at, len)) => {
+                let head = self.pending[..at].to_string();
+                self.push_text(&head);
+                self.pending.drain(..at + len);
+                true
+            }
+            None => {
+                let cut = self.pending.len()
+                    - held_tag_len(&self.pending, &[THINK_OPEN_TAG, THINK_CLOSE_TAG]);
+                if cut == 0 {
+                    return false;
+                }
+                let head = self.pending[..cut].to_string();
+                self.push_text(&head);
+                self.pending.drain(..cut);
+                false
+            }
+        }
+    }
+
+    fn push_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if !self.text_started {
+            self.text_started = true;
+            (self.emit)(StreamEvent::TextStart {
+                content_index: LOCAL_TEXT_INDEX,
+            });
+        }
+        self.text_chars += text.chars().count();
+        (self.emit)(StreamEvent::TextDelta {
+            content_index: LOCAL_TEXT_INDEX,
+            delta: text.to_string(),
+        });
+    }
+
+    fn push_thinking(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.start_thinking();
+        (self.emit)(StreamEvent::ThinkingDelta {
+            content_index: THINK_INDEX,
+            delta: text.to_string(),
+        });
+    }
+
+    fn start_thinking(&mut self) {
+        if self.thinking_started {
+            return;
+        }
+        self.thinking_started = true;
+        (self.emit)(StreamEvent::ThinkingStart {
+            content_index: THINK_INDEX,
+        });
+    }
+
+    fn end_thinking(&mut self) {
+        if !self.thinking_started || self.thinking_ended {
+            return;
+        }
+        self.thinking_ended = true;
+        (self.emit)(StreamEvent::ThinkingEnd {
+            content_index: THINK_INDEX,
+            signature: None,
+        });
+    }
+}
+
+/// Byte length of the longest suffix that is still a prefix of a marker.
+fn held_tag_len(text: &str, tags: &[&str]) -> usize {
+    let max = tags.iter().map(|tag| tag.len()).max().unwrap_or(0);
+    for len in (1..=text.len().min(max)).rev() {
+        if !text.is_char_boundary(text.len() - len) {
+            continue;
+        }
+        let suffix = &text[text.len() - len..];
+        if tags.iter().any(|tag| tag.starts_with(suffix)) {
+            return len;
+        }
+    }
+    0
+}
+
+/// Pump engine chunks through the splitter; returns "reasoning without answer".
+async fn stream_answer(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    emit: Emit<'_>,
+) -> bool {
+    let mut split = ThinkSplit::new(emit);
+    while let Some(text) = rx.recv().await {
+        split.feed(&text);
+    }
+    split.finish()
+}
+
+/// Emit the terminal metrics/done pair. A reasoning-only generation is made
+/// visible instead of persisting an empty assistant message.
+fn finish_local(metrics: EngineMetrics, thinking_only: bool, cancelled: bool, emit: Emit<'_>) {
+    let mut reason = metrics.stop_reason.clone();
+    if thinking_only && !cancelled {
+        if reason == StopReason::Stop.as_str() {
+            reason = STOP_REASON_EMPTY_ANSWER.to_string();
+        }
+        log::warn!(
+            "local engine produced no answer after reasoning (engine stop reason: {})",
+            metrics.stop_reason
+        );
+        emit(StreamEvent::TextStart {
+            content_index: LOCAL_TEXT_INDEX,
+        });
+        emit(StreamEvent::TextDelta {
+            content_index: LOCAL_TEXT_INDEX,
+            delta: EMPTY_ANSWER_NOTE.to_string(),
+        });
+        emit(StreamEvent::TextEnd {
+            content_index: LOCAL_TEXT_INDEX,
+        });
+    }
+    let usage = local_usage(metrics.prompt_tokens, metrics.output_tokens);
+    emit(StreamEvent::Metrics { metrics });
+    emit(StreamEvent::Done { reason, usage });
+}
+
+// ---------------------------------------------------------------------------
 // 本地 llama.cpp 分支
 // ---------------------------------------------------------------------------
 
@@ -837,24 +1134,11 @@ async fn run_local(
         )
     });
 
-    emit(StreamEvent::TextStart { content_index: 0 });
-    while let Some(text) = rx.recv().await {
-        emit(StreamEvent::TextDelta {
-            content_index: 0,
-            delta: text,
-        });
-    }
-    emit(StreamEvent::TextEnd { content_index: 0 });
+    let thinking_only = stream_answer(&mut rx, emit).await;
 
     match handle.await {
         Ok(Ok(metrics)) => {
-            emit(StreamEvent::Metrics {
-                metrics: metrics.clone(),
-            });
-            emit(StreamEvent::Done {
-                reason: metrics.stop_reason,
-                usage: local_usage(metrics.prompt_tokens, metrics.output_tokens),
-            });
+            finish_local(metrics, thinking_only, cancel.load(Ordering::SeqCst), emit);
         }
         Ok(Err(error)) => {
             let aborted = cancel.load(Ordering::SeqCst);
@@ -953,24 +1237,11 @@ async fn run_mnn(
         )
     });
 
-    emit(StreamEvent::TextStart { content_index: 0 });
-    while let Some(text) = rx.recv().await {
-        emit(StreamEvent::TextDelta {
-            content_index: 0,
-            delta: text,
-        });
-    }
-    emit(StreamEvent::TextEnd { content_index: 0 });
+    let thinking_only = stream_answer(&mut rx, emit).await;
 
     match handle.await {
         Ok(Ok(metrics)) => {
-            emit(StreamEvent::Metrics {
-                metrics: metrics.clone(),
-            });
-            emit(StreamEvent::Done {
-                reason: metrics.stop_reason,
-                usage: local_usage(metrics.prompt_tokens, metrics.output_tokens),
-            });
+            finish_local(metrics, thinking_only, cancel.load(Ordering::SeqCst), emit);
         }
         Ok(Err(error)) => {
             let aborted = cancel.load(Ordering::SeqCst);
@@ -2703,4 +2974,139 @@ async fn anthropic_json(
         usage,
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod think_split_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Default)]
+    struct Capture {
+        thinking: String,
+        text: String,
+        starts: Vec<&'static str>,
+    }
+
+    fn run(chunks: &[&str]) -> (Capture, bool) {
+        let events = Arc::new(Mutex::new(Vec::<StreamEvent>::new()));
+        let store = events.clone();
+        let emit = move |event: StreamEvent| store.lock().unwrap().push(event);
+        let mut split = ThinkSplit::new(&emit);
+        for chunk in chunks {
+            split.feed(chunk);
+        }
+        let thinking_only = split.finish();
+        drop(split);
+        drop(emit);
+
+        let events = Arc::try_unwrap(events).unwrap().into_inner().unwrap();
+        let mut capture = Capture::default();
+        for event in events {
+            match event {
+                StreamEvent::ThinkingStart { .. } => capture.starts.push("thinking_start"),
+                StreamEvent::ThinkingDelta { delta, .. } => capture.thinking.push_str(&delta),
+                StreamEvent::ThinkingEnd { .. } => capture.starts.push("thinking_end"),
+                StreamEvent::TextStart { .. } => capture.starts.push("text_start"),
+                StreamEvent::TextDelta { delta, .. } => capture.text.push_str(&delta),
+                StreamEvent::TextEnd { .. } => capture.starts.push("text_end"),
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        assert!(
+            !capture.text.contains(THINK_OPEN_TAG) && !capture.text.contains(THINK_CLOSE_TAG),
+            "raw tags leaked into the answer: {:?}",
+            capture.text
+        );
+        (capture, thinking_only)
+    }
+
+    #[test]
+    fn splits_thinking_from_answer() {
+        let (capture, thinking_only) = run(&["<think>先想一下</think>答案"]);
+        assert_eq!(capture.thinking, "先想一下");
+        assert_eq!(capture.text, "答案");
+        assert_eq!(
+            capture.starts,
+            ["thinking_start", "thinking_end", "text_start", "text_end"]
+        );
+        assert!(!thinking_only);
+    }
+
+    #[test]
+    fn tag_cut_across_chunks_never_leaks() {
+        let (capture, thinking_only) = run(&["<thi", "nk>先想", "</thi", "nk>答", "案"]);
+        assert_eq!(capture.thinking, "先想");
+        assert_eq!(capture.text, "答案");
+        assert_eq!(
+            capture.starts,
+            ["thinking_start", "thinking_end", "text_start", "text_end"]
+        );
+        assert!(!thinking_only);
+    }
+
+    #[test]
+    fn partial_open_tag_only() {
+        let (capture, thinking_only) = run(&["<thi"]);
+        assert_eq!(capture.text, "");
+        assert_eq!(capture.starts, ["thinking_start", "thinking_end"]);
+        assert!(
+            thinking_only,
+            "a truncated opener means reasoning, no answer"
+        );
+    }
+
+    #[test]
+    fn close_tag_without_answer() {
+        let (capture, thinking_only) = run(&["<think>先想</think>"]);
+        assert_eq!(capture.thinking, "先想");
+        assert_eq!(capture.text, "");
+        assert_eq!(capture.starts, ["thinking_start", "thinking_end"]);
+        assert!(thinking_only);
+    }
+
+    #[test]
+    fn empty_thinking_without_answer() {
+        let (capture, thinking_only) = run(&["<think></think>"]);
+        assert_eq!(capture.thinking, "");
+        assert_eq!(capture.text, "");
+        assert!(thinking_only);
+    }
+
+    #[test]
+    fn unclosed_thinking_at_length_or_cancel() {
+        let (capture, thinking_only) = run(&["<think>先想一"]);
+        assert_eq!(capture.thinking, "先想一");
+        assert_eq!(capture.text, "");
+        assert_eq!(capture.starts, ["thinking_start", "thinking_end"]);
+        assert!(thinking_only);
+    }
+
+    #[test]
+    fn plain_answer_has_no_thinking_events() {
+        let (capture, thinking_only) = run(&["普通回答"]);
+        assert_eq!(capture.text, "普通回答");
+        assert_eq!(capture.starts, ["text_start", "text_end"]);
+        assert!(!thinking_only);
+    }
+
+    #[test]
+    fn close_tag_without_opener_still_hides_the_marker() {
+        let (capture, thinking_only) = run(&["先想</think>答案"]);
+        assert_eq!(capture.thinking, "先想");
+        assert_eq!(capture.text, "答案");
+        assert!(!thinking_only);
+    }
+
+    #[test]
+    fn stray_tags_after_the_close_are_stripped() {
+        let (capture, _) = run(&["<think>思考</think>答案<think>更多</think>"]);
+        assert_eq!(capture.text, "答案更多");
+    }
+
+    #[test]
+    fn lone_angle_brackets_survive() {
+        let (capture, _) = run(&["a<", " b", " c>"]);
+        assert_eq!(capture.text, "a< b c>");
+    }
 }
