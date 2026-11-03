@@ -344,7 +344,7 @@ fn update_max(readings: &mut ThermalReadings, reading: ThermalReading) {
     };
     if slot
         .as_ref()
-        .map_or(true, |current| reading.celsius > current.celsius)
+        .is_none_or(|current| reading.celsius > current.celsius)
     {
         *slot = Some(reading);
     }
