@@ -228,7 +228,7 @@ pub fn validate_bundle(name: &str, dir: &Path) -> Result<BundleInfo, MnnError> {
         });
     }
     if !dir.join(BUNDLE_CONFIG).is_file() {
-        return Err(MnnError::invalid(format!(
+        return Err(MnnError::unsupported_format(format!(
             "{} 缺少 {BUNDLE_CONFIG}",
             dir.display()
         )));
@@ -265,7 +265,7 @@ pub fn validate_bundle(name: &str, dir: &Path) -> Result<BundleInfo, MnnError> {
         )));
     }
     if !has_weights {
-        return Err(MnnError::invalid(format!(
+        return Err(MnnError::unsupported_format(format!(
             "{} 缺少 .mnn 权重文件",
             dir.display()
         )));
@@ -599,7 +599,7 @@ mod tests {
         std::fs::create_dir_all(&empty).unwrap();
         assert!(matches!(
             validate_bundle("empty", &empty),
-            Err(MnnError::InvalidArgument { .. })
+            Err(MnnError::UnsupportedFormat { .. })
         ));
 
         let no_weights = root.join("no-weights");
@@ -607,7 +607,7 @@ mod tests {
         write_bundle(&no_weights, false);
         assert!(matches!(
             validate_bundle("no-weights", &no_weights),
-            Err(MnnError::InvalidArgument { .. })
+            Err(MnnError::UnsupportedFormat { .. })
         ));
 
         let valid = root.join("valid");

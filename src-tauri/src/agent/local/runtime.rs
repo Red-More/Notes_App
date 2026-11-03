@@ -282,7 +282,9 @@ impl Runtime {
         }
         let path = self.inner.models_dir.join(file);
         if !path.is_file() {
-            return Err(ToolError::invalid(format!("模型文件不存在：{file}")));
+            return Err(ToolError::NotFound {
+                path: file.to_string(),
+            });
         }
         self.require_gate()?;
         let device = gating::device_profile();
@@ -571,8 +573,7 @@ impl InferenceEngine for Runtime {
             context_size: options.context_size,
             ..LocalConfig::default()
         };
-        self.load_blocking(config)
-            .map_err(|e| EngineError::invalid(e.to_string()))
+        self.load_blocking(config).map_err(map_load_error)
     }
 
     fn generate(
@@ -617,4 +618,66 @@ fn read_setting(conn: &Connection, key: &str) -> Option<String> {
     .ok()
     .flatten()
     .filter(|value: &String| !value.trim().is_empty())
+}
+
+/// Exhaustive translation from VFS `ToolError` to the engine taxonomy. Every
+/// variant is classified explicitly so a new `ToolError` variant breaks the
+/// build instead of silently becoming `invalidArgument`.
+fn map_load_error(error: ToolError) -> EngineError {
+    match error {
+        ToolError::NotFound { path } | ToolError::ParentMissing { path } => {
+            EngineError::ModelNotFound { model: path }
+        }
+        ToolError::InvalidArgument { message } | ToolError::InvalidPath { message } => {
+            EngineError::InvalidArgument { message }
+        }
+        ToolError::PathEscape { root, got } => EngineError::InvalidArgument {
+            message: format!("路径越界：只允许 {root} 之下，收到 {got}"),
+        },
+        ToolError::NotADirectory { path } => EngineError::InvalidArgument {
+            message: format!("{path} 不是目录"),
+        },
+        ToolError::IsDirectory { path } => {
+            EngineError::unsupported_format(format!("{path} 是目录，加载需要单个 .gguf 文件"))
+        }
+        ToolError::AlreadyExists { path } => EngineError::InvalidArgument {
+            message: format!("{path} 已存在"),
+        },
+        ToolError::ReadOnlyArea { path } => EngineError::io(format!("{path} 属于只读区")),
+        ToolError::Conflict { current, expect } => EngineError::Engine {
+            message: format!("加载期间出现版本冲突：当前 rev={current}，期望 rev={expect}"),
+        },
+        ToolError::NoMatch { hint } => EngineError::Engine {
+            message: format!("加载期间出现未命中：{hint}"),
+        },
+        ToolError::ContentTooLarge { limit, actual } => EngineError::InvalidArgument {
+            message: format!("内容过大：{actual} 字节，上限 {limit} 字节"),
+        },
+        ToolError::Storage { message } => EngineError::io(message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_model_maps_to_model_not_found() {
+        let error = map_load_error(ToolError::NotFound {
+            path: "qwen.gguf".into(),
+        });
+        assert_eq!(
+            error,
+            EngineError::ModelNotFound {
+                model: "qwen.gguf".into()
+            }
+        );
+        assert_eq!(error.code(), "modelNotFound");
+    }
+
+    #[test]
+    fn argument_errors_stay_invalid_argument() {
+        let error = map_load_error(ToolError::invalid("threads 必须大于 0"));
+        assert_eq!(error.code(), "invalidArgument");
+    }
 }

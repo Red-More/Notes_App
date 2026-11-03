@@ -143,9 +143,9 @@ pub struct EngineMetrics {
     pub stop_reason: String,
 }
 
-/// 统一错误；序列化为 `{ code, message }`，与 VFS 的 `ToolError` 风格一致。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "code", rename_all = "camelCase")]
+/// 统一错误；序列化为 `{ code, message }`（`modelNotFound` 另带 `model`），
+/// 与 VFS 的 `ToolError` 风格一致。`message` 始终存在，前端无需判空。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineError {
     /// 编译时未包含对应引擎，或平台不支持。
     Unsupported { message: String },
@@ -157,6 +157,10 @@ pub enum EngineError {
     InvalidArgument { message: String },
     /// 模型或 bundle 不存在、缺少必需文件。
     ModelNotFound { model: String },
+    /// 路径存在但读写失败（权限、只读区、存储 IO）。
+    Io { message: String },
+    /// 权重格式不被当前引擎支持（例如 bundle 缺少 config/权重）。
+    UnsupportedFormat { message: String },
     /// 原生层返回失败（创建、加载、配置、生成）。
     Engine { message: String },
     /// 阻塞任务调度失败（`spawn_blocking`）。
@@ -187,6 +191,34 @@ impl EngineError {
             message: message.into(),
         }
     }
+
+    pub fn io(message: impl Into<String>) -> Self {
+        Self::Io {
+            message: message.into(),
+        }
+    }
+
+    pub fn unsupported_format(message: impl Into<String>) -> Self {
+        Self::UnsupportedFormat {
+            message: message.into(),
+        }
+    }
+
+    /// 机器可读判别值，与序列化后的 `code` 字段完全一致。
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Unsupported { .. } => "unsupported",
+            Self::NotLoaded => "notLoaded",
+            Self::Busy => "busy",
+            Self::InvalidArgument { .. } => "invalidArgument",
+            Self::ModelNotFound { .. } => "modelNotFound",
+            Self::Io { .. } => "io",
+            Self::UnsupportedFormat { .. } => "unsupportedFormat",
+            Self::Engine { .. } => "engine",
+            Self::Thread { .. } => "thread",
+            Self::Cancelled => "cancelled",
+        }
+    }
 }
 
 impl std::fmt::Display for EngineError {
@@ -197,6 +229,8 @@ impl std::fmt::Display for EngineError {
             Self::Busy => write!(f, "本地模型正忙，请稍后再试"),
             Self::InvalidArgument { message } => write!(f, "参数非法：{message}"),
             Self::ModelNotFound { model } => write!(f, "模型不存在：{model}"),
+            Self::Io { message } => write!(f, "读写失败：{message}"),
+            Self::UnsupportedFormat { message } => write!(f, "格式不支持：{message}"),
             Self::Engine { message } => write!(f, "引擎错误：{message}"),
             Self::Thread { message } => write!(f, "任务调度失败：{message}"),
             Self::Cancelled => write!(f, "已取消"),
@@ -205,6 +239,30 @@ impl std::fmt::Display for EngineError {
 }
 
 impl std::error::Error for EngineError {}
+
+/// Wire shape: `code` and `message` are always present, while `model` keeps the
+/// field that `modelNotFound` already exposed to the frontend.
+#[derive(Serialize)]
+struct EngineErrorWire<'a> {
+    code: &'static str,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<&'a str>,
+}
+
+impl Serialize for EngineError {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        EngineErrorWire {
+            code: self.code(),
+            message: self.to_string(),
+            model: match self {
+                Self::ModelNotFound { model } => Some(model.as_str()),
+                _ => None,
+            },
+        }
+        .serialize(serializer)
+    }
+}
 
 /// 引擎契约。所有方法都可从任意线程调用；实现方自行串行化内部句柄。
 pub trait InferenceEngine: Send + Sync {
@@ -254,6 +312,22 @@ mod tests {
             dir: PathBuf::from("C:/models/qwen-0.6b"),
         };
         assert_eq!(asset.display_name(), "qwen-0.6b");
+    }
+
+    #[test]
+    fn engine_errors_always_carry_code_and_message() {
+        let missing = serde_json::to_value(EngineError::ModelNotFound {
+            model: "qwen-0.6b".into(),
+        })
+        .unwrap();
+        assert_eq!(missing["code"], "modelNotFound");
+        assert_eq!(missing["model"], "qwen-0.6b");
+        assert_eq!(missing["message"], "模型不存在：qwen-0.6b");
+
+        let cancelled = serde_json::to_value(EngineError::Cancelled).unwrap();
+        assert_eq!(cancelled["code"], "cancelled");
+        assert_eq!(cancelled["message"], "已取消");
+        assert!(cancelled.get("model").is_none());
     }
 
     #[test]
