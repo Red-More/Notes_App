@@ -379,6 +379,22 @@ pnpm android:build:local   # 仅 llama（现有脚本）
 
 环境注意：`src-tauri/.cargo/config.toml` 已固化 NDK 路径，但 `MNN_LIB_DIR` / `MNN_INCLUDE_DIR` 仍需按会话设置或 `setx` 持久化。构建必须单进程串行（并发 gradle/cargo 会触发 `os error 183`）；`ANDROID_NDK` 必须显式指向完整的 r28c，否则 `llama-cpp-sys` 会探测到残缺目录。
 
+### 11.5 生成超时与卡死检测（2026-11-03）
+
+现状：`agent::inference::timeout` 提供三个独立闸，全部由 chunk 心跳判定，而不是只在入口计时：
+
+| 闸 | 语义 | 默认值 |
+| --- | --- | --- |
+| `firstToken`（`first_token_ms`） | 从开始生成到首个 chunk 的上限，覆盖 prefill 挂死 | `0`（关闭） |
+| `idle`（`idle_ms`） | 相邻两个 chunk 之间的空档上限，覆盖 decode 卡死 | `0`（关闭） |
+| `total`（`total_ms`） | 整轮绝对上限，覆盖“持续有输出但总时长失控” | `0`（关闭） |
+
+三个闸默认全关（0 = off）：本机没有真机标定数据，硬编码默认值会改变既有生成语义，因此 `GenerateParams::timeout` 默认全 0，默认路径与之前的无超时行为一致；具体默认值待真机标定，命令层暂未开放这三个参数。
+
+超时后的行为（两个引擎一致）：心跳越界 → 置位与用户取消共用的取消标记 → 引擎在 batch/token（llama）或 token（MNN）边界退出 → 该轮返回 `EngineError::Timeout { stage }`，序列化为 `{ code: "timeout", stage: "firstToken" | "idle" | "total" }`，与用户主动取消的 `code: "cancelled"` 可区分。MNN 的 worker 若在发出取消后 1 s 内仍未返回（说明 native 不响应），会隔离该线程、重建 worker 并清空“已加载”状态（模型需要重新加载），后续排队的任务由新线程继续执行；`MAX_RESTARTS = 3` 的上限沿用 P1-6 的机制。
+
+仍然做不到的部分（如实记录）：native 调用若永久挂死，旧线程无法被安全回收，只能隔离后泄漏；llama 侧没有 worker，生成直接占用调用方的 `spawn_blocking` 线程，超时检查也只能在 batch/token 边界进行，进程内无法强制打断一次正在返回的 native 调用。真实挂死场景无法在本机复现，上述路径由 `cargo test --lib` 的 fake handler（慢回调、以及忽略取消的线程）覆盖。
+
 ---
 
 ## 附：核查方法与局限
