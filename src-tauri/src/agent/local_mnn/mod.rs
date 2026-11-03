@@ -316,6 +316,29 @@ struct Inner {
     cancel: Mutex<Option<Arc<AtomicBool>>>,
     /// 最近一轮的统一指标，供状态页读取。
     last_metrics: Mutex<Option<EngineMetrics>>,
+    /// 加载门闩：同一时刻只允许一个 `load` 进入加载路径。
+    loading: AtomicBool,
+}
+
+/// 一次性加载许可；离开作用域时自动复位门闩（异常返回也不会卡死）。
+///
+/// 与 llama 侧 `loading.swap` 的写法一致：第二个并发 `load` 立即失败，
+/// 而不是排进 worker 队列后长时间等待。
+struct LoadPermit<'a>(&'a AtomicBool);
+
+impl<'a> LoadPermit<'a> {
+    fn try_acquire(flag: &'a AtomicBool) -> Option<Self> {
+        if flag.swap(true, Ordering::SeqCst) {
+            return None;
+        }
+        Some(Self(flag))
+    }
+}
+
+impl Drop for LoadPermit<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 impl LocalMnnState {
@@ -332,6 +355,7 @@ impl LocalMnnState {
                 worker: Mutex::new(None),
                 cancel: Mutex::new(None),
                 last_metrics: Mutex::new(None),
+                loading: AtomicBool::new(false),
             }),
         }
     }
@@ -377,7 +401,14 @@ impl LocalMnnState {
     }
 
     /// 加载 bundle。`threads` 由命令层限定在 1..=8。
+    ///
+    /// 并发调用只有第一个能进入加载路径；其余立即返回明确错误，避免两次
+    /// 加载都排进 worker 队列（原生加载是长耗时操作）。
     pub fn load(&self, name: &str, threads: u32) -> Result<(), MnnError> {
+        let Some(_permit) = LoadPermit::try_acquire(&self.inner.loading) else {
+            return Err(MnnError::engine("已有加载进行中，请稍候重试"));
+        };
+
         #[cfg(feature = "local-mnn")]
         {
             if self.inner.status.lock().unwrap().phase == MnnPhase::Generating {
@@ -662,6 +693,54 @@ mod tests {
             state.resolve_bundle("absent"),
             Err(MnnError::ModelNotFound { .. })
         ));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn concurrent_loads_admit_exactly_one() {
+        let gate = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let admitted = Arc::new(AtomicU32::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let gate = gate.clone();
+            let barrier = barrier.clone();
+            let admitted = admitted.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                if let Some(permit) = LoadPermit::try_acquire(&gate) {
+                    admitted.fetch_add(1, Ordering::SeqCst);
+                    // Hold the permit long enough for the other call to be rejected.
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    drop(permit);
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("thread panicked");
+        }
+        assert_eq!(admitted.load(Ordering::SeqCst), 1);
+        assert!(!gate.load(Ordering::SeqCst), "permit drop should reset the gate");
+    }
+
+    #[test]
+    fn load_fails_fast_while_another_load_is_in_flight() {
+        let root = scratch_dir("load-gate");
+        let state = LocalMnnState::new(root.clone());
+        let permit = LoadPermit::try_acquire(&state.inner.loading).expect("gate starts open");
+
+        let error = state.load("anything", 2).unwrap_err();
+        assert_eq!(error.code(), "engine");
+        assert!(
+            error.to_string().contains("已有加载进行中"),
+            "unexpected message: {error}"
+        );
+        drop(permit);
+
+        // The gate is released again, so the next call proceeds to its own
+        // (feature-dependent) validation instead of the gate error.
+        let next = state.load("absent-bundle", 2).unwrap_err();
+        assert!(!next.to_string().contains("已有加载进行中"));
         std::fs::remove_dir_all(&root).ok();
     }
 
