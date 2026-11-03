@@ -408,6 +408,17 @@ impl Runtime {
         // leave the status stuck in `Generating`.
         #[cfg(feature = "local-llm")]
         let backend = self.backend().map_err(|e| EngineError::invalid(e.to_string()))?;
+        // Reject input the backend cannot render before touching any state; an
+        // early `return` afterwards would skip the `Generating` cleanup below.
+        #[cfg(feature = "local-llm")]
+        let turns: Vec<EngineTurn> = match input {
+            EngineInput::Turns(turns) => turns,
+            EngineInput::Prompt(_) => {
+                return Err(EngineError::invalid(
+                    "llama.cpp 引擎需要结构化消息，而不是预渲染 prompt",
+                ))
+            }
+        };
         if self.inner.busy.swap(true, Ordering::SeqCst) {
             return Err(EngineError::Busy);
         }
@@ -432,14 +443,6 @@ impl Runtime {
 
         #[cfg(feature = "local-llm")]
         let result = {
-            let turns: Vec<EngineTurn> = match input {
-                EngineInput::Turns(turns) => turns,
-                EngineInput::Prompt(_) => {
-                    return Err(EngineError::invalid(
-                        "llama.cpp 引擎需要结构化消息，而不是预渲染 prompt",
-                    ))
-                }
-            };
             let loaded = self.inner.loaded.lock().unwrap();
             match loaded.as_ref() {
                 Some(engine) => engine.generate(backend, &turns, params, cancel, sink),
