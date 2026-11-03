@@ -8,9 +8,11 @@ import { api, chatApi, mcpApi, mediaApi, skillApi } from '../../api'
 import { createAgent, extractAssistant, parseImageAssetIds, profileFromSettings, toAgentMessages } from '../../agent/runtime'
 import type { AgentProfile } from '../../agent/runtime'
 import { buildSkillsIndex } from '../../agent/skills'
+import { runManager } from '../../agent/runManager'
+import { lastJobId } from '../../agent/stream'
 import type { AgentEvent } from '@earendil-works/pi-agent-core'
 import type { AgentMessage } from '@earendil-works/pi-agent-core'
-import type { AgentSettings, ChatConversation, ChatMessageRecord, MessageUsage, SkillSummary } from '../../types'
+import type { AgentSettings, ChatConversation, ChatJobSnapshot, ChatMessageRecord, MessageUsage, SkillSummary } from '../../types'
 import { friendlyError, normalizeImage } from '../../utils'
 import type { ImageContent } from '@earendil-works/pi-ai'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
@@ -160,6 +162,83 @@ function recordsToItems(
     }
   }
   return items
+}
+
+/** Terminal job states; anything else still has an in-flight bubble. */
+function jobSettled(status: ChatJobSnapshot['status']): boolean {
+  return status === 'done' || status === 'failed' || status === 'cancelled'
+}
+
+/**
+ * Rebuild the live bubble of a job that kept generating while the page was
+ * detached. Persisted rows win: a settled assistant row for this job means the
+ * transcript already owns the turn, so nothing is appended here.
+ */
+async function loadActiveJob(
+  conversationId: number,
+  records: ChatMessageRecord[],
+): Promise<{ items: Item[]; streamingId: string | null }> {
+  const jobId = lastJobId(conversationId)
+  if (jobId === undefined) return { items: [], streamingId: null }
+  let job: ChatJobSnapshot
+  try {
+    job = await chatApi.jobSnapshot(jobId)
+  } catch {
+    return { items: [], streamingId: null }
+  }
+  if (job.conversationId !== conversationId) return { items: [], streamingId: null }
+  if (records.some((record) => record.jobId === job.id)) return { items: [], streamingId: null }
+
+  const texts: string[] = []
+  const thoughts: string[] = []
+  let signature: string | null = null
+  for (const block of job.blocks) {
+    if (block.type === 'text') texts.push(block.text)
+    else if (block.type === 'thinking') {
+      thoughts.push(block.thinking)
+      if (block.signature) signature = block.signature
+    }
+  }
+  const pending = !jobSettled(job.status)
+  const cancelled = job.status === 'cancelled'
+  const failed = job.status === 'failed' || cancelled
+  const text = failed
+    ? cancelled
+      ? '已取消'
+      : `回答失败：${job.errorMessage ?? '未知错误'}`
+    : texts.join('\n')
+  const id = `job-${job.id}`
+  const items: Item[] = []
+  if (text.trim() !== '' || pending) {
+    items.push({
+      id,
+      kind: 'assistant',
+      text,
+      streaming: pending,
+      isError: failed,
+      usage: failed ? null : job.usage,
+      thinking: thoughts.length > 0 ? thoughts.join('\n') : null,
+      thinkingSignature: signature,
+    })
+  }
+  // Tool cards already persisted (completed calls) stay in the transcript.
+  const settledCalls = new Set(
+    records
+      .filter((record) => record.role === 'tool' && record.toolCallId)
+      .map((record) => record.toolCallId as string),
+  )
+  for (const block of job.blocks) {
+    if (block.type !== 'toolCall' || settledCalls.has(block.id)) continue
+    items.push({
+      id: block.id,
+      kind: 'tool',
+      toolName: block.name,
+      args: JSON.stringify(block.arguments ?? {}),
+      status: pending ? 'running' : 'error',
+      text: pending ? '' : '未完成',
+    })
+  }
+  return { items, streamingId: pending ? id : null }
 }
 
 function toolResultText(result: unknown): string {
@@ -408,7 +487,6 @@ export default function ChatPage({ isActive }: Props) {
   const rowRefs = useRef(new Map<string, HTMLDivElement>())
 
   const agentRef = useRef<ReturnType<typeof createAgent> | null>(null)
-  const unsubscribeRef = useRef<(() => void) | null>(null)
   const conversationRef = useRef<ChatConversation | null>(null)
   const skillsRef = useRef<SkillSummary[]>([])
   // Mirror of `online` for event handlers that must not rebuild the agent.
@@ -482,20 +560,6 @@ export default function ChatPage({ isActive }: Props) {
           messages: [
             { role: 'assistant', content: text, toolCalls, isError, usage, thinking, thinkingSignature },
           ],
-        }),
-      )
-    },
-    [enqueuePersist],
-  )
-
-  const persistTool = useCallback(
-    (toolCallId: string, toolName: string, text: string, isError: boolean) => {
-      const convId = conversationRef.current?.id
-      if (!convId) return
-      void enqueuePersist(() =>
-        chatApi.append({
-          conversationId: convId,
-          messages: [{ role: 'tool', content: text, toolCallId, toolName, isError }],
         }),
       )
     },
@@ -608,22 +672,14 @@ export default function ChatPage({ isActive }: Props) {
               pendingInitialUserRef.current = false
               return
             }
-            // Queued steer/follow-up messages are persisted when injected.
-            const text = userText(event.message)
-            const convId = conversationRef.current?.id
-            if (text.trim() === '' || !convId) return
-            void enqueuePersist(() =>
-              chatApi.append({
-                conversationId: convId,
-                messages: [{ role: 'user', content: text }],
-              }),
-            )
+            // Queued user turns are persisted by the run manager, which owns
+            // the transcript even while this page is detached.
             return
           }
           if (event.message.role !== 'assistant') return
           const message = event.message
           const id = streamingIdRef.current
-          const { text, toolCalls, thinking, thinkingSignature } = extractAssistant(message)
+          const { text, thinking, thinkingSignature } = extractAssistant(message)
           const failed = message.stopReason === 'error' || message.stopReason === 'aborted'
           const usage = failed ? null : usageFromMessage(message)
           const shown = failed
@@ -651,15 +707,7 @@ export default function ChatPage({ isActive }: Props) {
           settledRef.current = true
           if (failed) setNetworkIssue(networkFailure(message.errorMessage ?? ''))
           else setNetworkIssue(false)
-          // Failure/cancel bubbles are persisted too, so reloads keep the last state.
-          persistAssistant(
-            failed ? shown : text,
-            failed ? null : toolCalls,
-            failed,
-            usage,
-            thinking,
-            failed ? null : thinkingSignature,
-          )
+          // Failure/cancel bubbles are persisted by the run manager too.
           scrollToBottom()
           break
         }
@@ -696,14 +744,29 @@ export default function ChatPage({ isActive }: Props) {
           const started = toolStartRef.current.get(event.toolCallId)
           toolStartRef.current.delete(event.toolCallId)
           const durationMs = started === undefined ? undefined : performance.now() - started
-          setItems((prev) =>
-            prev.map((item) =>
+          setItems((prev) => {
+            const exists = prev.some((item) => item.id === event.toolCallId && item.kind === 'tool')
+            if (!exists) {
+              // Re-mounted mid-execution: the start event was not observed.
+              return [
+                ...prev,
+                {
+                  id: event.toolCallId,
+                  kind: 'tool',
+                  toolName: event.toolName,
+                  args: '',
+                  status: event.isError ? 'error' : 'done',
+                  text,
+                  durationMs,
+                },
+              ]
+            }
+            return prev.map((item) =>
               item.id === event.toolCallId && item.kind === 'tool'
                 ? { ...item, status: event.isError ? 'error' : 'done', text, durationMs }
                 : item,
-            ),
-          )
-          persistTool(event.toolCallId, event.toolName, text, event.isError)
+            )
+          })
           scrollToBottom()
           break
         }
@@ -717,18 +780,14 @@ export default function ChatPage({ isActive }: Props) {
           break
       }
     },
-    [enqueuePersist, persistAssistant, persistTool, scrollToBottom],
+    [scrollToBottom],
   )
 
-  const disposeAgent = useCallback(() => {
-    agentRef.current?.abort()
-    unsubscribeRef.current?.()
-    unsubscribeRef.current = null
-    agentRef.current = null
-    // 中断旧流后立即复位发送状态：abort 产生的 agent_end 会因退订而丢失，不能再依赖它。
-    streamingIdRef.current = null
-    pendingInitialUserRef.current = false
-    setStreaming(false)
+  /** Drop this page's UI listener; the run keeps streaming and persisting. */
+  const detachPage = useCallback((conversationId: number) => {
+    runManager.detach(conversationId)
+    // An idle run has nothing left to protect, so free it with the page.
+    runManager.releaseIfIdle(conversationId)
   }, [])
 
   /** Build an Agent for the given transcript; returns null when no model is usable. */
@@ -752,7 +811,7 @@ export default function ChatPage({ isActive }: Props) {
         buildSkillsIndex(skillsRef.current),
         skillsRef.current,
         mcpTools,
-        `conv_${conv.id}`,
+        conv.id,
       )
       return { agent, profile: activeProfile }
     },
@@ -761,25 +820,47 @@ export default function ChatPage({ isActive }: Props) {
 
   const openConversation = useCallback(
     async (conv: ChatConversation) => {
-      disposeAgent()
+      const previous = conversationRef.current
+      if (previous && previous.id !== conv.id) detachPage(previous.id)
       conversationRef.current = conv
       setConversation(conv)
       setLoading(true)
+      streamingIdRef.current = null
+      pendingInitialUserRef.current = false
       try {
         const records = await chatApi.messages(conv.id)
         const imageData = await loadImageData(records)
-        setItems(recordsToItems(records, imageData))
+        const baseItems = recordsToItems(records, imageData)
+        // A run that kept generating while this page was detached is adopted,
+        // never aborted: rebuild its in-flight bubble from the job snapshot.
+        if (runManager.isStreaming(conv.id)) {
+          const run = runManager.acquire(conv.id)
+          if (run) {
+            agentRef.current = run.agent
+            runManager.adopt(conv.id, handleEvent)
+            const live = await loadActiveJob(conv.id, records)
+            setItems([...baseItems, ...live.items])
+            streamingIdRef.current = live.streamingId
+            settledRef.current = false
+            setStreaming(true)
+            return
+          }
+        }
+        // Idle run: drop it so model/config edits take effect, then rebuild.
+        runManager.dispose(conv.id)
+        setItems(baseItems)
         // 优先使用会话记录里的模型条目；该条目被删除后回退到当前激活模型。
         const built = await buildAgent(conv, records, imageData)
         if (!built) {
           // 没有可用模型时仍可查看历史，只是不能发送。
+          agentRef.current = null
+          setStreaming(false)
           return
         }
         setContextWindow(built.profile.contextWindow ?? 128000)
-        unsubscribeRef.current = built.agent.subscribe((event) => {
-          handleEvent(event)
-        })
         agentRef.current = built.agent
+        runManager.attach(conv.id, built.agent, handleEvent)
+        setStreaming(false)
       } catch (e) {
         toast(friendlyError(e))
       } finally {
@@ -788,7 +869,7 @@ export default function ChatPage({ isActive }: Props) {
         setScrollBottomVisible(false)
       }
     },
-    [buildAgent, disposeAgent, handleEvent, scrollToBottom],
+    [buildAgent, detachPage, handleEvent, scrollToBottom],
   )
 
   const bootstrap = useCallback(async () => {
@@ -824,8 +905,14 @@ export default function ChatPage({ isActive }: Props) {
     void bootstrap()
   }, [bootstrap])
 
-  // 页面被编辑器/文件夹浮层替换时会卸载：中断当前流并退订。
-  useEffect(() => () => disposeAgent(), [disposeAgent])
+  // 页面被编辑器/文件夹浮层替换时会卸载：只退订 UI，后台作业继续生成并落库。
+  useEffect(
+    () => () => {
+      const conv = conversationRef.current
+      if (conv) detachPage(conv.id)
+    },
+    [detachPage],
+  )
 
   // 页面激活时刷新配置；模型变化则重建 Agent（历史保持）。
   // 只依赖 isActive：effect 内写回 settings 的新对象不会再触发自身，避免无限 IPC 循环。
@@ -843,8 +930,11 @@ export default function ChatPage({ isActive }: Props) {
         // Rebuild on every activation so per-model capability edits are applied.
         const conv = conversationRef.current
         if (!conv) return
+        // An active run is already wired to this page; rebuilding would abort it.
+        if (runManager.isStreaming(conv.id)) return
         if (!next.activeId && next.models.length === 0) {
-          disposeAgent()
+          runManager.dispose(conv.id)
+          agentRef.current = null
           return
         }
         await openConversation(conv)
@@ -855,7 +945,7 @@ export default function ChatPage({ isActive }: Props) {
     return () => {
       disposed = true
     }
-  }, [disposeAgent, isActive, openConversation])
+  }, [isActive, openConversation])
 
   const ensureTitle = useCallback(async (text: string) => {
     const conv = conversationRef.current
@@ -920,10 +1010,13 @@ export default function ChatPage({ isActive }: Props) {
         }))
         // The prompt's own user events must not duplicate this bubble.
         pendingInitialUserRef.current = true
+        // The run manager persists the same turn; skip its first user pair too.
+        runManager.markPrompt(conv.id)
         if (images.length > 0) await agent.prompt(promptText, images)
         else await agent.prompt(text)
       } catch (e) {
         pendingInitialUserRef.current = false
+        runManager.resetStreaming(conv.id)
         const shown = failureText(e, onlineRef.current)
         if (!onlineRef.current || networkFailure(friendlyError(e))) setNetworkIssue(true)
         // Only add a bubble when the stream never reached `message_end`,
@@ -1005,20 +1098,21 @@ export default function ChatPage({ isActive }: Props) {
           }
           return prev
         })
-        disposeAgent()
+        runManager.dispose(conv.id)
         const built = await buildAgent(conv, kept, imageData)
         if (!built) {
           toast('请先在设置中启用对话模型')
           return
         }
         setContextWindow(built.profile.contextWindow ?? 128000)
-        unsubscribeRef.current = built.agent.subscribe((event) => handleEvent(event))
         agentRef.current = built.agent
+        runManager.attach(conv.id, built.agent, handleEvent)
         settledRef.current = false
         pendingInitialUserRef.current = false
         setStreaming(true)
         scrollToBottom()
         try {
+          runManager.markContinue(conv.id)
           await built.agent.continue()
         } finally {
           setStreaming(false)
@@ -1028,7 +1122,7 @@ export default function ChatPage({ isActive }: Props) {
         toast(friendlyError(e))
       }
     },
-    [buildAgent, disposeAgent, handleEvent, scrollToBottom, streaming],
+    [buildAgent, handleEvent, scrollToBottom, streaming],
   )
 
   const toggleTool = useCallback((id: string) => {
@@ -1138,13 +1232,13 @@ export default function ChatPage({ isActive }: Props) {
   )
 
   const stop = useCallback(() => {
-    const agent = agentRef.current
-    if (!agent) return
-    // Drop queued guidance so stopping really stops the run.
-    agent.clearAllQueues()
+    const conv = conversationRef.current
+    if (!conv) return
+    // Explicit stop is the only user action that aborts a live run.
+    runManager.stop(conv.id)
     setQueuedCount(0)
-    agent.abort()
-    void agent.waitForIdle().then(() => setStreaming(false))
+    const run = runManager.acquire(conv.id)
+    if (run) void run.agent.waitForIdle().then(() => setStreaming(false))
   }, [])
 
   const newConversation = useCallback(async () => {
@@ -1165,13 +1259,15 @@ export default function ChatPage({ isActive }: Props) {
   const removeConversation = useCallback(
     async (id: number) => {
       try {
+        // Deleting the conversation is an explicit stop for its run.
+        runManager.dispose(id)
         await chatApi.remove(id)
         const rest = conversations.filter((c) => c.id !== id)
         setConversations(rest)
         if (conversationRef.current?.id === id) {
           if (rest[0]) await openConversation(rest[0])
           else {
-            disposeAgent()
+            agentRef.current = null
             setItems([])
             setConversation(null)
             await newConversation()
@@ -1181,7 +1277,7 @@ export default function ChatPage({ isActive }: Props) {
         toast(friendlyError(e))
       }
     },
-    [conversations, disposeAgent, newConversation, openConversation],
+    [conversations, newConversation, openConversation],
   )
 
   const saveRename = useCallback(async () => {

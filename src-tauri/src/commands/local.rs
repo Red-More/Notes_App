@@ -123,8 +123,16 @@ pub async fn local_model_unload(agent_state: State<'_, AgentState>) -> Result<()
 
 /// 应用进入后台：默认释放内存；“允许后台常驻”开启时保持加载。
 #[tauri::command]
-pub async fn local_model_pause(agent_state: State<'_, AgentState>) -> Result<(), ToolError> {
+pub async fn local_model_pause(
+    agent_state: State<'_, AgentState>,
+    chat_jobs: State<'_, std::sync::Arc<crate::agent::jobs::ChatJobs>>,
+) -> Result<(), ToolError> {
     if agent_state.local.config().keep_alive {
+        return Ok(());
+    }
+    // A background page does not mean background work: local decoding owns the
+    // single slot, so suspending here would abort the job.
+    if chat_jobs.local_running() {
         return Ok(());
     }
     let runtime = agent_state.local.clone();

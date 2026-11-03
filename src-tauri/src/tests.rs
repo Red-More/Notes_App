@@ -576,6 +576,7 @@ fn conversation_lifecycle_persists_messages() {
                 thinking: None,
                 thinking_signature: None,
                 image_asset_ids: Some("[7]".into()),
+                job_id: None,
             },
             conversations::NewMessage {
                 role: "assistant".into(),
@@ -597,6 +598,7 @@ fn conversation_lifecycle_persists_messages() {
                 thinking: Some("先确认日期再写入".into()),
                 thinking_signature: Some("sig-1".into()),
                 image_asset_ids: None,
+                job_id: None,
             },
         ],
     )
@@ -645,6 +647,7 @@ fn truncate_after_keeps_the_user_turn_for_retry() {
             conversations::NewMessage {
                 role: "user".into(),
                 content: "写一条".into(),
+                job_id: None,
                 tool_calls: None,
                 tool_call_id: None,
                 tool_name: None,
@@ -657,6 +660,7 @@ fn truncate_after_keeps_the_user_turn_for_retry() {
             conversations::NewMessage {
                 role: "assistant".into(),
                 content: "失败回答".into(),
+                job_id: None,
                 tool_calls: None,
                 tool_call_id: None,
                 tool_name: None,
@@ -688,6 +692,7 @@ fn conversation_rejects_unknown_roles_and_bad_titles() {
         vec![conversations::NewMessage {
             role: "system".into(),
             content: "x".into(),
+            job_id: None,
             tool_calls: None,
             tool_call_id: None,
             tool_name: None,
@@ -1012,6 +1017,7 @@ fn asset_gc_keeps_chat_attachments_until_unreferenced() {
             thinking: None,
             thinking_signature: None,
             image_asset_ids: Some(format!("[{}]", asset.id)),
+            job_id: None,
         }],
     )
     .unwrap();

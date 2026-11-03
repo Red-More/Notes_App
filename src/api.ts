@@ -3,6 +3,8 @@ import type {
   AgentModelInfo,
   AgentSettings,
   ChatConversation,
+  ChatJobSnapshot,
+  ChatJobWatchEvent,
   ChatMessageRecord,
   ConnectionTestResult,
   Contact,
@@ -561,6 +563,16 @@ export const chatApi = {
   truncate: (params: { conversationId: number; messageId: number }) =>
     invoke<number>('chat_truncate', params),
   settings: () => invoke<AgentSettings>('agent_settings'),
+  /** Enqueue one model turn; resolves as soon as the job is persisted. */
+  submitJob: (conversationId: number, request: Record<string, unknown>) =>
+    invoke<ChatJobSnapshot>('chat_job_submit', { conversationId, request }),
+  /** Stream snapshot + events for a job; resolves when the job reaches a terminal state. */
+  watchJob: (jobId: number, onEvent: Channel<ChatJobWatchEvent>, afterSeq = 0) =>
+    invoke<void>('chat_job_watch', { jobId, afterSeq, onEvent }),
+  jobSnapshot: (jobId: number) => invoke<ChatJobSnapshot>('chat_job_snapshot', { jobId }),
+  jobs: (conversationId?: number, limit = 50) =>
+    invoke<ChatJobSnapshot[]>('chat_job_list', { conversationId, limit }),
+  cancelJob: (jobId: number) => invoke<ChatJobSnapshot>('chat_job_cancel', { jobId }),
   saveModel: (input: {
     id?: string
     label?: string

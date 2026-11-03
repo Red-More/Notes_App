@@ -54,6 +54,8 @@ pub struct ChatMessage {
     pub thinking_signature: Option<String>,
     /// JSON array of media asset ids attached to this user message.
     pub image_asset_ids: Option<String>,
+    /// Chat job that produced this assistant reply; `None` for legacy rows.
+    pub job_id: Option<i64>,
     pub created_at: String,
 }
 
@@ -80,6 +82,9 @@ pub struct NewMessage {
     pub thinking_signature: Option<String>,
     #[serde(default)]
     pub image_asset_ids: Option<String>,
+    /// Only assistant rows carry a job id; the unique index keeps one row per job.
+    #[serde(default)]
+    pub job_id: Option<i64>,
 }
 
 fn now(conn: &Connection) -> Result<String, ToolError> {
@@ -211,7 +216,7 @@ pub fn messages(vfs: &VirtualFs, conversation_id: i64) -> Result<Vec<ChatMessage
     let mut stmt = conn.prepare(
         "SELECT id, role, content, tool_calls, tool_call_id, tool_name, is_error, created_at,
                 usage_input, usage_output, usage_total, usage_cache_read, usage_cache_write,
-                thinking, thinking_signature, image_asset_ids
+                thinking, thinking_signature, image_asset_ids, job_id
          FROM messages WHERE conversation_id = ?1 ORDER BY id ASC",
     )?;
     let rows = stmt.query_map(params![conversation_id], row_to_message)?;
@@ -252,12 +257,18 @@ pub fn append(
     let tx = conn.unchecked_transaction()?;
     let mut inserted = Vec::new();
     for item in items {
+        // Only assistant rows own a job; tool rows share the turn but are many.
+        let job_id = if item.role == "assistant" {
+            item.job_id
+        } else {
+            None
+        };
         tx.execute(
             "INSERT INTO messages
                  (conversation_id, role, content, tool_calls, tool_call_id, tool_name, is_error,
                   usage_input, usage_output, usage_total, usage_cache_read, usage_cache_write,
-                  thinking, thinking_signature, image_asset_ids, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                  thinking, thinking_signature, image_asset_ids, created_at, job_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 conversation_id,
                 item.role,
@@ -274,7 +285,8 @@ pub fn append(
                 item.thinking,
                 item.thinking_signature,
                 item.image_asset_ids,
-                at
+                at,
+                job_id
             ],
         )?;
         inserted.push(ChatMessage {
@@ -289,6 +301,7 @@ pub fn append(
             thinking: item.thinking,
             thinking_signature: item.thinking_signature,
             image_asset_ids: item.image_asset_ids,
+            job_id,
             created_at: at.clone(),
         });
     }
@@ -362,6 +375,7 @@ fn row_to_message(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
         thinking: r.get(13)?,
         thinking_signature: r.get(14)?,
         image_asset_ids: r.get(15)?,
+        job_id: r.get(16)?,
         created_at: r.get(7)?,
     })
 }

@@ -533,6 +533,11 @@ impl ChatJobs {
     pub fn live(&self, job_id: i64) -> Option<Arc<LiveJob>> {
         self.inner.lock().unwrap().live.get(&job_id).cloned()
     }
+
+    /// A local turn is decoding; background pause must not unload the weights.
+    pub fn local_running(&self) -> bool {
+        self.inner.lock().unwrap().running.contains_key(&Lane::Local)
+    }
 }
 
 /// Start the single dispatcher. It runs forever and only reacts to `notify`.

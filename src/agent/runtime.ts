@@ -8,7 +8,7 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core'
 import type { AssistantMessage, ImageContent, Model, ToolCall, Usage } from '@earendil-works/pi-ai'
 import { buildSystemPrompt } from './prompt'
 import { trimContext } from './context'
-import { nativeStreamFn } from './stream'
+import { makeStreamFn } from './stream'
 import { createTools } from './tools'
 import type { ChatMessageRecord, AgentSettings, ModelApiFormat, SkillSummary, McpToolInfo } from '../types'
 import { parseDbTime } from '../utils'
@@ -206,7 +206,7 @@ export function createAgent(
   skillsIndex = '',
   skills: SkillSummary[] = [],
   mcpTools: McpToolInfo[] = [],
-  sessionId?: string,
+  conversationId: number,
 ): Agent {
   return new Agent({
     initialState: {
@@ -216,9 +216,10 @@ export function createAgent(
       tools: createTools(skills, mcpTools),
       messages: history,
     },
-    streamFn: nativeStreamFn,
+    // Every model turn is a background job bound to this conversation.
+    streamFn: makeStreamFn(conversationId),
     // Stable per-conversation id so cache-aware providers can reuse prefixes.
-    sessionId,
+    sessionId: `conv_${conversationId}`,
     // 按 token 预算裁剪：Rust 的 200 条上限只作兜底，避免长会话撑爆上下文。
     transformContext: async (messages) =>
       trimContext(messages, profile.contextWindow ?? 128000),

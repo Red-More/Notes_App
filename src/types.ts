@@ -281,6 +281,8 @@ export interface ChatMessageRecord {
   thinkingSignature: string | null
   /** JSON array of media asset ids attached to this user message. */
   imageAssetIds: string | null
+  /** Chat job that produced this assistant reply; null for legacy rows. */
+  jobId: number | null
   createdAt: string
 }
 
@@ -296,7 +298,55 @@ export interface NewChatMessage {
   thinking?: string | null
   thinkingSignature?: string | null
   imageAssetIds?: string | null
+  /** Assistant rows only; the backend rejects a second row for the same job. */
+  jobId?: number | null
 }
+
+/** Persisted partial assistant content of one model turn. */
+export type ChatJobBlock =
+  | { type: 'text'; contentIndex: number; text: string }
+  | { type: 'thinking'; contentIndex: number; thinking: string; signature?: string | null }
+  | {
+      type: 'toolCall'
+      contentIndex: number
+      id: string
+      name: string
+      arguments: unknown
+      /** Raw JSON delta, useful while the call is still streaming. */
+      raw: string
+    }
+
+export type ChatJobStatus =
+  | 'queued'
+  | 'running'
+  | 'cancelling'
+  | 'done'
+  | 'failed'
+  | 'cancelled'
+
+/** One `chat_jobs` row: a model turn that survives page switches. */
+export interface ChatJobSnapshot {
+  id: number
+  conversationId: number
+  requestId: string
+  modelEntry: string
+  status: ChatJobStatus
+  lastSeq: number
+  blocks: ChatJobBlock[]
+  usage: MessageUsage | null
+  stopReason: string | null
+  errorCode: string | null
+  errorMessage: string | null
+  createdAt: string
+  startedAt: string | null
+  finishedAt: string | null
+  updatedAt: string
+}
+
+/** `chat_job_watch` channel payload: snapshot first, then monotonic events. */
+export type ChatJobWatchEvent =
+  | { kind: 'snapshot'; job: ChatJobSnapshot }
+  | { kind: 'event'; jobId: number; seq: number; event: Record<string, unknown> }
 
 /** Wire protocol used by one user-defined model entry. */
 export type ModelApiFormat =
