@@ -1052,6 +1052,11 @@ fn finish_local(metrics: EngineMetrics, thinking_only: bool, cancelled: bool, em
 /// 小模型上下文有限：system 提示先裁到固定长度，历史由引擎按 token 预算裁剪。
 const LOCAL_SYSTEM_CHARS: usize = 1200;
 
+/// 本地历史字符预算，与 system 分开计算。实测 MNN 1050 字符 ≈ 792 token
+///（约 1.33 字符/token），1600 字符 ≈ 1200 token，可为输出留出余量。
+/// 超限时只丢最早的整轮，绝不截断半句。
+const LOCAL_HISTORY_CHARS: usize = 1600;
+
 /// 本地链路：按需加载模型，阻塞生成通过通道回传，事件契约与云端一致。
 async fn run_local(
     state: &AgentState,
@@ -1164,7 +1169,9 @@ async fn run_local(
 }
 
 /// MNN 会自行套用 bundle 的聊天模板，因此这里只把历史折叠成单轮文本。
-const MNN_PROMPT_CHARS: usize = 6000;
+/// 上限覆盖 system + 历史：2600 字符 ≈ 1950 token（按实测 1.33 字符/token），
+/// 剩下的上下文留给输出。
+const MNN_PROMPT_CHARS: usize = 2600;
 
 async fn run_mnn(
     mnn: &LocalMnnState,
@@ -1266,10 +1273,39 @@ async fn run_mnn(
     Ok(())
 }
 
-/// 折叠历史并按字符预算保留最近的上下文（更早的内容对 MNN 价值更低）。
+/// 折叠历史并按整轮预算保留最近的上下文（更早的内容对 MNN 价值更低）。
+/// System 始终保留；超过字符上限时从最早的一整轮开始丢，不截断半句。
 fn render_mnn_prompt(turns: &[EngineTurn]) -> String {
+    let (system, history) = match turns.first() {
+        Some(turn) if turn.role == "system" => (Some(turn), &turns[1..]),
+        _ => (None, turns),
+    };
+    let mut keep = history.len();
+    loop {
+        let prompt = assemble_mnn_prompt(system, &history[history.len() - keep..]);
+        let chars = prompt.chars().count();
+        if chars <= MNN_PROMPT_CHARS || keep <= 1 {
+            if chars > MNN_PROMPT_CHARS {
+                // A single turn cannot be split without breaking a sentence.
+                log::warn!(
+                    "MNN prompt is {chars} chars after keeping only the newest turn (cap {MNN_PROMPT_CHARS})"
+                );
+            } else if keep < history.len() {
+                log::info!(
+                    "MNN prompt dropped {} of {} history turns to stay within {MNN_PROMPT_CHARS} chars",
+                    history.len() - keep,
+                    history.len()
+                );
+            }
+            return prompt;
+        }
+        keep -= 1;
+    }
+}
+
+fn assemble_mnn_prompt(system: Option<&EngineTurn>, history: &[EngineTurn]) -> String {
     let mut out = String::new();
-    for turn in turns {
+    for turn in system.into_iter().chain(history.iter()) {
         let label = match turn.role {
             "system" => "系统指令",
             "assistant" => "助手",
@@ -1280,26 +1316,14 @@ fn render_mnn_prompt(turns: &[EngineTurn]) -> String {
         out.push_str(turn.content.trim());
         out.push_str("\n\n");
     }
-    let prompt = format!("{out}请基于以上对话继续回答，不要复述历史。");
-    let chars = prompt.chars().count();
-    if chars <= MNN_PROMPT_CHARS {
-        return prompt;
-    }
-    let skip = chars - MNN_PROMPT_CHARS;
-    let tail: String = prompt.chars().skip(skip).collect();
-    format!("[较早的历史已省略]\n{tail}")
+    out.push_str("请基于以上对话继续回答，不要复述历史。");
+    out
 }
 
 /// 把 pi transcript 折叠成聊天模板可接受的角色；工具结果并入 user。
+/// 历史按整轮保留：只丢最早轮次，最新一轮即使超预算也保留（它承载当前问题）。
 fn build_local_turns(system: &str, turns: &[Turn]) -> Vec<EngineTurn> {
-    let mut out = Vec::new();
-    let system = clip_chars(system.trim(), LOCAL_SYSTEM_CHARS);
-    if !system.is_empty() {
-        out.push(EngineTurn {
-            role: "system",
-            content: system,
-        });
-    }
+    let mut items: Vec<EngineTurn> = Vec::new();
     for turn in turns {
         let content = match turn.role {
             Role::User => {
@@ -1330,8 +1354,39 @@ fn build_local_turns(system: &str, turns: &[Turn]) -> Vec<EngineTurn> {
         } else {
             "user"
         };
-        out.push(EngineTurn { role, content });
+        items.push(EngineTurn { role, content });
     }
+
+    // Walk from the newest turn backwards so the suffix stays whole.
+    let newest = items.len().saturating_sub(1);
+    let mut keep_from = newest;
+    let mut kept = items
+        .get(newest)
+        .map_or(0, |turn| turn.content.chars().count());
+    for index in (0..newest).rev() {
+        let chars = items[index].content.chars().count();
+        if kept + chars > LOCAL_HISTORY_CHARS {
+            break;
+        }
+        kept += chars;
+        keep_from = index;
+    }
+    if keep_from > 0 {
+        log::info!(
+            "local history dropped {keep_from} of {} oldest turns (budget {LOCAL_HISTORY_CHARS} chars)",
+            items.len()
+        );
+    }
+
+    let mut out = Vec::new();
+    let system = clip_chars(system.trim(), LOCAL_SYSTEM_CHARS);
+    if !system.is_empty() {
+        out.push(EngineTurn {
+            role: "system",
+            content: system,
+        });
+    }
+    out.extend(items.drain(keep_from..));
     out
 }
 
@@ -3108,5 +3163,109 @@ mod think_split_tests {
     fn lone_angle_brackets_survive() {
         let (capture, _) = run(&["a<", " b", " c>"]);
         assert_eq!(capture.text, "a< b c>");
+    }
+}
+
+#[cfg(test)]
+mod local_budget_tests {
+    use super::*;
+
+    fn user(text: String) -> Turn {
+        Turn {
+            role: Role::User,
+            text,
+            images: Vec::new(),
+            thinking: String::new(),
+            thinking_signature: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            is_error: false,
+        }
+    }
+
+    /// 500 chars of one repeated character keep whole-turn bookkeeping obvious.
+    fn body(ch: char) -> String {
+        std::iter::repeat_n(ch, 500).collect()
+    }
+
+    fn english_turns() -> Vec<Turn> {
+        ['a', 'b', 'c', 'd', 'e']
+            .into_iter()
+            .map(|ch| user(body(ch)))
+            .collect()
+    }
+
+    #[test]
+    fn history_keeps_only_the_newest_whole_turns() {
+        let out = build_local_turns("", &english_turns());
+        let contents: Vec<&str> = out.iter().map(|turn| turn.content.as_str()).collect();
+        assert_eq!(contents.len(), 3, "3 x 500 chars fit the 1600 budget");
+        assert_eq!(contents[0], body('c').as_str());
+        assert_eq!(contents[1], body('d').as_str());
+        assert_eq!(contents[2], body('e').as_str());
+        for content in contents {
+            assert_eq!(content.chars().count(), 500, "a turn must never be cut");
+        }
+    }
+
+    #[test]
+    fn system_is_not_counted_against_the_history_budget() {
+        let system = "s".repeat(LOCAL_SYSTEM_CHARS);
+        let out = build_local_turns(&system, &english_turns());
+        assert_eq!(out[0].role, "system");
+        assert_eq!(out[0].content.chars().count(), LOCAL_SYSTEM_CHARS);
+        assert_eq!(out.len(), 4, "system plus the 3 newest history turns");
+        assert_eq!(out[1].content, body('c'));
+    }
+
+    #[test]
+    fn empty_history_leaves_only_the_system_turn() {
+        let out = build_local_turns("keep me", &[]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].content, "keep me");
+    }
+
+    #[test]
+    fn the_newest_turn_survives_even_when_it_exceeds_the_budget() {
+        let long = "x".repeat(LOCAL_HISTORY_CHARS * 3);
+        let out = build_local_turns("", &[user(long.clone())]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].content, long);
+    }
+
+    #[test]
+    fn mnn_prompt_drops_old_turns_without_cutting_any_turn() {
+        let mut turns = vec![EngineTurn {
+            role: "system",
+            content: "s".repeat(LOCAL_SYSTEM_CHARS),
+        }];
+        for ch in ['a', 'b', 'c', 'd', 'e'] {
+            turns.push(EngineTurn {
+                role: "user",
+                content: body(ch),
+            });
+        }
+        let prompt = render_mnn_prompt(&turns);
+        assert!(prompt.chars().count() <= MNN_PROMPT_CHARS);
+        assert!(
+            prompt.contains(body('d').as_str()),
+            "newest turns are kept whole"
+        );
+        assert!(prompt.contains(body('e').as_str()));
+        assert!(
+            !prompt.contains(body('c').as_str()),
+            "older turns are dropped"
+        );
+    }
+
+    #[test]
+    fn mnn_prompt_keeps_the_newest_turn_even_over_the_cap() {
+        let long = "x".repeat(MNN_PROMPT_CHARS * 2);
+        let turns = vec![EngineTurn {
+            role: "user",
+            content: long.clone(),
+        }];
+        let prompt = render_mnn_prompt(&turns);
+        assert!(prompt.contains(&long), "the current question is never cut");
     }
 }
