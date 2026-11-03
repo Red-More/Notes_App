@@ -17,7 +17,8 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
-#[cfg(feature = "local-mnn")]
+// Pure Rust thread plumbing, so it compiles without any engine feature; this
+// keeps the rebuild/crash tests runnable on hosts where MNN cannot link.
 pub mod worker;
 
 /// 引擎种类；命令与配置用它做选择，不直接暴露后端实现。

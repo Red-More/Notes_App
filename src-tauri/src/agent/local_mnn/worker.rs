@@ -98,6 +98,12 @@ impl MnnWorker {
             Ok(())
         })?
     }
+
+    /// Number of automatic worker-thread rebuilds; `>0` means the engine
+    /// restarted and the model has to be loaded again.
+    pub fn restarts(&self) -> u32 {
+        self.worker.restarts()
+    }
 }
 
 fn create_and_load(dir: &Path, threads: u32) -> Result<Handle, MnnError> {

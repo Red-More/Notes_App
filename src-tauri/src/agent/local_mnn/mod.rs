@@ -133,6 +133,8 @@ pub struct LocalMnnStatus {
     pub threads: u32,
     /// 最近一轮的统一指标；新增字段，前端可忽略。
     pub metrics: Option<EngineMetrics>,
+    /// worker 线程自动重建次数；`>0` 表示引擎已重启，模型需要重新加载。
+    pub restarts: u32,
 }
 
 impl LocalMnnStatus {
@@ -145,6 +147,7 @@ impl LocalMnnStatus {
             model: None,
             threads: 0,
             metrics: None,
+            restarts: 0,
         }
     }
 
@@ -361,7 +364,24 @@ impl LocalMnnState {
     }
 
     pub fn status(&self) -> LocalMnnStatus {
-        self.inner.status.lock().unwrap().clone()
+        let mut status = self.inner.status.lock().unwrap().clone();
+        status.restarts = self.restart_count();
+        status
+    }
+
+    #[cfg(feature = "local-mnn")]
+    fn restart_count(&self) -> u32 {
+        self.inner
+            .worker
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or(0, |worker| worker.restarts())
+    }
+
+    #[cfg(not(feature = "local-mnn"))]
+    fn restart_count(&self) -> u32 {
+        0
     }
 
     pub fn models(&self) -> Vec<LocalMnnModel> {
