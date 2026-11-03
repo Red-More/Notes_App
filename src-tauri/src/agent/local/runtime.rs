@@ -462,6 +462,11 @@ impl Runtime {
             *self.inner.last_metrics.lock().unwrap() = Some(metrics.clone());
         }
         self.inner.current_cancel.lock().unwrap().take();
+        // A concurrent suspend/unload may have published its own state while
+        // this turn was winding down; only restore Ready if we still own it.
+        if !matches!(self.inner.status.lock().unwrap().state, LocalState::Generating) {
+            return result;
+        }
         self.publish(LocalState::Ready, bytes, threads, context, model, None);
         result
     }
