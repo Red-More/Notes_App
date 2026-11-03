@@ -471,6 +471,9 @@ impl LocalMnnState {
     }
 
     pub fn unload(&self) -> Result<(), MnnError> {
+        // Stop the decode loop first: the worker runs one job at a time, so the
+        // unload job would otherwise wait for the whole turn to finish.
+        self.cancel();
         #[cfg(feature = "local-mnn")]
         {
             let worker = self.inner.worker.lock().unwrap().clone();
