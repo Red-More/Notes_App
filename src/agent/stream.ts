@@ -18,7 +18,7 @@ import type {
 } from '@earendil-works/pi-ai'
 import type { StreamFn } from '@earendil-works/pi-agent-core'
 import { chatApi } from '../api'
-import type { ChatJobSnapshot, ChatJobWatchEvent, MessageUsage } from '../types'
+import type { ChatJobSnapshot, ChatJobWatchEvent, EngineMetrics, MessageUsage } from '../types'
 import { formatError, newPartial, processEvent, zeroUsage } from './protocol'
 import type { ProxyEvent } from './protocol'
 
@@ -27,6 +27,34 @@ const lastJobByConversation = new Map<number, number>()
 
 export function lastJobId(conversationId: number): number | undefined {
   return lastJobByConversation.get(conversationId)
+}
+
+export interface JobEngineInfo {
+  engine: string | null
+  metrics: EngineMetrics | null
+}
+
+/** Local engine tag + timings per job, so both engines can be compared in the UI. */
+const engineInfoByJob = new Map<number, JobEngineInfo>()
+/** Bounded to keep long sessions from growing the map without limit. */
+const MAX_TRACKED_JOBS = 50
+
+function rememberEngine(jobId: number, engine: string | null, metrics: EngineMetrics | null) {
+  const previous = engineInfoByJob.get(jobId)
+  engineInfoByJob.delete(jobId)
+  engineInfoByJob.set(jobId, {
+    engine: engine ?? previous?.engine ?? null,
+    metrics: metrics ?? previous?.metrics ?? null,
+  })
+  while (engineInfoByJob.size > MAX_TRACKED_JOBS) {
+    const oldest = engineInfoByJob.keys().next().value
+    if (oldest === undefined) break
+    engineInfoByJob.delete(oldest)
+  }
+}
+
+export function jobEngineInfo(jobId: number | null | undefined): JobEngineInfo | undefined {
+  return jobId === null || jobId === undefined ? undefined : engineInfoByJob.get(jobId)
 }
 
 function makeRequestId(): string {
@@ -127,6 +155,7 @@ export function makeStreamFn(conversationId: number): StreamFn {
       lastJobByConversation.set(conversationId, job.id)
       lastSeq = job.lastSeq
       rebuildPartial(partial, job)
+      rememberEngine(job.id, job.engine, job.metrics)
       if (isTerminal(job.status)) pushTerminal(terminalEvent(job, partial))
     }
 
@@ -156,6 +185,10 @@ export function makeStreamFn(conversationId: number): StreamFn {
         return
       }
       lastSeq = message.seq
+      const raw = message.event as { type?: string; metrics?: EngineMetrics }
+      if (raw.type === 'metrics' && raw.metrics && jobId !== undefined) {
+        rememberEngine(jobId, null, raw.metrics)
+      }
       const mapped = processEvent(message.event as ProxyEvent, partial)
       if (!mapped) return
       if (mapped.type === 'done' || mapped.type === 'error') terminal = true

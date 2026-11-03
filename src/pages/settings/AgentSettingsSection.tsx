@@ -26,11 +26,18 @@ const FORMAT_OPTIONS: Array<{ key: ModelApiFormat; label: string }> = [
   { key: 'volc-video', label: '火山方舟 Seedance 视频' },
   { key: 'kling-video', label: '可灵 Kling 视频' },
   { key: 'elevenlabs-tts', label: 'ElevenLabs 语音合成' },
-  // Created by the local model section; never offered in the add-model form.
+  // Created by the local model sections; never offered in the add-model form.
   { key: 'local-llama', label: '本地 llama.cpp（内嵌）' },
+  { key: 'local-mnn', label: '本地 MNN（内嵌）' },
 ]
 
-const CHAT_FORMATS: ModelApiFormat[] = ['openai-chat', 'openai-responses', 'anthropic-messages']
+const CHAT_FORMATS: ModelApiFormat[] = [
+  'openai-chat',
+  'openai-responses',
+  'anthropic-messages',
+  'local-llama',
+  'local-mnn',
+]
 
 /** Only formats the selected capability can actually execute today. */
 function formatOptionsFor(kind: ModelKind): Array<{ key: ModelApiFormat; label: string }> {
@@ -815,7 +822,7 @@ export default function AgentSettingsSection({ reloadToken = 0 }: { reloadToken?
   }
 
   const testSaved = async (entry: AgentModelInfo) => {
-    if (entry.format === 'local-llama') {
+    if (entry.format === 'local-llama' || entry.format === 'local-mnn') {
       toast('本地模型请在「本地模型」中加载，无需连通性测试')
       return
     }
@@ -901,15 +908,17 @@ export default function AgentSettingsSection({ reloadToken = 0 }: { reloadToken?
                     </div>
                     <div className="model-meta">{capabilityLabel(entry)}</div>
                     <div className="model-meta">
-                      {entry.format === 'local-llama'
-                        ? '模型文件'
+                      {entry.format === 'local-llama' || entry.format === 'local-mnn'
+                        ? entry.format === 'local-mnn'
+                          ? '模型目录'
+                          : '模型文件'
                         : entry.fullUrl
                           ? '完整地址'
                           : 'Base URL'}{' '}
                       · {entry.baseUrl}
                     </div>
                     <div className="model-meta">
-                      {entry.format === 'local-llama'
+                      {entry.format === 'local-llama' || entry.format === 'local-mnn'
                         ? '本地推理 · 无网络请求'
                         : entry.configured
                           ? '已配置 API Key'
@@ -928,7 +937,12 @@ export default function AgentSettingsSection({ reloadToken = 0 }: { reloadToken?
                     <button
                       type="button"
                       className="restore-default"
-                      disabled={busy || kind !== 'chat' || entry.format === 'local-llama'}
+                      disabled={
+                        busy ||
+                        kind !== 'chat' ||
+                        entry.format === 'local-llama' ||
+                        entry.format === 'local-mnn'
+                      }
                       onClick={() => void testSaved(entry)}
                     >
                       测试
@@ -936,7 +950,9 @@ export default function AgentSettingsSection({ reloadToken = 0 }: { reloadToken?
                     <button
                       type="button"
                       className="restore-default"
-                      disabled={busy || entry.format === 'local-llama'}
+                      disabled={
+                        busy || entry.format === 'local-llama' || entry.format === 'local-mnn'
+                      }
                       onClick={() => void openEdit(entry)}
                     >
                       编辑

@@ -27,6 +27,7 @@ use serde_json::Value;
 use tauri::{AppHandle, Manager};
 
 use super::llm::{self, ProxyRequest};
+use super::local_mnn::LocalMnnState;
 use super::model_store::{ApiFormat, ModelEntry};
 use super::request;
 use super::AgentState;
@@ -122,6 +123,10 @@ pub struct ChatJob {
     pub last_seq: i64,
     pub blocks: Vec<JobBlock>,
     pub usage: Option<Value>,
+    /// Local engine tag (`llama` / `mnn`); `None` for cloud entries.
+    pub engine: Option<String>,
+    /// Last local engine metrics (TTFT, tokens, prefill); `None` before the first flush.
+    pub metrics: Option<Value>,
     pub stop_reason: Option<String>,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
@@ -144,7 +149,8 @@ pub struct LiveEvent {
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ChatJobWatchEvent {
     Snapshot {
-        job: ChatJob,
+        // Boxed so the watch enum stays small; the snapshot is sent once per watch.
+        job: Box<ChatJob>,
     },
     Event {
         #[serde(rename = "jobId")]
@@ -201,6 +207,7 @@ struct Progress {
     last_seq: i64,
     blocks: String,
     usage: Option<String>,
+    metrics: Option<String>,
     stop_reason: Option<String>,
     error_code: Option<String>,
     error_message: Option<String>,
@@ -211,6 +218,7 @@ struct JobBuffer {
     blocks: BTreeMap<usize, JobBlock>,
     last_seq: i64,
     usage: Option<Value>,
+    metrics: Option<Value>,
     stop_reason: Option<String>,
     error_code: Option<String>,
     error_message: Option<String>,
@@ -321,6 +329,9 @@ impl JobBuffer {
                     *arguments = tool_call.arguments.clone();
                 }
             }
+            llm::StreamEvent::Metrics { metrics } => {
+                self.metrics = serde_json::to_value(metrics).ok();
+            }
             llm::StreamEvent::Done { reason, usage } => {
                 self.usage = serde_json::to_value(usage).ok();
                 self.stop_reason = Some(reason.clone());
@@ -358,6 +369,7 @@ impl JobBuffer {
             last_seq: self.last_seq,
             blocks: serde_json::to_string(&blocks).unwrap_or_else(|_| "[]".into()),
             usage: self.usage.as_ref().map(Value::to_string),
+            metrics: self.metrics.as_ref().map(Value::to_string),
             stop_reason: self.stop_reason.clone(),
             error_code: self.error_code.clone(),
             error_message: self.error_message.clone(),
@@ -674,8 +686,8 @@ fn persist(app: &AppHandle, job_id: i64, progress: &Progress) {
     let conn = vfs.0.lock().unwrap();
     if let Err(e) = conn.conn().execute(
         "UPDATE chat_jobs
-         SET last_seq = ?2, blocks = ?3, usage = ?4, stop_reason = ?5,
-             error_code = ?6, error_message = ?7,
+         SET last_seq = ?2, blocks = ?3, usage = ?4, metrics = ?5, stop_reason = ?6,
+             error_code = ?7, error_message = ?8,
              updated_at = datetime('now','localtime')
          WHERE id = ?1",
         params![
@@ -683,6 +695,7 @@ fn persist(app: &AppHandle, job_id: i64, progress: &Progress) {
             progress.last_seq,
             progress.blocks,
             progress.usage,
+            progress.metrics,
             progress.stop_reason,
             progress.error_code,
             progress.error_message
@@ -699,7 +712,7 @@ fn persist(app: &AppHandle, job_id: i64, progress: &Progress) {
 const SELECT_JOB: &str =
     "SELECT id, conversation_id, request_id, model_entry, status, last_seq, blocks, \
             usage, stop_reason, error_code, error_message, created_at, started_at, \
-            finished_at, updated_at FROM chat_jobs";
+            finished_at, updated_at, engine, metrics FROM chat_jobs";
 
 struct RawJob {
     id: i64,
@@ -717,6 +730,8 @@ struct RawJob {
     started_at: Option<String>,
     finished_at: Option<String>,
     updated_at: String,
+    engine: Option<String>,
+    metrics: Option<String>,
 }
 
 fn row_to_raw(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawJob> {
@@ -736,6 +751,8 @@ fn row_to_raw(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawJob> {
         started_at: row.get(12)?,
         finished_at: row.get(13)?,
         updated_at: row.get(14)?,
+        engine: row.get(15)?,
+        metrics: row.get(16)?,
     })
 }
 
@@ -761,6 +778,8 @@ fn job_from_raw(raw: RawJob) -> Result<ChatJob, ToolError> {
         last_seq: raw.last_seq,
         blocks,
         usage,
+        engine: raw.engine,
+        metrics: raw.metrics.and_then(|text| serde_json::from_str(&text).ok()),
         stop_reason: raw.stop_reason,
         error_code: raw.error_code,
         error_message: raw.error_message,
@@ -821,13 +840,14 @@ pub fn submit(
     // the pre-check above covers the common path with a readable message.
     conn.execute(
         "INSERT INTO chat_jobs
-             (conversation_id, request_id, model_entry, params, status, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, 'queued', datetime('now','localtime'), datetime('now','localtime'))",
+             (conversation_id, request_id, model_entry, params, status, engine, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, 'queued', ?5, datetime('now','localtime'), datetime('now','localtime'))",
         params![
             conversation_id,
             request.request_id,
             entry.id,
-            params
+            params,
+            entry.format.engine_tag()
         ],
     )?;
     get(conn, conn.last_insert_rowid())

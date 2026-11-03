@@ -25,6 +25,12 @@ use crate::agent::inference::{
 use crate::agent::local_mnn::{
     LocalMnnModel, LocalMnnResult, LocalMnnState, LocalMnnStatus, MnnError,
 };
+use crate::agent::model_store::{self, ApiFormat, ModelInput, ModelKind};
+use crate::vfs::error::ToolError;
+use crate::vfs::VfsState;
+
+/// Stable model entry that binds a conversation to the MNN engine.
+pub const LOCAL_MNN_ENTRY_ID: &str = "local_mnn";
 
 const MAX_THREADS: u32 = 8;
 const MAX_MAX_TOKENS: u32 = 1024;
@@ -134,6 +140,43 @@ pub async fn local_mnn_unload(state: State<'_, LocalMnnState>) -> Result<(), Mnn
     tauri::async_runtime::spawn_blocking(move || InferenceEngine::unload(&state))
         .await
         .map_err(|e| MnnError::thread(e.to_string()))?
+}
+
+/// 把一个 bundle 绑定为稳定模型条目并立即加载；切换会话模型即可选择 MNN。
+#[tauri::command]
+pub async fn local_mnn_activate(
+    vfs_state: State<'_, VfsState>,
+    state: State<'_, LocalMnnState>,
+    model: String,
+) -> Result<(), ToolError> {
+    let name = model.trim().to_string();
+    if name.is_empty() {
+        return Err(ToolError::invalid("请选择一个 MNN bundle"));
+    }
+    // Persist the choice before loading so a failed load can be retried later.
+    {
+        let vfs = vfs_state.0.lock().unwrap();
+        model_store::save(
+            vfs.conn(),
+            ModelInput {
+                id: LOCAL_MNN_ENTRY_ID.to_string(),
+                label: format!("MNN 本地 · {name}"),
+                format: ApiFormat::LocalMnn,
+                base_url: name.clone(),
+                model_id: name.clone(),
+                full_url: false,
+                kind: ModelKind::Chat,
+            },
+        )?;
+        model_store::set_active(vfs.conn(), LOCAL_MNN_ENTRY_ID)?;
+    }
+
+    let threads = crate::agent::local::gating::device_profile().recommended_threads;
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || state.load(&name, threads))
+        .await
+        .map_err(|e| ToolError::invalid(format!("MNN 加载线程异常：{e}")))?
+        .map_err(|e| ToolError::invalid(format!("MNN 加载失败：{e}")))
 }
 
 #[cfg(test)]

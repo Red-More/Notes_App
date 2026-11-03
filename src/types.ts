@@ -334,6 +334,10 @@ export interface ChatJobSnapshot {
   lastSeq: number
   blocks: ChatJobBlock[]
   usage: MessageUsage | null
+  /** `llama` / `mnn` for local entries; null for cloud models. */
+  engine: string | null
+  /** Local engine timings for cross-engine comparison; null for cloud models. */
+  metrics: EngineMetrics | null
   stopReason: string | null
   errorCode: string | null
   errorMessage: string | null
@@ -366,6 +370,8 @@ export type ModelApiFormat =
   | 'elevenlabs-tts'
   // Embedded llama.cpp runtime (phase B); no network request is made.
   | 'local-llama'
+  // Embedded MNN runtime; `baseUrl` is a `.mnn` bundle directory name.
+  | 'local-mnn'
 
 /** Capability a model entry is configured for; only `chat` runs today. */
 export type ModelKind = 'chat' | 'image' | 'video' | 'tts' | 'classify' | 'asr'
@@ -403,6 +409,40 @@ export interface AgentSettings {
 /** Local llama.cpp lifecycle state; `unsupported` means the build lacks the engine. */
 export type LocalModelState =
   'unsupported' | 'unloaded' | 'loading' | 'ready' | 'generating' | 'suspended' | 'failed'
+
+/** Unified local engine timings shared by llama.cpp and MNN. */
+export interface EngineMetrics {
+  promptTokens: number
+  outputTokens: number
+  prefillMs: number
+  decodeMs: number
+  sampleMs: number
+  /** Time to first token, measured from the request start. */
+  firstChunkMs: number
+  decodeTokS: number
+  stopReason: string
+}
+
+/** MNN lifecycle phase; mirrors the Rust state machine. */
+export type MnnPhase = 'unloaded' | 'loading' | 'ready' | 'generating' | 'failed'
+
+/** Runtime snapshot of the MNN engine; never contains prompt or model bytes. */
+export interface LocalMnnStatus {
+  available: boolean
+  engine: string
+  phase: MnnPhase
+  loaded: boolean
+  model: string | null
+  threads: number
+  metrics: EngineMetrics | null
+  restarts: number
+}
+
+/** One `.mnn` bundle directory in the MNN models directory. */
+export interface LocalMnnModel {
+  name: string
+  bytes: number
+}
 
 /** Runtime snapshot; never contains prompt text or model bytes. */
 export interface LocalModelStatus {

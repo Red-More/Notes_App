@@ -59,7 +59,9 @@ pub async fn chat_job_watch(
         jobs::get(vfs.conn(), job_id)?
     };
     if on_event
-        .send(ChatJobWatchEvent::Snapshot { job: job.clone() })
+        .send(ChatJobWatchEvent::Snapshot {
+            job: Box::new(job.clone()),
+        })
         .is_err()
     {
         return Ok(());

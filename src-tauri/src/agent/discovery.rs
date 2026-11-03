@@ -72,7 +72,7 @@ pub async fn fetch(
                 "可灵不支持自动发现模型，请手动填写 Model ID",
             ));
         }
-        ApiFormat::LocalLlama => {
+        ApiFormat::LocalLlama | ApiFormat::LocalMnn => {
             return Err(ToolError::invalid("本地模型无需发现模型列表"));
         }
     };
@@ -171,7 +171,7 @@ pub async fn test_connection(
             return Err(ToolError::invalid("媒体模型暂不支持连接测试"));
         }
         // Local entries never reach the network; the settings page handles loading.
-        ApiFormat::LocalLlama => {
+        ApiFormat::LocalLlama | ApiFormat::LocalMnn => {
             return Err(ToolError::invalid("本地模型无需连接测试"));
         }
     };
@@ -194,7 +194,7 @@ pub async fn test_connection(
         ApiFormat::KlingVideo => {
             return Err(ToolError::invalid("媒体模型暂不支持连接测试"));
         }
-        ApiFormat::LocalLlama => {
+        ApiFormat::LocalLlama | ApiFormat::LocalMnn => {
             return Err(ToolError::invalid("本地模型无需连接测试"));
         }
     };

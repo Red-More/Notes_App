@@ -24,9 +24,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use super::inference::{
-    EngineInput, EngineTurn, GenerateParams, InferenceEngine, LoadOptions, ModelAsset,
+    EngineInput, EngineMetrics, EngineTurn, GenerateParams, InferenceEngine, LoadOptions,
+    ModelAsset,
 };
 use super::local::LocalState;
+use super::local_mnn::{LocalMnnState, MnnPhase};
 use super::model_store::{self, ApiFormat, ModelEntry};
 use super::params::{CacheRetention, LlmParams, ThinkingMode};
 use super::{AgentState, TOOL_ALLOWLIST};
@@ -265,6 +267,9 @@ pub enum StreamEvent {
     },
     #[serde(rename = "done")]
     Done { reason: String, usage: Usage },
+    /// Local engine timing used by the job snapshot to compare llama vs MNN.
+    #[serde(rename = "metrics")]
+    Metrics { metrics: EngineMetrics },
     #[serde(rename = "error")]
     Error {
         reason: String,
@@ -641,6 +646,7 @@ pub(crate) fn trim_messages(messages: &[Value]) -> Vec<Value> {
 
 pub async fn run(
     state: &AgentState,
+    mnn: &LocalMnnState,
     req: ProxyRequest,
     entry: &ModelEntry,
     params: &LlmParams,
@@ -655,7 +661,12 @@ pub async fn run(
 
     // Local entries never reach the HTTP paths below; the runtime owns decoding.
     if entry.format.is_local() {
-        return run_local(state, &req, entry, params, cancel, emit).await;
+        return match entry.format {
+            ApiFormat::LocalMnn => {
+                run_mnn(mnn, &req, entry, params, cancel, emit).await
+            }
+            _ => run_local(state, &req, entry, params, cancel, emit).await,
+        };
     }
 
     let (system, tools) = replay_system(&req.context.messages);
@@ -720,7 +731,9 @@ pub async fn run(
             _,
         ) => Err("该模型条目不是对话协议".to_string()),
         // The local branch returns before this match; keep exhaustiveness explicit.
-        (ApiFormat::LocalLlama, _) => Err("该模型条目不是对话协议".to_string()),
+        (ApiFormat::LocalLlama | ApiFormat::LocalMnn, _) => {
+            Err("该模型条目不是对话协议".to_string())
+        }
     };
 
     if let Err(message) = result {
@@ -837,6 +850,9 @@ async fn run_local(
 
     match handle.await {
         Ok(Ok(metrics)) => {
+            emit(StreamEvent::Metrics {
+                metrics: metrics.clone(),
+            });
             emit(StreamEvent::Done {
                 reason: metrics.stop_reason,
                 usage: local_usage(metrics.prompt_tokens, metrics.output_tokens),
@@ -863,6 +879,145 @@ async fn run_local(
         }
     }
     Ok(())
+}
+
+/// MNN 会自行套用 bundle 的聊天模板，因此这里只把历史折叠成单轮文本。
+const MNN_PROMPT_CHARS: usize = 6000;
+
+async fn run_mnn(
+    mnn: &LocalMnnState,
+    req: &ProxyRequest,
+    entry: &ModelEntry,
+    params: &LlmParams,
+    cancel: Arc<AtomicBool>,
+    emit: Emit<'_>,
+) -> Result<(), ToolError> {
+    let status = mnn.status();
+    if !status.available {
+        emit_error(emit, "当前构建未启用 MNN 引擎", "error");
+        return Ok(());
+    }
+    let bundle = entry.base_url.trim().to_string();
+    if bundle.is_empty() {
+        emit_error(emit, "MNN 模型条目未指定 bundle 目录", "error");
+        return Ok(());
+    }
+    if matches!(status.phase, MnnPhase::Generating) {
+        emit_error(emit, "MNN 正在生成，请等待当前回复结束", "busy");
+        return Ok(());
+    }
+
+    // MNN 只加载一个 bundle；切换对话模型时按需替换。
+    if !status.phase.is_loaded() || status.model.as_deref() != Some(bundle.as_str()) {
+        let engine = mnn.clone();
+        let threads = crate::agent::local::gating::device_profile().recommended_threads;
+        let loaded = tauri::async_runtime::spawn_blocking(move || engine.load(&bundle, threads)).await;
+        match loaded {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                emit_error(emit, format!("MNN 模型加载失败：{error}"), "error");
+                return Ok(());
+            }
+            Err(error) => {
+                emit_error(emit, format!("MNN 加载线程异常：{error}"), "error");
+                return Ok(());
+            }
+        }
+    }
+
+    let (system, _) = replay_system(&req.context.messages);
+    let turns = to_turns(&req.context.messages);
+    let prompt = render_mnn_prompt(&build_local_turns(&system, &turns));
+    let local_params = GenerateParams {
+        max_tokens: params.output_limit().unwrap_or(2048).clamp(1, 4096),
+        temperature: params.temperature.map_or(0.7, |value| value as f32),
+        top_p: params.top_p.map_or(0.8, |value| value as f32),
+        top_k: params.top_k.unwrap_or(20),
+        seed: params.seed.unwrap_or(0) as u32,
+        stop: params.stop.clone().unwrap_or_default(),
+        ..GenerateParams::default()
+    };
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let engine = mnn.clone();
+    let cancel_mnn = cancel.clone();
+    let handle = tauri::async_runtime::spawn_blocking(move || {
+        let sink: Box<dyn FnMut(&str) + Send> = Box::new(move |text| {
+            let _ = tx.send(text.to_string());
+        });
+        InferenceEngine::generate(
+            &engine,
+            EngineInput::Prompt(prompt),
+            &local_params,
+            &cancel_mnn,
+            sink,
+        )
+    });
+
+    emit(StreamEvent::TextStart { content_index: 0 });
+    while let Some(text) = rx.recv().await {
+        emit(StreamEvent::TextDelta {
+            content_index: 0,
+            delta: text,
+        });
+    }
+    emit(StreamEvent::TextEnd { content_index: 0 });
+
+    match handle.await {
+        Ok(Ok(metrics)) => {
+            emit(StreamEvent::Metrics {
+                metrics: metrics.clone(),
+            });
+            emit(StreamEvent::Done {
+                reason: metrics.stop_reason,
+                usage: local_usage(metrics.prompt_tokens, metrics.output_tokens),
+            });
+        }
+        Ok(Err(error)) => {
+            let aborted = cancel.load(Ordering::SeqCst);
+            emit(StreamEvent::Error {
+                reason: if aborted {
+                    "aborted".into()
+                } else {
+                    "error".into()
+                },
+                error_message: error.to_string(),
+                usage: Usage::default(),
+            });
+        }
+        Err(error) => {
+            emit(StreamEvent::Error {
+                reason: "error".into(),
+                error_message: format!("MNN 线程异常：{error}"),
+                usage: Usage::default(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// 折叠历史并按字符预算保留最近的上下文（更早的内容对 MNN 价值更低）。
+fn render_mnn_prompt(turns: &[EngineTurn]) -> String {
+    let mut out = String::new();
+    for turn in turns {
+        let label = match turn.role {
+            "system" => "系统指令",
+            "assistant" => "助手",
+            _ => "用户",
+        };
+        out.push_str(label);
+        out.push_str("：\n");
+        out.push_str(turn.content.trim());
+        out.push_str("\n\n");
+    }
+    let prompt = format!("{out}请基于以上对话继续回答，不要复述历史。");
+    let chars = prompt.chars().count();
+    if chars <= MNN_PROMPT_CHARS {
+        return prompt;
+    }
+    let skip = chars - MNN_PROMPT_CHARS;
+    let tail: String = prompt.chars().skip(skip).collect();
+    format!("[较早的历史已省略]\n{tail}")
 }
 
 /// 把 pi transcript 折叠成聊天模板可接受的角色；工具结果并入 user。

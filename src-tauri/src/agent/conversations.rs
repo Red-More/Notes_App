@@ -178,9 +178,28 @@ pub fn create(
     })
 }
 
+/// 切换会话绑定的模型条目；引擎（llama / MNN / 云端）随条目格式变化。
+pub fn set_model(vfs: &VirtualFs, id: i64, provider: String) -> Result<(), ToolError> {
+    let entry = crate::agent::model_store::resolve(vfs.conn(), &provider)?;
+    if !entry.format.is_chat() {
+        return Err(ToolError::invalid("该模型不支持对话"));
+    }
+    let conn = vfs.conn();
+    let at = now(conn)?;
+    let changed = conn.execute(
+        "UPDATE conversations SET provider = ?1, model = ?2, updated_at = ?3 WHERE id = ?4",
+        params![entry.id, entry.model_id, at, id],
+    )?;
+    if changed == 0 {
+        return Err(ToolError::NotFound {
+            path: format!("conversation#{id}"),
+        });
+    }
+    Ok(())
+}
+
 pub fn rename(vfs: &VirtualFs, id: i64, title: String) -> Result<(), ToolError> {
     let conn = vfs.conn();
-    // 与 create 保持一致：空标题回退为默认标题，避免产生空白会话行。
     let mut title = validate_title(&title)?;
     if title.is_empty() {
         title = "新对话".to_string();

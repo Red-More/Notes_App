@@ -9,7 +9,7 @@ import { createAgent, extractAssistant, parseImageAssetIds, profileFromSettings,
 import type { AgentProfile } from '../../agent/runtime'
 import { buildSkillsIndex } from '../../agent/skills'
 import { runManager } from '../../agent/runManager'
-import { lastJobId } from '../../agent/stream'
+import { jobEngineInfo, lastJobId } from '../../agent/stream'
 import type { AgentEvent } from '@earendil-works/pi-agent-core'
 import type { AgentMessage } from '@earendil-works/pi-agent-core'
 import type { AgentSettings, ChatConversation, ChatJobSnapshot, ChatMessageRecord, MessageUsage, SkillSummary } from '../../types'
@@ -55,6 +55,8 @@ interface Bubble {
   /** Data URLs of images attached to a user turn. */
   images?: string[]
   imageAssetIds?: number[]
+  /** Job that produced this assistant bubble; used to show engine metrics. */
+  jobId?: number
 }
 
 /** One image staged in the composer. */
@@ -149,6 +151,7 @@ function recordsToItems(
         usage: record.usage,
         thinking: record.thinking,
         thinkingSignature: record.thinkingSignature,
+        jobId: record.jobId ?? undefined,
       })
     } else {
       items.push({
@@ -219,6 +222,7 @@ async function loadActiveJob(
       usage: failed ? null : job.usage,
       thinking: thoughts.length > 0 ? thoughts.join('\n') : null,
       thinkingSignature: signature,
+      jobId: job.id,
     })
   }
   // Tool cards already persisted (completed calls) stay in the transcript.
@@ -457,6 +461,22 @@ async function withCapabilities(profile: AgentProfile): Promise<AgentProfile> {
   }
 }
 
+/** Formats the chat page can bind a conversation to (llama / MNN / cloud). */
+const CHAT_ENTRY_FORMATS = new Set([
+  'openai-completions',
+  'openai-responses',
+  'anthropic-messages',
+  'local-llama',
+  'local-mnn',
+])
+
+/** Short engine badge shown in the conversation model picker. */
+function engineOf(format: string): string {
+  if (format === 'local-mnn') return 'MNN'
+  if (format === 'local-llama') return 'llama.cpp'
+  return '云端'
+}
+
 export default function ChatPage({ isActive }: Props) {
   const [settings, setSettings] = useState<AgentSettings | null>(null)
   // settings 的最新镜像：激活刷新 effect 只依赖 isActive，用 ref 读当前值，避免写回新对象触发依赖循环。
@@ -582,7 +602,17 @@ export default function ChatPage({ isActive }: Props) {
           if (event.message.role !== 'assistant') return
           const id = messageKey('a')
           streamingIdRef.current = id
-          setItems((prev) => [...prev, { id, kind: 'assistant', text: '', streaming: true }])
+          const convId = conversationRef.current?.id
+          setItems((prev) => [
+            ...prev,
+            {
+              id,
+              kind: 'assistant',
+              text: '',
+              streaming: true,
+              jobId: convId === undefined ? undefined : lastJobId(convId),
+            },
+          ])
           scrollToBottom()
           break
         }
@@ -699,6 +729,7 @@ export default function ChatPage({ isActive }: Props) {
                     usage,
                     thinking: thinking ?? item.thinking ?? null,
                     thinkingSignature: thinkingSignature ?? item.thinkingSignature ?? null,
+                    jobId: item.jobId ?? (conversationRef.current ? lastJobId(conversationRef.current.id) : undefined),
                   }
                 : item,
             )
@@ -870,6 +901,30 @@ export default function ChatPage({ isActive }: Props) {
       }
     },
     [buildAgent, detachPage, handleEvent, scrollToBottom],
+  )
+
+  /** 切换会话绑定的模型条目：llama / MNN / 云端都走同一条命令。 */
+  const switchModel = useCallback(
+    async (provider: string) => {
+      const conv = conversationRef.current
+      if (!conv || provider === conv.provider) return
+      if (streaming) {
+        toast('请先停止当前生成再切换模型')
+        return
+      }
+      const entry = settingsRef.current?.models.find((item) => item.id === provider)
+      if (!entry) return
+      try {
+        await chatApi.setModel({ id: conv.id, provider })
+        const next = { ...conv, provider: entry.id, model: entry.modelId }
+        setConversations((prev) => prev.map((item) => (item.id === conv.id ? next : item)))
+        await openConversation(next)
+        toast(`已切换为 ${entry.label}`)
+      } catch (e) {
+        toast(friendlyError(e))
+      }
+    },
+    [openConversation, streaming],
   )
 
   const bootstrap = useCallback(async () => {
@@ -1303,8 +1358,14 @@ export default function ChatPage({ isActive }: Props) {
   }, [renameId, renameText])
 
   const activeModel = settings?.models.find((item) => item.id === settings.activeId) ?? null
-  const modelLabel = activeModel
-    ? `${activeModel.label} · ${activeModel.modelId}`
+  // The conversation owns its model entry, so switching entries switches the engine.
+  const conversationModel =
+    settings?.models.find((item) => item.id === conversation?.provider) ?? activeModel
+  const chatModels = (settings?.models ?? []).filter((item) =>
+    CHAT_ENTRY_FORMATS.has(item.format),
+  )
+  const modelLabel = conversationModel
+    ? `${conversationModel.label} · ${conversationModel.modelId}`
     : '未添加模型'
   const hasModel = settings?.activeId != null
 
@@ -1383,9 +1444,24 @@ export default function ChatPage({ isActive }: Props) {
       />
 
       <div className={`chat-status ${online && !networkIssue ? '' : 'offline'}`}>
-        {online && !networkIssue
-          ? modelLabel
-          : `${modelLabel} · ${online ? '网络异常' : '离线模式'}，消息可能发送失败`}
+        {chatModels.length > 0 && conversation ? (
+          <select
+            className="chat-engine-select"
+            value={conversation.provider}
+            disabled={streaming}
+            title="切换本会话使用的模型与推理引擎"
+            onChange={(e) => void switchModel(e.target.value)}
+          >
+            {chatModels.map((entry) => (
+              <option key={entry.id} value={entry.id}>
+                {entry.label} · {engineOf(entry.format)}
+              </option>
+            ))}
+          </select>
+        ) : (
+          modelLabel
+        )}
+        {online && !networkIssue ? '' : ' · 消息可能发送失败'}
       </div>
 
       <div className="page-scroll chat-scroll" ref={scrollRef} onScroll={handleScroll}>
@@ -1406,6 +1482,7 @@ export default function ChatPage({ isActive }: Props) {
               item.kind === 'assistant' && !item.streaming ? turnChanges(items, index) : []
             const usage = item.kind === 'assistant' ? item.usage : null
             const cost = usage ? usageCost(usage, activeModel) : null
+            const engineInfo = item.kind === 'assistant' ? jobEngineInfo(item.jobId) : undefined
             return (
               <div
                 key={item.id}
@@ -1508,6 +1585,17 @@ export default function ChatPage({ isActive }: Props) {
                             >
                               {formatTokens(usage.input)}↑ {formatTokens(usage.output)}↓
                               {cost !== null && ` · $${cost.toFixed(4)}`}
+                            </span>
+                          )}
+                          {engineInfo?.metrics && (
+                            <span
+                              className="chat-usage"
+                              title={`引擎 ${engineInfo.engine ?? 'local'} · 首字 ${engineInfo.metrics.firstChunkMs}ms · prefill ${engineInfo.metrics.prefillMs}ms · decode ${engineInfo.metrics.decodeMs}ms · ${engineInfo.metrics.decodeTokS.toFixed(1)} tok/s`}
+                            >
+                              {engineInfo.engine === 'mnn' ? 'MNN' : 'llama.cpp'} ·
+                              TTFT {engineInfo.metrics.firstChunkMs}ms ·{' '}
+                              {engineInfo.metrics.outputTokens} tok · prefill{' '}
+                              {engineInfo.metrics.prefillMs}ms
                             </span>
                           )}
                           <span

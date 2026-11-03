@@ -149,6 +149,7 @@ pub fn run() {
             commands::agent::chat_list,
             commands::agent::chat_create,
             commands::agent::chat_rename,
+            commands::agent::chat_set_model,
             commands::agent::chat_delete,
             commands::agent::chat_messages,
             commands::agent::chat_append,
@@ -205,6 +206,7 @@ pub fn run() {
             commands::local_mnn::local_mnn_generate,
             commands::local_mnn::local_mnn_cancel,
             commands::local_mnn::local_mnn_unload,
+            commands::local_mnn::local_mnn_activate,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

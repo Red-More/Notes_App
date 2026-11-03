@@ -74,6 +74,10 @@ pub enum ApiFormat {
     /// the app models directory and never leaves the device.
     #[serde(rename = "local-llama")]
     LocalLlama,
+    /// Embedded MNN runtime; `base_url` holds a `.mnn` bundle directory name
+    /// below the app MNN models directory and never leaves the device.
+    #[serde(rename = "local-mnn")]
+    LocalMnn,
 }
 
 impl ApiFormat {
@@ -85,7 +89,7 @@ impl ApiFormat {
             Self::AnthropicMessages => "anthropic-messages",
             // Local requests reuse the OpenAI-compatible descriptor so pi-agent's
             // stream loop is unchanged; Rust dispatches them before any HTTP call.
-            Self::LocalLlama => "openai-completions",
+            Self::LocalLlama | Self::LocalMnn => "openai-completions",
             // Media entries never flow through pi-agent; these values are unused.
             Self::OpenAiImages
             | Self::OpenAiAudio
@@ -104,13 +108,26 @@ impl ApiFormat {
     pub fn is_chat(self) -> bool {
         matches!(
             self,
-            Self::OpenAiChat | Self::OpenAiResponses | Self::AnthropicMessages | Self::LocalLlama
+            Self::OpenAiChat
+                | Self::OpenAiResponses
+                | Self::AnthropicMessages
+                | Self::LocalLlama
+                | Self::LocalMnn
         )
     }
 
     /// Local entries never touch the network; the egress gate is skipped.
     pub fn is_local(self) -> bool {
-        matches!(self, Self::LocalLlama)
+        matches!(self, Self::LocalLlama | Self::LocalMnn)
+    }
+
+    /// Short engine tag stored on chat jobs so both local engines stay comparable.
+    pub fn engine_tag(self) -> Option<&'static str> {
+        match self {
+            Self::LocalLlama => Some("llama"),
+            Self::LocalMnn => Some("mnn"),
+            _ => None,
+        }
     }
 
     /// Path appended to a Base URL when Full URL mode is off.
@@ -131,7 +148,7 @@ impl ApiFormat {
             Self::VolcVideo => "/api/v3/contents/generations/tasks",
             Self::KlingVideo => "/v1/videos/text2video",
             Self::ElevenLabsTts => "/v1/text-to-speech",
-            Self::LocalLlama => "",
+            Self::LocalLlama | Self::LocalMnn => "",
         }
     }
 
@@ -338,8 +355,8 @@ pub fn save(conn: &Connection, input: ModelInput) -> Result<ModelEntry, ToolErro
     let model_id = validate_model_id(&input.model_id)?;
     validate_format_for_kind(input.kind, input.format)?;
     let base_url = if input.format.is_local() {
-        // Local entries store a model file name, not a URL.
-        validate_local_file(&input.base_url)?
+        // Local entries store a model file/bundle name, not a URL.
+        validate_local_model(input.format, &input.base_url)?
     } else {
         normalize_anthropic_base(
             validate_base_url(&input.base_url)?,
@@ -611,13 +628,20 @@ pub(crate) fn validate_base_url(raw: &str) -> Result<String, ToolError> {
     Ok(trimmed.trim_end_matches('/').to_string())
 }
 
-/// Local entries store a `.gguf` file name inside the app models directory.
-fn validate_local_file(raw: &str) -> Result<String, ToolError> {
+/// Local entries store a file name (GGUF) or bundle directory name (MNN) that
+/// is resolved inside the app models directory.
+fn validate_local_model(format: ApiFormat, raw: &str) -> Result<String, ToolError> {
     let name = raw.trim();
-    if !super::local::runtime::is_valid_file_name(name) {
-        return Err(ToolError::invalid(
-            "本地模型必须是模型目录内的 .gguf 文件名",
-        ));
+    let valid = match format {
+        ApiFormat::LocalMnn => super::local_mnn::is_valid_bundle_name(name),
+        _ => super::local::runtime::is_valid_file_name(name),
+    };
+    if !valid {
+        return Err(ToolError::invalid(if format == ApiFormat::LocalMnn {
+            "MNN 模型必须是模型目录内的 .mnn bundle 目录名"
+        } else {
+            "本地模型必须是模型目录内的 .gguf 文件名"
+        }));
     }
     Ok(name.to_string())
 }
@@ -652,7 +676,7 @@ fn read_models(conn: &Connection) -> Vec<ModelEntry> {
         })
         .filter(|item| {
             let result = if item.format.is_local() {
-                validate_local_file(&item.base_url).map(|_| ())
+                validate_local_model(item.format, &item.base_url).map(|_| ())
             } else {
                 validate_base_url(&item.base_url).map(|_| ())
             };

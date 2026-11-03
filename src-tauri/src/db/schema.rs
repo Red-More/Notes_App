@@ -21,7 +21,7 @@
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// 当前 life.db schema 版本。
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 /// 虚拟文件系统的根路径，与 `vfs::cap_gate::ROOT` 保持一致。
 const ROOT: &str = "/life";
@@ -467,9 +467,22 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_job
                  ON messages(job_id, role) WHERE job_id IS NOT NULL;",
         )?;
-        tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        tx.pragma_update(None, "user_version", 12)?;
         tx.commit()?;
-        version = SCHEMA_VERSION;
+        version = 12;
+    }
+
+    if version < 13 {
+        let tx = conn.transaction()?;
+        if !table_has_column(&tx, "chat_jobs", "engine")? {
+            tx.execute_batch("ALTER TABLE chat_jobs ADD COLUMN engine TEXT;")?;
+        }
+        if !table_has_column(&tx, "chat_jobs", "metrics")? {
+            tx.execute_batch("ALTER TABLE chat_jobs ADD COLUMN metrics TEXT;")?;
+        }
+        tx.pragma_update(None, "user_version", 13)?;
+        tx.commit()?;
+        version = 13;
     }
 
     if version > SCHEMA_VERSION {

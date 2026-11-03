@@ -18,6 +18,8 @@ import type {
   LocalModelConfig,
   LocalModelFile,
   LocalModelSnapshot,
+  LocalMnnModel,
+  LocalMnnStatus,
   McpServerInfo,
   McpToolInfo,
   MediaAsset,
@@ -554,6 +556,9 @@ export const chatApi = {
   list: () => invoke<ChatConversation[]>('chat_list'),
   create: (params: { title?: string } = {}) => invoke<ChatConversation>('chat_create', params),
   rename: (params: { id: number; title: string }) => invoke<void>('chat_rename', params),
+  /** Bind the conversation to another chat entry (`local_llama` / `local_mnn` / cloud). */
+  setModel: (params: { id: number; provider: string }) =>
+    invoke<void>('chat_set_model', params),
   remove: (id: number) => invoke<void>('chat_delete', { id }),
   messages: (conversationId: number) =>
     invoke<ChatMessageRecord[]>('chat_messages', { conversationId }),
@@ -623,6 +628,18 @@ export const localApi = {
   remove: (file: string) => invoke<void>('local_model_remove', { file }),
   /** Create/update the stable local entry, activate it and load the model. */
   activate: (file: string) => invoke<void>('local_model_activate', { file }),
+}
+
+/**
+ * 本地 MNN 引擎 API：模型是模型目录下的 `.mnn` bundle（多文件目录），
+ * 推理始终在 Rust 侧执行；`activate` 绑定稳定条目 `local_mnn`。
+ */
+export const localMnnApi = {
+  status: () => invoke<LocalMnnStatus>('local_mnn_status'),
+  models: () => invoke<LocalMnnModel[]>('local_mnn_models'),
+  load: (model: string, threads = 4) => invoke<void>('local_mnn_load', { model, threads }),
+  unload: () => invoke<void>('local_mnn_unload'),
+  activate: (model: string) => invoke<void>('local_mnn_activate', { model }),
 }
 
 /**

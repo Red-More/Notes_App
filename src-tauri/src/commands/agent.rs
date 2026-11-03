@@ -16,6 +16,7 @@ use crate::agent::model_store::{
     self, AgentSettings, ApiFormat, ModelEntry, ModelInput, ModelKind, ModelView,
 };
 use crate::agent::params::{self, LlmParams};
+use crate::agent::local_mnn::LocalMnnState;
 use crate::agent::{conversations, discovery, llm, request as agent_request, AgentState};
 use crate::vfs::error::ToolError;
 use crate::vfs::VfsState;
@@ -47,6 +48,16 @@ pub fn chat_create(
 pub fn chat_rename(state: State<'_, VfsState>, id: i64, title: String) -> Result<(), ToolError> {
     let vfs = state.0.lock().unwrap();
     conversations::rename(&vfs, id, title)
+}
+
+#[tauri::command]
+pub fn chat_set_model(
+    state: State<'_, VfsState>,
+    id: i64,
+    provider: String,
+) -> Result<(), ToolError> {
+    let vfs = state.0.lock().unwrap();
+    conversations::set_model(&vfs, id, provider)
 }
 
 #[tauri::command]
@@ -212,6 +223,7 @@ pub fn agent_model_activate(state: State<'_, VfsState>, id: String) -> Result<()
 pub async fn agent_stream(
     vfs_state: State<'_, VfsState>,
     state: State<'_, AgentState>,
+    mnn_state: State<'_, LocalMnnState>,
     request: llm::ProxyRequest,
     on_event: Channel<llm::StreamEvent>,
 ) -> Result<(), ToolError> {
@@ -247,7 +259,16 @@ pub async fn agent_stream(
         }
     }
 
-    let result = llm::run(state.inner(), request, &entry, &params, cancel, &emit).await;
+    let result = llm::run(
+        state.inner(),
+        mnn_state.inner(),
+        request,
+        &entry,
+        &params,
+        cancel,
+        &emit,
+    )
+    .await;
     state.clear_cancel(&request_id);
     result
 }

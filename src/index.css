@@ -2825,6 +2825,21 @@ body.split-resizing {
   color: var(--danger);
 }
 
+/* 会话级引擎/模型切换：保持状态栏的轻量外观，不引入新的视觉层级。 */
+.chat-engine-select {
+  max-width: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-overflow: ellipsis;
+}
+
+.chat-engine-select:disabled {
+  opacity: 0.6;
+}
+
 .chat-page .page-scroll.chat-scroll {
   padding: 6px 14px 10px;
 }
