@@ -401,11 +401,9 @@ impl JobBuffer {
                 metric_reason,
             ),
             (None, Some(reason)) => Outcome::done(self.usage.clone(), Some(reason.clone())),
-            (None, None) => Outcome::failed(
-                "error",
-                "流式响应在完成前结束".to_string(),
-                metric_reason,
-            ),
+            (None, None) => {
+                Outcome::failed("error", "流式响应在完成前结束".to_string(), metric_reason)
+            }
         }
     }
 }
@@ -565,7 +563,11 @@ impl ChatJobs {
 
     /// A local turn is decoding; background pause must not unload the weights.
     pub fn local_running(&self) -> bool {
-        self.inner.lock().unwrap().running.contains_key(&Lane::Local)
+        self.inner
+            .lock()
+            .unwrap()
+            .running
+            .contains_key(&Lane::Local)
     }
 }
 
@@ -796,7 +798,9 @@ fn job_from_raw(raw: RawJob) -> Result<ChatJob, ToolError> {
         blocks,
         usage,
         engine: raw.engine,
-        metrics: raw.metrics.and_then(|text| serde_json::from_str(&text).ok()),
+        metrics: raw
+            .metrics
+            .and_then(|text| serde_json::from_str(&text).ok()),
         stop_reason: raw.stop_reason,
         error_code: raw.error_code,
         error_message: raw.error_message,
@@ -1053,7 +1057,12 @@ mod tests {
         mark_running(&conn, job.id).unwrap();
         finish(&conn, job.id, &Outcome::done(None, Some("stop".into()))).unwrap();
         // Second completion must not change the terminal status or fields.
-        finish(&conn, job.id, &Outcome::failed("error", "late".into(), None)).unwrap();
+        finish(
+            &conn,
+            job.id,
+            &Outcome::failed("error", "late".into(), None),
+        )
+        .unwrap();
         let job = get(&conn, job.id).unwrap();
         assert_eq!(job.status, ChatJobStatus::Done);
         assert!(job.error_code.is_none());
@@ -1105,7 +1114,12 @@ mod tests {
         // running -> failed
         let job = submit(&conn, 1, &entry(), &request("t4")).unwrap();
         mark_running(&conn, job.id).unwrap();
-        let job = finish(&conn, job.id, &Outcome::failed("error", "boom".into(), None)).unwrap();
+        let job = finish(
+            &conn,
+            job.id,
+            &Outcome::failed("error", "boom".into(), None),
+        )
+        .unwrap();
         assert_eq!(job.status, ChatJobStatus::Failed);
         assert_eq!(job.stop_reason.as_deref(), Some("error"));
     }

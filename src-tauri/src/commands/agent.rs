@@ -12,11 +12,11 @@ use tauri::State;
 use serde::Deserialize;
 
 use crate::agent::discovery::ConnectionTest;
+use crate::agent::local_mnn::LocalMnnState;
 use crate::agent::model_store::{
     self, AgentSettings, ApiFormat, ModelEntry, ModelInput, ModelKind, ModelView,
 };
 use crate::agent::params::{self, LlmParams};
-use crate::agent::local_mnn::LocalMnnState;
 use crate::agent::{conversations, discovery, llm, request as agent_request, AgentState};
 use crate::vfs::error::ToolError;
 use crate::vfs::VfsState;

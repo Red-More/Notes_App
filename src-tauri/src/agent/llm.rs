@@ -662,9 +662,7 @@ pub async fn run(
     // Local entries never reach the HTTP paths below; the runtime owns decoding.
     if entry.format.is_local() {
         return match entry.format {
-            ApiFormat::LocalMnn => {
-                run_mnn(mnn, &req, entry, params, cancel, emit).await
-            }
+            ApiFormat::LocalMnn => run_mnn(mnn, &req, entry, params, cancel, emit).await,
             _ => run_local(state, &req, entry, params, cancel, emit).await,
         };
     }
@@ -911,7 +909,8 @@ async fn run_mnn(
     if !status.phase.is_loaded() || status.model.as_deref() != Some(bundle.as_str()) {
         let engine = mnn.clone();
         let threads = crate::agent::local::gating::device_profile().recommended_threads;
-        let loaded = tauri::async_runtime::spawn_blocking(move || engine.load(&bundle, threads)).await;
+        let loaded =
+            tauri::async_runtime::spawn_blocking(move || engine.load(&bundle, threads)).await;
         match loaded {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
