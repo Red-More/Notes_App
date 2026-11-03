@@ -7,9 +7,12 @@
 //! `local_mnn_generate` 仍返回整段结果，但引擎侧已经按 chunk 回调实现；
 //! 需要真流式时只在这里换成 `mpsc::Sender<String>` 或 `app.emit`，不改引擎。
 //!
-//! 生成没有超时：取消只在 token 之间检查，若 native 调用挂死，这个
-//! `spawn_blocking` 线程会被长期占用（阻塞池不会因此锁死，但该线程不可回收）。
-//! 这是既定取舍，命令层不额外加超时。
+//! 生成超时：引擎侧提供三个闸（`firstToken` / `idle` / `total`，单位毫秒），
+//! 由 chunk 心跳判定；默认全部关闭（`GenerateParams::timeout` 全 0），因此
+//! 默认路径与既有的无超时行为一致，命令层暂未开放这三个参数，默认值待真机
+//! 标定。开启后超时与用户取消共用同一条取消标记；若 native 不响应取消，
+//! worker 线程会被隔离并重建，该轮返回 `code="timeout"`（带 `stage`，可与
+//! `cancelled` 区分），后续任务不会永久堵在卡死轮次后面。
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;

@@ -29,7 +29,7 @@ use mnn_rs_sys::{
 };
 
 use crate::agent::inference::worker::Worker;
-use crate::agent::inference::{EngineMetrics, StopReason};
+use crate::agent::inference::{EngineMetrics, Progress, StopReason, TimeoutPolicy};
 
 use super::{step_decision, MnnError};
 
@@ -78,17 +78,26 @@ impl MnnWorker {
         })?
     }
 
+    /// Runs one turn under the timeout policy; `progress` is refreshed by the
+    /// chunk callback so the gates see real decoding progress, not just entry time.
     pub fn generate(
         &self,
         prompt: String,
         max_tokens: u32,
         cancel: Arc<AtomicBool>,
         sink: ChunkSink,
+        policy: TimeoutPolicy,
+        progress: Arc<Progress>,
     ) -> Result<EngineMetrics, MnnError> {
-        self.worker.call(move |slot| match slot.as_mut() {
-            Some(handle) => generate(handle, &prompt, max_tokens, &cancel, sink),
-            None => Err(MnnError::not_loaded()),
-        })?
+        let heartbeat = Arc::clone(&progress);
+        self.worker.call_with_timeout(
+            move |slot| match slot.as_mut() {
+                Some(handle) => generate(handle, &prompt, max_tokens, &cancel, sink, heartbeat),
+                None => Err(MnnError::not_loaded()),
+            },
+            &policy,
+            &progress,
+        )?
     }
 
     pub fn unload(&self) -> Result<(), MnnError> {
@@ -138,6 +147,8 @@ struct StreamState {
     sink: ChunkSink,
     started: Instant,
     first_chunk_ms: Option<u64>,
+    /// Timeout heartbeat; refreshed on every chunk so the gates observe progress.
+    progress: Arc<Progress>,
 }
 
 /// C callback invoked synchronously from inside `generate_step`.
@@ -157,6 +168,8 @@ unsafe extern "C" fn stream_callback(text: *const c_char, userdata: *mut c_void)
     if chunk.is_empty() {
         return;
     }
+    // Heartbeat first: the sink may be slow, and timeouts track model output.
+    state.progress.observe();
     if state.first_chunk_ms.is_none() {
         state.first_chunk_ms = Some(state.started.elapsed().as_millis() as u64);
     }
@@ -169,6 +182,7 @@ fn generate(
     max_tokens: u32,
     cancel: &AtomicBool,
     sink: ChunkSink,
+    progress: Arc<Progress>,
 ) -> Result<EngineMetrics, MnnError> {
     let c_prompt = cstring(prompt, "prompt")?;
     let started = Instant::now();
@@ -176,6 +190,7 @@ fn generate(
         sink,
         started,
         first_chunk_ms: None,
+        progress,
     };
 
     // SAFETY: every pointer below refers to `handle.raw` (live) or to `state`

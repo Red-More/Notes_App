@@ -41,7 +41,7 @@ pub use error::MnnError;
 
 use crate::agent::inference::{
     EngineError, EngineInput, EngineKind, EngineMetrics, GenerateParams, InferenceEngine,
-    LoadOptions, ModelAsset, StopReason,
+    LoadOptions, ModelAsset, StopReason, TimeoutPolicy,
 };
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -483,13 +483,15 @@ impl LocalMnnState {
     /// 流式生成；`sink` 在 worker 线程里逐块调用，结束后返回统一指标。
     ///
     /// `cancel` 同时保存到运行时槽位，命令层的 `local_mnn_cancel` 可在
-    /// token 之间置位，无需再经 worker 队列。
+    /// token 之间置位，无需再经 worker 队列。`policy` 默认全关（0），
+    /// 此时走与既有行为完全一致的路径；开启后由 chunk 心跳判定超时。
     pub fn generate_stream<F>(
         &self,
         prompt: &str,
         max_tokens: u32,
         cancel: Arc<AtomicBool>,
         sink: F,
+        policy: TimeoutPolicy,
     ) -> Result<EngineMetrics, MnnError>
     where
         F: FnMut(&str) + Send + 'static,
@@ -516,11 +518,39 @@ impl LocalMnnState {
                 let next = transition(status.phase, MnnEvent::GenerateStart);
                 status.apply(next);
             }
-            let result = self.worker().and_then(|worker| {
-                worker.generate(prompt.to_string(), max_tokens, cancel, Box::new(sink))
+            // Shared heartbeat: refreshed inside the native chunk callback.
+            let progress = Arc::new(crate::agent::inference::Progress::new(cancel.clone()));
+            let heartbeat = Arc::clone(&progress);
+            let mut sink = sink;
+            let sink: Box<dyn FnMut(&str) + Send> = Box::new(move |chunk| {
+                heartbeat.observe();
+                sink(chunk);
             });
+            let restarts_before = self.restart_count();
+            let result = self.worker().and_then(|worker| {
+                worker.generate(
+                    prompt.to_string(),
+                    max_tokens,
+                    cancel,
+                    sink,
+                    policy,
+                    progress,
+                )
+            });
+            let restarts_after = self.restart_count();
             *self.inner.cancel.lock().unwrap() = None;
-            self.set_phase(MnnEvent::GenerateDone);
+            if restarts_after > restarts_before {
+                // Native ignored the timeout cancel; the worker was replaced and
+                // its handle dropped, so no weights are resident any more.
+                log::warn!("mnn worker 因超时被重建，模型需要重新加载");
+                let mut status = self.inner.status.lock().unwrap();
+                status.model = None;
+                status.threads = 0;
+                let next = transition(status.phase, MnnEvent::Unload);
+                status.apply(next);
+            } else {
+                self.set_phase(MnnEvent::GenerateDone);
+            }
             // A failed turn produced no metrics; keeping the previous round's
             // numbers would make the status page report a turn that never finished.
             *self.inner.last_metrics.lock().unwrap() = match &result {
@@ -532,7 +562,7 @@ impl LocalMnnState {
 
         #[cfg(not(feature = "local-mnn"))]
         {
-            let _ = (cancel, sink);
+            let _ = (cancel, sink, policy);
             Err(MnnError::Unsupported {
                 message: "当前构建未启用 MNN 本地模型（编译时未包含 local-mnn）".to_string(),
             })
@@ -605,7 +635,13 @@ impl InferenceEngine for LocalMnnState {
             EngineInput::Prompt(prompt) => prompt,
             EngineInput::Turns(_) => return Err(EngineError::invalid("MNN 只接受预渲染的 prompt")),
         };
-        self.generate_stream(&prompt, params.max_tokens, cancel.clone(), sink)
+        self.generate_stream(
+            &prompt,
+            params.max_tokens,
+            cancel.clone(),
+            sink,
+            params.timeout,
+        )
     }
 
     fn cancel(&self) -> bool {
@@ -828,7 +864,13 @@ mod tests {
         assert!(!status.loaded);
         assert_eq!(
             state
-                .generate_stream("hi", 4, Arc::new(AtomicBool::new(false)), |_| {})
+                .generate_stream(
+                    "hi",
+                    4,
+                    Arc::new(AtomicBool::new(false)),
+                    |_| {},
+                    TimeoutPolicy::default(),
+                )
                 .unwrap_err()
                 .to_string(),
             if cfg!(feature = "local-mnn") {

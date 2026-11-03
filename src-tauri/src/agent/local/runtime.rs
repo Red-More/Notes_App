@@ -447,10 +447,24 @@ impl Runtime {
 
         #[cfg(feature = "local-llm")]
         let result = {
+            // The engine checks the gates between batches/tokens and refreshes
+            // this heartbeat on every chunk; a breach is reported as `timeout`
+            // even when the loop stopped through the shared cancel flag.
+            let progress = crate::agent::inference::Progress::new(Arc::clone(cancel));
+            let mut observed = |chunk: &str| {
+                progress.observe();
+                sink(chunk);
+            };
             let loaded = self.inner.loaded.lock().unwrap();
-            match loaded.as_ref() {
-                Some(engine) => engine.generate(backend, &turns, params, cancel, sink),
+            let result = match loaded.as_ref() {
+                Some(engine) => {
+                    engine.generate(backend, &turns, params, cancel, &mut observed, &progress)
+                }
                 None => Err(EngineError::invalid("本地模型未加载，请先在设置页加载")),
+            };
+            match progress.stage() {
+                Some(stage) => Err(EngineError::timeout(stage)),
+                None => result,
             }
         };
 

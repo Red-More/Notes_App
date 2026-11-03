@@ -807,6 +807,7 @@ async fn run_local(
         top_k: params.top_k.unwrap_or(20),
         seed: params.seed.unwrap_or(0) as u32,
         stop: params.stop.clone().unwrap_or_default(),
+        ..GenerateParams::default()
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();

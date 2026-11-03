@@ -17,9 +17,14 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
+pub mod timeout;
 // Pure Rust thread plumbing, so it compiles without any engine feature; this
 // keeps the rebuild/crash tests runnable on hosts where MNN cannot link.
 pub mod worker;
+
+// Re-exported for feature-gated backends; the default build only uses `TimeoutStage` in tests.
+#[allow(unused_imports)]
+pub use timeout::{Progress, TimeoutPolicy, TimeoutStage};
 
 /// 引擎种类；命令与配置用它做选择，不直接暴露后端实现。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -94,6 +99,8 @@ pub struct GenerateParams {
     pub top_k: u32,
     pub seed: u32,
     pub stop: Vec<String>,
+    /// 三个生成超时闸；默认全部关闭，开启后才改变行为。
+    pub timeout: TimeoutPolicy,
 }
 
 impl Default for GenerateParams {
@@ -105,6 +112,7 @@ impl Default for GenerateParams {
             top_k: 20,
             seed: 0,
             stop: Vec::new(),
+            timeout: TimeoutPolicy::default(),
         }
     }
 }
@@ -168,6 +176,8 @@ pub enum EngineError {
     Thread { message: String },
     /// 用户主动中止；仅 llama.cpp 适配器用错误表达取消。
     Cancelled,
+    /// 生成超时；`stage` 为 `firstToken` / `idle` / `total`，与用户取消区分。
+    Timeout { stage: &'static str },
 }
 
 impl EngineError {
@@ -205,6 +215,12 @@ impl EngineError {
         }
     }
 
+    pub fn timeout(stage: TimeoutStage) -> Self {
+        Self::Timeout {
+            stage: stage.as_str(),
+        }
+    }
+
     /// 机器可读判别值，与序列化后的 `code` 字段完全一致。
     pub fn code(&self) -> &'static str {
         match self {
@@ -218,6 +234,7 @@ impl EngineError {
             Self::Engine { .. } => "engine",
             Self::Thread { .. } => "thread",
             Self::Cancelled => "cancelled",
+            Self::Timeout { .. } => "timeout",
         }
     }
 }
@@ -235,6 +252,7 @@ impl std::fmt::Display for EngineError {
             Self::Engine { message } => write!(f, "引擎错误：{message}"),
             Self::Thread { message } => write!(f, "任务调度失败：{message}"),
             Self::Cancelled => write!(f, "已取消"),
+            Self::Timeout { stage } => write!(f, "生成超时（阶段：{stage}）"),
         }
     }
 }
@@ -242,13 +260,16 @@ impl std::fmt::Display for EngineError {
 impl std::error::Error for EngineError {}
 
 /// Wire shape: `code` and `message` are always present, while `model` keeps the
-/// field that `modelNotFound` already exposed to the frontend.
+/// field that `modelNotFound` already exposed to the frontend and `stage`
+/// tells timeout errors apart from user cancellations.
 #[derive(Serialize)]
 struct EngineErrorWire<'a> {
     code: &'static str,
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stage: Option<&'static str>,
 }
 
 impl Serialize for EngineError {
@@ -258,6 +279,10 @@ impl Serialize for EngineError {
             message: self.to_string(),
             model: match self {
                 Self::ModelNotFound { model } => Some(model.as_str()),
+                _ => None,
+            },
+            stage: match self {
+                Self::Timeout { stage } => Some(stage),
                 _ => None,
             },
         }
@@ -332,6 +357,19 @@ mod tests {
         assert_eq!(cancelled["code"], "cancelled");
         assert_eq!(cancelled["message"], "已取消");
         assert!(cancelled.get("model").is_none());
+    }
+
+    #[test]
+    fn timeout_errors_carry_stage_and_differ_from_cancel() {
+        let timed_out = serde_json::to_value(EngineError::timeout(TimeoutStage::Idle)).unwrap();
+        assert_eq!(timed_out["code"], "timeout");
+        assert_eq!(timed_out["stage"], "idle");
+        assert_eq!(timed_out["message"], "生成超时（阶段：idle）");
+        assert_eq!(EngineError::timeout(TimeoutStage::Idle).code(), "timeout");
+        assert_ne!(
+            EngineError::timeout(TimeoutStage::Total).code(),
+            EngineError::Cancelled.code()
+        );
     }
 
     #[test]

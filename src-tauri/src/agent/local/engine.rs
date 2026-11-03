@@ -17,7 +17,9 @@ use llama_cpp_2::model::{LlamaChatMessage, LlamaChatTemplate, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
 
-use crate::agent::inference::{EngineError, EngineMetrics, EngineTurn, GenerateParams, StopReason};
+use crate::agent::inference::{
+    EngineError, EngineMetrics, EngineTurn, GenerateParams, Progress, StopReason, TimeoutPolicy,
+};
 
 pub struct Engine {
     /// Cached KV state. Declared before `model` so it is dropped first.
@@ -95,6 +97,7 @@ impl Engine {
         params: &GenerateParams,
         cancel: &AtomicBool,
         sink: &mut dyn FnMut(&str),
+        progress: &Progress,
     ) -> Result<EngineMetrics, EngineError> {
         if turns.is_empty() {
             return Err(EngineError::invalid("没有可发送的消息"));
@@ -167,6 +170,11 @@ impl Engine {
         let mut pos = start;
         let prompt_started = std::time::Instant::now();
         while pos < prompt_tokens.len() {
+            // Chunk callbacks are the only progress signal; before the first
+            // output the first-token and total gates still apply.
+            if let Some(error) = timeout_abort(progress, &params.timeout, cancel) {
+                return Err(error);
+            }
             let end = (pos + n_batch).min(prompt_tokens.len());
             batch.clear();
             for index in pos..end {
@@ -192,6 +200,11 @@ impl Engine {
         let mut length_limited = false;
 
         loop {
+            // Check the timeouts first so a breached gate is reported as
+            // `timeout`, not as the `Cancelled` it also requests.
+            if let Some(error) = timeout_abort(progress, &params.timeout, cancel) {
+                return Err(error);
+            }
             if cancel.load(Ordering::SeqCst) {
                 return Err(EngineError::Cancelled);
             }
@@ -282,6 +295,20 @@ impl Engine {
             .to_string(),
         })
     }
+}
+
+/// Turns a breached gate into a stop signal on the same cancel path users use.
+///
+/// Returns the error to propagate instead of duplicating the check at each loop.
+fn timeout_abort(
+    progress: &Progress,
+    policy: &TimeoutPolicy,
+    cancel: &AtomicBool,
+) -> Option<EngineError> {
+    let stage = progress.breach(policy)?;
+    progress.mark(stage);
+    cancel.store(true, Ordering::SeqCst);
+    Some(EngineError::timeout(stage))
 }
 
 /// Length of the shared token prefix, i.e. the KV entries that can be reused.
