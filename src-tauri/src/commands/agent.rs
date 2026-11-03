@@ -16,8 +16,7 @@ use crate::agent::model_store::{
     self, AgentSettings, ApiFormat, ModelEntry, ModelInput, ModelKind, ModelView,
 };
 use crate::agent::params::{self, LlmParams};
-use crate::agent::{conversations, discovery, llm, AgentState};
-use crate::privacy;
+use crate::agent::{conversations, discovery, llm, request as agent_request, AgentState};
 use crate::vfs::error::ToolError;
 use crate::vfs::VfsState;
 
@@ -213,44 +212,15 @@ pub fn agent_model_activate(state: State<'_, VfsState>, id: String) -> Result<()
 pub async fn agent_stream(
     vfs_state: State<'_, VfsState>,
     state: State<'_, AgentState>,
-    mut request: llm::ProxyRequest,
+    request: llm::ProxyRequest,
     on_event: Channel<llm::StreamEvent>,
 ) -> Result<(), ToolError> {
-    // Trim first: the egress gate must judge exactly what would be sent.
-    request.context.messages = llm::trim_messages(&request.context.messages);
-
-    let (entry, params, snapshot) = {
-        let vfs = vfs_state.0.lock().unwrap();
-        model_store::cleanup_legacy(vfs.conn(), &state.secrets);
-        let entry = model_store::resolve(vfs.conn(), &request.model.provider)?;
-        // Only chat entries can stream into the agent; media kinds stay inactive.
-        if !entry.kind.is_chat() {
-            return Err(ToolError::invalid("该模型条目不是对话模型"));
-        }
-        let params = params::get(vfs.conn(), &entry.id);
-        // Local entries never leave the device, so the gate snapshot is skipped.
-        let snapshot = if entry.format.is_local() {
-            None
-        } else {
-            // Labels + decrypted EDM values; loading here keeps the lock short.
-            Some(privacy::policy::Snapshot::load(vfs.conn(), &state.secrets)?)
-        };
-        (entry, params, snapshot)
-    };
-
-    // The single egress gate: S0 and un-redacted S1 never reach the network.
-    let decision = match &snapshot {
-        Some(snapshot) => {
-            let decision = privacy::egress::guard(&request.context.messages, snapshot);
-            let vfs = vfs_state.0.lock().unwrap();
-            if let Err(e) = privacy::egress::record_audit(vfs.conn(), &entry.id, "chat", &decision)
-            {
-                log::warn!("egress audit write failed: {e}");
-            }
-            Some(decision)
-        }
-        None => None,
-    };
+    let agent_request::PreparedRun {
+        request,
+        entry,
+        params,
+        decision,
+    } = agent_request::prepare(&vfs_state, &state, request)?;
 
     let request_id = request.request_id.clone();
     let cancel = state.register_cancel(&request_id);

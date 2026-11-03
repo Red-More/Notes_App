@@ -9,11 +9,13 @@
 pub mod conversations;
 pub mod discovery;
 pub mod inference;
+pub mod jobs;
 pub mod llm;
 pub mod local;
 pub mod local_mnn;
 pub mod model_store;
 pub mod params;
+pub(crate) mod request;
 pub mod secrets;
 
 use std::collections::HashMap;

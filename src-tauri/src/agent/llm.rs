@@ -80,7 +80,7 @@ pub struct ProxyContext {
     pub messages: Vec<Value>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Options {
     #[serde(default)]

@@ -5,6 +5,7 @@
 //! 旧的关系型笔记/待办/联系人命令已全部移除。
 
 pub mod agent;
+pub mod chat_job;
 pub mod doc;
 pub mod export;
 pub mod folder;

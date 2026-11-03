@@ -15,12 +15,13 @@
 //! v9：用户消息记录附图资产 id（image_asset_ids）。
 //! v10：媒体作业记录用量与成本（units / cost_usd）。
 //! v11：隐私分级（sensitivity_labels / doc_classification / entity_vault / egress_audit）。
+//! v12：聊天作业（chat_jobs）与消息归属（messages.job_id）。
 //! FTS5 索引在应用层与 blobs 同事务维护（无触发器），schema 版本保持不变。
 
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// 当前 life.db schema 版本。
-pub const SCHEMA_VERSION: i64 = 11;
+pub const SCHEMA_VERSION: i64 = 12;
 
 /// 虚拟文件系统的根路径，与 `vfs::cap_gate::ROOT` 保持一致。
 const ROOT: &str = "/life";
@@ -233,6 +234,36 @@ CREATE TABLE IF NOT EXISTS egress_audit (
 CREATE INDEX IF NOT EXISTS idx_egress_created ON egress_audit(created_at DESC);
 ";
 
+const V12_TABLES: &str = "
+-- Chat jobs: one model turn, decoupled from the WebView lifecycle. Status and
+-- block snapshot are persisted so any viewer can replay a running job.
+CREATE TABLE IF NOT EXISTS chat_jobs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER NOT NULL,
+    request_id      TEXT NOT NULL UNIQUE,
+    model_entry     TEXT NOT NULL,
+    params          TEXT NOT NULL DEFAULT '{}',
+    status          TEXT NOT NULL DEFAULT 'queued'
+                    CHECK (status IN ('queued', 'running', 'cancelling', 'done', 'failed', 'cancelled')),
+    last_seq        INTEGER NOT NULL DEFAULT 0,
+    blocks          TEXT NOT NULL DEFAULT '[]',
+    usage           TEXT,
+    stop_reason     TEXT,
+    error_code      TEXT,
+    error_message   TEXT,
+    created_at      TEXT NOT NULL,
+    started_at      TEXT,
+    finished_at     TEXT,
+    updated_at      TEXT NOT NULL,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_chat_jobs_status ON chat_jobs(status, id);
+CREATE INDEX IF NOT EXISTS idx_chat_jobs_conversation ON chat_jobs(conversation_id, id DESC);
+-- One active turn per conversation; a second submit would interleave transcripts.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_jobs_active
+    ON chat_jobs(conversation_id) WHERE status IN ('queued', 'running', 'cancelling');
+";
+
 /// 迁移用的列探测：表/列名均为本模块常量，格式化进 SQL 安全。
 fn table_has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
     let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{column}'");
@@ -419,6 +450,23 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
         tx.execute_batch(V11_TABLES)?;
         // Seed conservative defaults on first upgrade; user labels can override later.
         crate::privacy::policy::seed_defaults(&tx)?;
+        tx.pragma_update(None, "user_version", 11)?;
+        tx.commit()?;
+        version = 11;
+    }
+
+    if version < 12 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V12_TABLES)?;
+        // Older messages have no job attribution; NULL stays valid.
+        if !table_has_column(&tx, "messages", "job_id")? {
+            tx.execute_batch("ALTER TABLE messages ADD COLUMN job_id INTEGER;")?;
+        }
+        // One assistant/tool row per job; NULL rows (legacy messages) stay exempt.
+        tx.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_job
+                 ON messages(job_id, role) WHERE job_id IS NOT NULL;",
+        )?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         version = SCHEMA_VERSION;

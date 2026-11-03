@@ -49,6 +49,10 @@ pub fn run() {
             if let Err(e) = media::jobs::recover(vault.conn()) {
                 log::warn!("media job recovery failed: {e}");
             }
+            // 聊天作业不跨进程续跑：排队/运行中的行标记为 interrupted，保留部分输出。
+            if let Err(e) = agent::jobs::recover(vault.conn()) {
+                log::warn!("chat job recovery failed: {e}");
+            }
             if let Err(e) = skills::seed_builtins(&mut vault) {
                 eprintln!("life.db skill seed failed: {e}");
             }
@@ -72,6 +76,10 @@ pub fn run() {
             // 本地 MNN 模型根目录：bundle 目录由用户/开发流程放入，命令只认目录名。
             let mnn_root = app.path().app_data_dir()?.join("models").join("mnn");
             app.manage(agent::local_mnn::LocalMnnState::new(mnn_root));
+            // 聊天作业：命令只入队，后台单分派器按引擎串行执行，页面切换不再取消生成。
+            let chat_jobs = std::sync::Arc::new(agent::jobs::ChatJobs::new());
+            app.manage(chat_jobs.clone());
+            agent::jobs::spawn(app.handle().clone(), chat_jobs);
             // 媒体资产目录与作业取消标记；与 Agent run 生命周期解耦。
             let media_root = app.path().app_data_dir()?.join("media");
             std::fs::create_dir_all(&media_root)?;
@@ -155,6 +163,11 @@ pub fn run() {
             commands::agent::agent_params_set,
             commands::agent::agent_stream,
             commands::agent::agent_cancel,
+            commands::chat_job::chat_job_submit,
+            commands::chat_job::chat_job_watch,
+            commands::chat_job::chat_job_snapshot,
+            commands::chat_job::chat_job_list,
+            commands::chat_job::chat_job_cancel,
             commands::local::local_model_status,
             commands::local::local_model_config_set,
             commands::local::local_model_load,
