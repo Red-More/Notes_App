@@ -219,6 +219,11 @@ fn generate(
     let context_ok = unsafe { mnn_llm_get_context(handle.raw, &mut context) } == 0;
     // SAFETY: reset clears history/KV so the next turn starts from a clean state,
     // and it detaches the callback that pointed at `state`.
+    //
+    // Cross-turn KV reuse is unavailable on this streaming path: MNN's prefix
+    // cache lives in `Llm::response(const ChatMessages&)` only, which the C
+    // wrapper exposes as a blocking, non-streaming call. Skipping reset here
+    // would append the whole new prompt onto the old KV and mix contexts.
     unsafe { mnn_llm_reset(handle.raw) };
     let wall_ms = started.elapsed().as_millis() as u64;
 

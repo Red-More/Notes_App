@@ -9,6 +9,24 @@
 //! 与 llama.cpp 主线的差异：MNN 的 `max_tokens` 在高层 API 里是“每个解码 step
 //! 的上限”，外层循环会一直跑到模型自然停止，因此实际输出可能超过传入值。
 //! 本模块改用 `mnn-rs-sys` 每步生成一个 token，由 `step_decision` 累计截断。
+//!
+//! # 跨轮 KV 复用：上游能力受限，当前未启用
+//!
+//! MNN 3.6.1 的前缀复用只实现在 `Llm::response(const ChatMessages&)`
+//! （`transformers/llm/engine/src/llm.cpp:1104-1211`）：当 bundle 的
+//! `config.json` 打开 `prompt_cache` 时，它比较上一轮缓存的模板文本与新模板
+//! 的公共前缀，在 token 边界切分后只 prefill 增量。C wrapper 只把这个入口
+//! 暴露成阻塞式 `mnn_llm_response_messages`
+//! （`wrapper/mnn_llm_wrapper.cpp:191-208`），整段返回、没有 chunk 回调，
+//! 也无法在 token 之间取消；本引擎要求流式 + 逐 token 取消，因此不能改走它。
+//!
+//! 流式入口 `mnn_llm_generate_init` → `Llm::response(const std::vector<int>&)`
+//! （`llm.cpp:1074-1080`）没有“只 prefill token 后缀”的参数；配置项
+//! `reuse_kv` 只决定 `generate_init` 是否清空 KV（`llm.cpp:824-828`），
+//! 并不做前缀去重。若跳过 `mnn_llm_reset` 再把整段新 prompt 交给它，旧 KV
+//! 会与新 prompt 重复拼接，造成串上下文。所以每轮结束仍调用
+//! `mnn_llm_reset`（见 `worker.rs` 的 `generate`），等上游提供流式 messages
+//! 接口后再接入复用。
 
 // The pure helpers are covered by unit tests and used by the feature-gated
 // engine path; without `local-mnn` they are intentionally unused at runtime.
