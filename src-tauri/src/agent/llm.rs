@@ -773,11 +773,10 @@ async fn run_local(
             threads: load_config.threads,
             context_size: load_config.context_size,
         };
-        let loaded =
-            tauri::async_runtime::spawn_blocking(move || {
-                InferenceEngine::load(&runtime, &asset, &options)
-            })
-            .await;
+        let loaded = tauri::async_runtime::spawn_blocking(move || {
+            InferenceEngine::load(&runtime, &asset, &options)
+        })
+        .await;
         match loaded {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {

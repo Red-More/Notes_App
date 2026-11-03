@@ -17,9 +17,7 @@ use llama_cpp_2::model::{LlamaChatMessage, LlamaChatTemplate, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
 
-use crate::agent::inference::{
-    EngineError, EngineMetrics, EngineTurn, GenerateParams, StopReason,
-};
+use crate::agent::inference::{EngineError, EngineMetrics, EngineTurn, GenerateParams, StopReason};
 
 pub struct Engine {
     /// Cached KV state. Declared before `model` so it is dropped first.

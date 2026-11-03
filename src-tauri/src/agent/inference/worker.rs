@@ -120,11 +120,7 @@ impl<H: 'static> Worker<H> {
     /// Test hook: whether the current thread has finished (panicked or exited).
     #[cfg(test)]
     fn thread_finished(&self) -> bool {
-        self.slot
-            .lock()
-            .unwrap()
-            .handle
-            .is_finished()
+        self.slot.lock().unwrap().handle.is_finished()
     }
 }
 
@@ -186,7 +182,9 @@ mod tests {
         struct Handle(std::rc::Rc<u32>);
         let worker = Worker::<Handle>::spawn("test-worker-rebuild").expect("spawn worker");
         // A panicking job kills the worker thread; the call itself fails.
-        assert!(worker.call(|_| -> () { panic!("simulated worker crash") }).is_err());
+        assert!(worker
+            .call(|_| -> () { panic!("simulated worker crash") })
+            .is_err());
         wait_for_exit(&worker);
 
         // The next call detects the dead thread, rebuilds it and still completes.
@@ -197,7 +195,9 @@ mod tests {
         assert!(rebuilt.is_ok(), "first call after a crash should rebuild");
         assert_eq!(worker.restarts(), 1);
         assert_eq!(
-            worker.call(|slot| slot.as_ref().map(|handle| *handle.0)).unwrap(),
+            worker
+                .call(|slot| slot.as_ref().map(|handle| *handle.0))
+                .unwrap(),
             Some(11)
         );
     }
@@ -209,7 +209,9 @@ mod tests {
         // Each call kills the current thread; only the calls that find the
         // thread already dead trigger a rebuild, up to the cap.
         while worker.restarts() < MAX_RESTARTS {
-            assert!(worker.call(|_| -> () { panic!("simulated worker crash") }).is_err());
+            assert!(worker
+                .call(|_| -> () { panic!("simulated worker crash") })
+                .is_err());
             wait_for_exit(&worker);
         }
         assert_eq!(worker.restarts(), MAX_RESTARTS);

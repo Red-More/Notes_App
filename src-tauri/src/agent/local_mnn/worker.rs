@@ -85,11 +85,10 @@ impl MnnWorker {
         cancel: Arc<AtomicBool>,
         sink: ChunkSink,
     ) -> Result<EngineMetrics, MnnError> {
-        self.worker
-            .call(move |slot| match slot.as_mut() {
-                Some(handle) => generate(handle, &prompt, max_tokens, &cancel, sink),
-                None => Err(MnnError::not_loaded()),
-            })?
+        self.worker.call(move |slot| match slot.as_mut() {
+            Some(handle) => generate(handle, &prompt, max_tokens, &cancel, sink),
+            None => Err(MnnError::not_loaded()),
+        })?
     }
 
     pub fn unload(&self) -> Result<(), MnnError> {

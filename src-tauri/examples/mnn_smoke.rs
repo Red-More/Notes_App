@@ -26,15 +26,14 @@ fn main() -> Result<(), String> {
     }
 
     let load_started = Instant::now();
-    let mut llm = mnn_rs::Llm::create(&config_path)
-        .map_err(|e| format!("创建 MNN 实例失败：{e}"))?;
+    let mut llm =
+        mnn_rs::Llm::create(&config_path).map_err(|e| format!("创建 MNN 实例失败：{e}"))?;
     llm.load().map_err(|e| format!("加载模型失败：{e}"))?;
     let load_ms = load_started.elapsed().as_millis();
 
     // 线程数与输出上限由运行时显式覆盖，避免依赖模型自带配置的默认值。
-    let config = format!(
-        r#"{{"backend_type":"cpu","thread_num":{threads},"max_new_tokens":{max_tokens}}}"#
-    );
+    let config =
+        format!(r#"{{"backend_type":"cpu","thread_num":{threads},"max_new_tokens":{max_tokens}}}"#);
     llm.set_config(&config)
         .map_err(|e| format!("应用运行配置失败：{e}"))?;
 

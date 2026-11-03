@@ -13,12 +13,12 @@ use serde::{Deserialize, Serialize};
 
 use super::gating::{self, GateDecision, GatePolicy};
 use super::{LocalModelFile, LocalState, LocalStatus};
+#[cfg(feature = "local-llm")]
+use crate::agent::inference::EngineTurn;
 use crate::agent::inference::{
     EngineError, EngineInput, EngineKind, EngineMetrics, GenerateParams, InferenceEngine,
     LoadOptions, ModelAsset,
 };
-#[cfg(feature = "local-llm")]
-use crate::agent::inference::EngineTurn;
 use crate::vfs::error::ToolError;
 
 const KEY_LOCAL: &str = "agent.local.v1";
@@ -409,7 +409,9 @@ impl Runtime {
         // Resolve the backend before publishing state so an init failure cannot
         // leave the status stuck in `Generating`.
         #[cfg(feature = "local-llm")]
-        let backend = self.backend().map_err(|e| EngineError::invalid(e.to_string()))?;
+        let backend = self
+            .backend()
+            .map_err(|e| EngineError::invalid(e.to_string()))?;
         // Reject input the backend cannot render before touching any state; an
         // early `return` afterwards would skip the `Generating` cleanup below.
         #[cfg(feature = "local-llm")]
@@ -469,7 +471,10 @@ impl Runtime {
         self.inner.current_cancel.lock().unwrap().take();
         // A concurrent suspend/unload may have published its own state while
         // this turn was winding down; only restore Ready if we still own it.
-        if !matches!(self.inner.status.lock().unwrap().state, LocalState::Generating) {
+        if !matches!(
+            self.inner.status.lock().unwrap().state,
+            LocalState::Generating
+        ) {
             return result;
         }
         self.publish(LocalState::Ready, bytes, threads, context, model, None);

@@ -299,7 +299,10 @@ mod tests {
 
     #[test]
     fn engine_kind_parses_known_names() {
-        assert_eq!(EngineKind::LlamaCpp.available(), cfg!(feature = "local-llm"));
+        assert_eq!(
+            EngineKind::LlamaCpp.available(),
+            cfg!(feature = "local-llm")
+        );
         assert_eq!(EngineKind::Mnn.available(), cfg!(feature = "local-mnn"));
     }
 

@@ -237,10 +237,7 @@ pub fn validate_bundle(name: &str, dir: &Path) -> Result<BundleInfo, MnnError> {
         )));
     }
 
-    let mut info = BundleInfo {
-        files: 0,
-        bytes: 0,
-    };
+    let mut info = BundleInfo { files: 0, bytes: 0 };
     let mut has_weights = false;
     let entries = std::fs::read_dir(dir)
         .map_err(|e| MnnError::invalid(format!("读取 {} 失败：{e}", dir.display())))?;
@@ -396,11 +393,10 @@ impl LocalMnnState {
         let clean = name.trim();
         let root = std::fs::canonicalize(&self.inner.root)
             .map_err(|e| MnnError::engine(format!("模型目录不可用：{e}")))?;
-        let resolved = std::fs::canonicalize(root.join(clean)).map_err(|_| {
-            MnnError::ModelNotFound {
+        let resolved =
+            std::fs::canonicalize(root.join(clean)).map_err(|_| MnnError::ModelNotFound {
                 model: clean.to_string(),
-            }
-        })?;
+            })?;
         // `canonicalize` 会解开符号链接；前缀检查拦住指向根目录之外的链接。
         if !resolved.starts_with(&root) {
             return Err(MnnError::invalid("模型目录越界"));
@@ -589,9 +585,7 @@ impl InferenceEngine for LocalMnnState {
     ) -> Result<EngineMetrics, EngineError> {
         let prompt = match input {
             EngineInput::Prompt(prompt) => prompt,
-            EngineInput::Turns(_) => {
-                return Err(EngineError::invalid("MNN 只接受预渲染的 prompt"))
-            }
+            EngineInput::Turns(_) => return Err(EngineError::invalid("MNN 只接受预渲染的 prompt")),
         };
         self.generate_stream(&prompt, params.max_tokens, cancel.clone(), sink)
     }
@@ -741,7 +735,10 @@ mod tests {
             handle.join().expect("thread panicked");
         }
         assert_eq!(admitted.load(Ordering::SeqCst), 1);
-        assert!(!gate.load(Ordering::SeqCst), "permit drop should reset the gate");
+        assert!(
+            !gate.load(Ordering::SeqCst),
+            "permit drop should reset the gate"
+        );
     }
 
     #[test]
@@ -773,20 +770,17 @@ mod tests {
             step_decision(4, 4, false, false),
             Some(MnnStopReason::Length)
         );
-        assert_eq!(
-            step_decision(0, 4, false, true),
-            Some(MnnStopReason::Stop)
-        );
+        assert_eq!(step_decision(0, 4, false, true), Some(MnnStopReason::Stop));
         assert_eq!(
             step_decision(0, 4, true, false),
             Some(MnnStopReason::Cancel)
         );
         // Cancel wins over a stop that happened in the same iteration.
+        assert_eq!(step_decision(0, 4, true, true), Some(MnnStopReason::Cancel));
         assert_eq!(
-            step_decision(0, 4, true, true),
-            Some(MnnStopReason::Cancel)
+            step_decision(0, 0, false, false),
+            Some(MnnStopReason::Length)
         );
-        assert_eq!(step_decision(0, 0, false, false), Some(MnnStopReason::Length));
     }
 
     #[test]
