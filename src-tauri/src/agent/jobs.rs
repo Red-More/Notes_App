@@ -604,22 +604,33 @@ async fn run_job(
             });
         }
         Ok(prepared) => {
-            if let Some(decision) = &prepared.decision {
-                if decision.blocked() {
-                    let message = decision
+            // Local entries carry no decision; only a present *blocked* decision
+            // short-circuits, mirroring the `agent_stream` path.
+            let block_message = prepared
+                .decision
+                .as_ref()
+                .filter(|decision| decision.blocked())
+                .map(|decision| {
+                    decision
                         .message
                         .clone()
-                        .unwrap_or_else(|| "隐私拦截：本次请求不允许发送到云端。".into());
+                        .unwrap_or_else(|| "隐私拦截：本次请求不允许发送到云端。".into())
+                });
+            match block_message {
+                Some(message) => {
                     emit(llm::StreamEvent::Start);
                     emit(llm::StreamEvent::Error {
                         reason: "error".into(),
                         error_message: message,
                         usage: llm::Usage::default(),
                     });
-                } else {
+                }
+                None => {
                     let agent_state = app.state::<AgentState>();
+                    let mnn_state = app.state::<LocalMnnState>();
                     let result = llm::run(
                         agent_state.inner(),
+                        mnn_state.inner(),
                         prepared.request,
                         &prepared.entry,
                         &prepared.params,
