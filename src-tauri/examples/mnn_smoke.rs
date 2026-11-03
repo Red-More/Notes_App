@@ -1,24 +1,35 @@
 //! MNN 运行时冒烟测试（仅在 `local-mnn` feature 下构建）。
 //!
-//! 用法：`mnn_smoke <model_dir> [prompt] [max_tokens] [threads]`
+//! 用法：`mnn_smoke <model_dir> [prompt] [max_tokens] [threads] [--repeat <n>]`
 //!
 //! 该示例只做一件事：加载 MNN 模型、按聊天模板流式生成并打印
 //! load / prefill / decode 三段耗时，用来与 llama.cpp 基线同口径对照。
 //! 它不接触数据库、网络或前端，便于直接推到 Android 真机上执行。
+//!
+//! `--repeat <n>` 在同一进程内连续跑 n 轮同一 prompt，逐轮打印 TTFT/prefill，
+//! 用来在真机上量化跨轮 KV 复用的效果；不加该参数时输出与原先完全一致。
 
 use std::io::Write;
 use std::time::Instant;
 
 fn main() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
-    let model_dir = args
-        .next()
-        .ok_or_else(|| "用法: mnn_smoke <model_dir> [prompt] [max_tokens] [threads]".to_string())?;
+    let model_dir = args.next().ok_or_else(|| {
+        "用法: mnn_smoke <model_dir> [prompt] [max_tokens] [threads] [--repeat <n>]".to_string()
+    })?;
     let prompt = args
         .next()
         .unwrap_or_else(|| "用一句话介绍你自己。".to_string());
     let max_tokens = args.next().and_then(|v| v.parse().ok()).unwrap_or(128);
     let threads = args.next().and_then(|v| v.parse::<u32>().ok()).unwrap_or(4);
+    // Optional, trailing flag; absent means one turn and the original output.
+    let repeat = args
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find(|pair| pair[0] == "--repeat")
+        .and_then(|pair| pair[1].parse::<usize>().ok())
+        .unwrap_or(1)
+        .max(1);
 
     let config_path = std::path::Path::new(&model_dir).join("config.json");
     if !config_path.is_file() {
@@ -37,25 +48,47 @@ fn main() -> Result<(), String> {
     llm.set_config(&config)
         .map_err(|e| format!("应用运行配置失败：{e}"))?;
 
-    let gen_started = Instant::now();
-    let mut first_chunk_ms: Option<u128> = None;
-    let mut chunks = 0usize;
-    llm.generate_stream(&prompt, max_tokens, |chunk| {
-        if first_chunk_ms.is_none() {
-            first_chunk_ms = Some(gen_started.elapsed().as_millis());
-        }
-        chunks += 1;
-        print!("{chunk}");
-        let _ = std::io::stdout().flush();
-    })
-    .map_err(|e| format!("生成失败：{e}"))?;
-    let total_ms = gen_started.elapsed().as_millis();
-    println!();
+    if repeat > 1 {
+        println!("repeat={repeat} load_ms={load_ms}");
+    }
+    for turn in 1..=repeat {
+        let gen_started = Instant::now();
+        let mut first_chunk_ms: Option<u128> = None;
+        let mut chunks = 0usize;
+        llm.generate_stream(&prompt, max_tokens, |chunk| {
+            if first_chunk_ms.is_none() {
+                first_chunk_ms = Some(gen_started.elapsed().as_millis());
+            }
+            chunks += 1;
+            print!("{chunk}");
+            let _ = std::io::stdout().flush();
+        })
+        .map_err(|e| format!("生成失败：{e}"))?;
+        let total_ms = gen_started.elapsed().as_millis();
+        println!();
 
-    println!(
-        "summary load_ms={load_ms} chunks={chunks} first_chunk_ms={} total_ms={total_ms}",
-        first_chunk_ms.unwrap_or(0)
-    );
+        if repeat > 1 {
+            println!(
+                "summary turn={turn} chunks={chunks} first_chunk_ms={} total_ms={total_ms}",
+                first_chunk_ms.unwrap_or(0)
+            );
+        } else {
+            println!(
+                "summary load_ms={load_ms} chunks={chunks} first_chunk_ms={} total_ms={total_ms}",
+                first_chunk_ms.unwrap_or(0)
+            );
+        }
+        print_perf(&llm);
+        // Only the repeated mode needs an explicit reset between turns; the
+        // single-turn output keeps the original sequence byte for byte.
+        if turn < repeat {
+            llm.reset();
+        }
+    }
+    Ok(())
+}
+
+fn print_perf(llm: &mnn_rs::Llm) {
     match llm.performance() {
         Ok(p) => {
             let decode_s = p.decode_us as f64 / 1e6;
@@ -77,5 +110,4 @@ fn main() -> Result<(), String> {
         }
         Err(e) => println!("perf unavailable: {e}"),
     }
-    Ok(())
 }
