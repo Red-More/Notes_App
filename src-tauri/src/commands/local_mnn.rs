@@ -6,6 +6,10 @@
 //!
 //! `local_mnn_generate` 仍返回整段结果，但引擎侧已经按 chunk 回调实现；
 //! 需要真流式时只在这里换成 `mpsc::Sender<String>` 或 `app.emit`，不改引擎。
+//!
+//! 生成没有超时：取消只在 token 之间检查，若 native 调用挂死，这个
+//! `spawn_blocking` 线程会被长期占用（阻塞池不会因此锁死，但该线程不可回收）。
+//! 这是既定取舍，命令层不额外加超时。
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;

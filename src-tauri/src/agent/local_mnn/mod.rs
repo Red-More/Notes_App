@@ -496,11 +496,12 @@ impl LocalMnnState {
                     MnnPhase::Ready => {}
                     _ => return Err(MnnError::not_loaded()),
                 }
+                // Publish the cancel flag before the phase flips to `Generating`:
+                // a cancel issued right after the turn starts must not be dropped.
+                *self.inner.cancel.lock().unwrap() = Some(cancel.clone());
                 let next = transition(status.phase, MnnEvent::GenerateStart);
                 status.apply(next);
             }
-            let cancel_for_slot = cancel.clone();
-            *self.inner.cancel.lock().unwrap() = Some(cancel_for_slot);
             let result = self.worker().and_then(|worker| {
                 worker.generate(prompt.to_string(), max_tokens, cancel, Box::new(sink))
             });
