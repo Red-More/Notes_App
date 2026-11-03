@@ -503,6 +503,18 @@ export interface LocalModelSnapshot {
   gate: string
 }
 
+export interface LocalUnloadOutcome {
+  engine: string
+  wasLoaded: boolean
+  unloaded: boolean
+  reason: string | null
+}
+
+export interface LocalUnloadAllResult {
+  llama: LocalUnloadOutcome
+  mnn: LocalUnloadOutcome
+}
+
 /** Data tier: 0 = S0, 1 = S1, 2 = S2. */
 export type SensitivityLevel = 0 | 1 | 2
 

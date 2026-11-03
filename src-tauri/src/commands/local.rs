@@ -14,7 +14,8 @@ use tauri::State;
 use crate::agent::inference::{EngineKind, EngineMetrics, InferenceEngine};
 use crate::agent::local::gating::{self, DeviceProfile, GateDecision, PowerSnapshot};
 use crate::agent::local::runtime::{self, LocalConfig};
-use crate::agent::local::{LocalModelFile, LocalStatus};
+use crate::agent::local::{LocalModelFile, LocalState, LocalStatus};
+use crate::agent::local_mnn::{LocalMnnState, MnnPhase};
 use crate::agent::model_store::{self, ApiFormat, ModelInput, ModelKind};
 use crate::agent::AgentState;
 use crate::vfs::error::ToolError;
@@ -38,6 +39,127 @@ pub struct LocalSnapshot {
     /// 统一引擎标识与最近一轮指标；新增字段，前端可忽略。
     pub engine: EngineKind,
     pub metrics: Option<EngineMetrics>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnloadOutcome {
+    pub engine: String,
+    pub was_loaded: bool,
+    pub unloaded: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnloadAllResult {
+    pub llama: UnloadOutcome,
+    pub mnn: UnloadOutcome,
+}
+
+/// Unload llama unless a turn is decoding. Used by both switch paths.
+pub(crate) fn unload_llama(local: &runtime::Runtime) -> UnloadOutcome {
+    let state = local.status().state;
+    let was_loaded = matches!(
+        state,
+        LocalState::Ready | LocalState::Suspended | LocalState::Generating
+    );
+    if state == LocalState::Generating {
+        return UnloadOutcome {
+            engine: "llama".to_string(),
+            was_loaded: true,
+            unloaded: false,
+            reason: Some("正在生成，未卸载".to_string()),
+        };
+    }
+    if was_loaded {
+        let started = std::time::Instant::now();
+        local.unload();
+        log::info!(
+            "engine switch: llama unloaded in {} ms",
+            started.elapsed().as_millis()
+        );
+    }
+    UnloadOutcome {
+        engine: "llama".to_string(),
+        was_loaded,
+        unloaded: was_loaded,
+        reason: None,
+    }
+}
+
+/// Unload MNN unless a turn is generating.
+pub(crate) fn unload_mnn(mnn: &LocalMnnState) -> UnloadOutcome {
+    let status = mnn.status();
+    let was_loaded = status.phase.is_loaded();
+    if status.phase == MnnPhase::Generating {
+        return UnloadOutcome {
+            engine: "mnn".to_string(),
+            was_loaded: true,
+            unloaded: false,
+            reason: Some("正在生成，未卸载".to_string()),
+        };
+    }
+    if !was_loaded {
+        return UnloadOutcome {
+            engine: "mnn".to_string(),
+            was_loaded: false,
+            unloaded: false,
+            reason: None,
+        };
+    }
+    let started = std::time::Instant::now();
+    match InferenceEngine::unload(mnn) {
+        Ok(()) => {
+            log::info!(
+                "engine switch: MNN unloaded in {} ms",
+                started.elapsed().as_millis()
+            );
+            UnloadOutcome {
+                engine: "mnn".to_string(),
+                was_loaded: true,
+                unloaded: true,
+                reason: None,
+            }
+        }
+        Err(error) => UnloadOutcome {
+            engine: "mnn".to_string(),
+            was_loaded: true,
+            unloaded: false,
+            reason: Some(error.to_string()),
+        },
+    }
+}
+
+/// Switching engines retires the other one first; a running turn is never cut.
+fn retire_mnn(mnn: &LocalMnnState) -> Result<(), ToolError> {
+    let outcome = unload_mnn(mnn);
+    if outcome.unloaded || !outcome.was_loaded {
+        return Ok(());
+    }
+    Err(ToolError::invalid(
+        outcome.reason.unwrap_or_else(|| "MNN 卸载失败".to_string()),
+    ))
+}
+
+/// Manual "unload everything": both engines may stay unloaded; a generating
+/// engine is skipped instead of being interrupted.
+#[tauri::command]
+pub async fn local_models_unload_all(
+    agent_state: State<'_, AgentState>,
+    mnn_state: State<'_, LocalMnnState>,
+) -> Result<UnloadAllResult, ToolError> {
+    let local = agent_state.local.clone();
+    let mnn = mnn_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let llama = unload_llama(&local);
+        let mnn = unload_mnn(&mnn);
+        UnloadAllResult { llama, mnn }
+    })
+    .await
+    .map_err(|e| ToolError::Storage {
+        message: format!("本地模型线程异常：{e}"),
+    })
 }
 
 #[tauri::command]
@@ -85,8 +207,12 @@ pub fn local_model_config_set(
 pub async fn local_model_load(
     vfs_state: State<'_, VfsState>,
     agent_state: State<'_, AgentState>,
+    mnn_state: State<'_, LocalMnnState>,
     config: Option<LocalConfig>,
 ) -> Result<(), ToolError> {
+    // Loading llama replaces the MNN engine; a generating MNN turn is refused.
+    let switch_started = std::time::Instant::now();
+    retire_mnn(mnn_state.inner())?;
     let config = match config {
         Some(config) => {
             let saved = {
@@ -104,21 +230,36 @@ pub async fn local_model_load(
         None => agent_state.local.config(),
     };
     let runtime = agent_state.local.clone();
-    tauri::async_runtime::spawn_blocking(move || runtime.load_blocking(config))
+    let result = tauri::async_runtime::spawn_blocking(move || runtime.load_blocking(config))
         .await
         .map_err(|e| ToolError::Storage {
             message: format!("本地模型线程异常：{e}"),
-        })?
+        })?;
+    log::info!(
+        "engine switch to llama completed in {} ms",
+        switch_started.elapsed().as_millis()
+    );
+    result
 }
 
 #[tauri::command]
 pub async fn local_model_unload(agent_state: State<'_, AgentState>) -> Result<(), ToolError> {
     let runtime = agent_state.local.clone();
-    tauri::async_runtime::spawn_blocking(move || runtime.unload())
-        .await
-        .map_err(|e| ToolError::Storage {
-            message: format!("本地模型线程异常：{e}"),
-        })
+    tauri::async_runtime::spawn_blocking(move || {
+        let outcome = unload_llama(&runtime);
+        if outcome.unloaded || !outcome.was_loaded {
+            return Ok(());
+        }
+        Err(ToolError::invalid(
+            outcome
+                .reason
+                .unwrap_or_else(|| "llama 卸载失败".to_string()),
+        ))
+    })
+    .await
+    .map_err(|e| ToolError::Storage {
+        message: format!("本地模型线程异常：{e}"),
+    })?
 }
 
 /// 应用进入后台：默认释放内存；“允许后台常驻”开启时保持加载。
@@ -233,6 +374,7 @@ pub fn local_model_remove(
 pub async fn local_model_activate(
     vfs_state: State<'_, VfsState>,
     agent_state: State<'_, AgentState>,
+    mnn_state: State<'_, LocalMnnState>,
     file: String,
 ) -> Result<(), ToolError> {
     let name = file.trim();
@@ -242,6 +384,9 @@ pub async fn local_model_activate(
     if !agent_state.local.models_dir().join(name).is_file() {
         return Err(ToolError::invalid(format!("模型文件不存在：{name}")));
     }
+    // Activating llama retires MNN first so the two weight sets never coexist.
+    let switch_started = std::time::Instant::now();
+    retire_mnn(mnn_state.inner())?;
     let stem: String = model_stem(name).chars().take(100).collect();
     if stem.is_empty() {
         return Err(ToolError::invalid("模型文件名缺少名称"));
@@ -279,6 +424,10 @@ pub async fn local_model_activate(
             message: format!("本地模型线程异常：{e}"),
         })?;
     log::info!("local model entry activated: {}", entry.id);
+    log::info!(
+        "engine switch to llama completed in {} ms",
+        switch_started.elapsed().as_millis()
+    );
     result
 }
 

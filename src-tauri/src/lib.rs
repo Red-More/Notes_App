@@ -178,6 +178,7 @@ pub fn run() {
             commands::local::local_model_import,
             commands::local::local_model_remove,
             commands::local::local_model_activate,
+            commands::local::local_models_unload_all,
             commands::privacy::privacy_labels_list,
             commands::privacy::privacy_label_set,
             commands::privacy::privacy_label_delete,

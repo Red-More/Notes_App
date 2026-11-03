@@ -153,6 +153,18 @@ export default function LocalModelSection({ onModelsChanged }: { onModelsChanged
 
   const unload = () => run(() => localApi.unload(), '本地模型已卸载')
 
+  // Both engines may be unloaded; a generating engine is skipped, never cut.
+  const unloadAll = () =>
+    run(async () => {
+      const result = await localApi.unloadAll()
+      const parts = [result.llama, result.mnn].map((item) => {
+        if (item.unloaded) return `${item.engine} 已卸载`
+        if (!item.wasLoaded) return `${item.engine} 未加载`
+        return `${item.engine} 跳过：${item.reason ?? '未知原因'}`
+      })
+      toast(parts.join('；'))
+    })
+
   const activate = (file: string) =>
     run(async () => {
       await localApi.activate(file)
@@ -233,6 +245,15 @@ export default function LocalModelSection({ onModelsChanged }: { onModelsChanged
                 onClick={() => void unload()}
               >
                 卸载
+              </button>
+              <button
+                type="button"
+                className="restore-default"
+                disabled={busy}
+                onClick={() => void unloadAll()}
+                title="同时卸载 llama 与 MNN，正在生成的引擎会被跳过"
+              >
+                全部卸载
               </button>
             </div>
           </div>

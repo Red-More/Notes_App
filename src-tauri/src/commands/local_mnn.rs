@@ -26,6 +26,7 @@ use crate::agent::local_mnn::{
     LocalMnnModel, LocalMnnResult, LocalMnnState, LocalMnnStatus, MnnError,
 };
 use crate::agent::model_store::{self, ApiFormat, ModelInput, ModelKind};
+use crate::agent::AgentState;
 use crate::vfs::error::ToolError;
 use crate::vfs::VfsState;
 
@@ -78,15 +79,29 @@ pub fn local_mnn_models(state: State<'_, LocalMnnState>) -> Vec<LocalMnnModel> {
     state.models()
 }
 
+/// Switching to MNN retires llama first; a running llama turn is never cut.
+fn retire_llama(local: &crate::agent::local::runtime::Runtime) -> Result<(), String> {
+    let outcome = super::local::unload_llama(local);
+    if outcome.unloaded || !outcome.was_loaded {
+        return Ok(());
+    }
+    Err(outcome
+        .reason
+        .unwrap_or_else(|| "llama 卸载失败".to_string()))
+}
+
 #[tauri::command]
 pub async fn local_mnn_load(
+    agent_state: State<'_, AgentState>,
     state: State<'_, LocalMnnState>,
     model: String,
     threads: u32,
 ) -> Result<(), MnnError> {
     validate_threads(threads)?;
+    let switch_started = std::time::Instant::now();
+    retire_llama(&agent_state.local).map_err(MnnError::invalid)?;
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let asset = ModelAsset::Bundle {
             dir: std::path::PathBuf::from(&model),
         };
@@ -97,7 +112,12 @@ pub async fn local_mnn_load(
         InferenceEngine::load(&state, &asset, &options)
     })
     .await
-    .map_err(|e| MnnError::thread(e.to_string()))?
+    .map_err(|e| MnnError::thread(e.to_string()))?;
+    log::info!(
+        "engine switch to MNN completed in {} ms",
+        switch_started.elapsed().as_millis()
+    );
+    result
 }
 
 #[tauri::command]
@@ -137,15 +157,24 @@ pub fn local_mnn_cancel(state: State<'_, LocalMnnState>) -> bool {
 #[tauri::command]
 pub async fn local_mnn_unload(state: State<'_, LocalMnnState>) -> Result<(), MnnError> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || InferenceEngine::unload(&state))
-        .await
-        .map_err(|e| MnnError::thread(e.to_string()))?
+    tauri::async_runtime::spawn_blocking(move || {
+        let outcome = super::local::unload_mnn(&state);
+        if outcome.unloaded || !outcome.was_loaded {
+            return Ok(());
+        }
+        Err(MnnError::invalid(
+            outcome.reason.unwrap_or_else(|| "MNN 卸载失败".to_string()),
+        ))
+    })
+    .await
+    .map_err(|e| MnnError::thread(e.to_string()))?
 }
 
 /// 把一个 bundle 绑定为稳定模型条目并立即加载；切换会话模型即可选择 MNN。
 #[tauri::command]
 pub async fn local_mnn_activate(
     vfs_state: State<'_, VfsState>,
+    agent_state: State<'_, AgentState>,
     state: State<'_, LocalMnnState>,
     model: String,
 ) -> Result<(), ToolError> {
@@ -153,6 +182,9 @@ pub async fn local_mnn_activate(
     if name.is_empty() {
         return Err(ToolError::invalid("请选择一个 MNN bundle"));
     }
+    // Activating MNN retires llama first so the two weight sets never coexist.
+    let switch_started = std::time::Instant::now();
+    retire_llama(&agent_state.local).map_err(ToolError::invalid)?;
     // Persist the choice before loading so a failed load can be retried later.
     {
         let vfs = vfs_state.0.lock().unwrap();
@@ -173,10 +205,15 @@ pub async fn local_mnn_activate(
 
     let threads = crate::agent::local::gating::device_profile().recommended_threads;
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || state.load(&name, threads))
+    let result = tauri::async_runtime::spawn_blocking(move || state.load(&name, threads))
         .await
         .map_err(|e| ToolError::invalid(format!("MNN 加载线程异常：{e}")))?
-        .map_err(|e| ToolError::invalid(format!("MNN 加载失败：{e}")))
+        .map_err(|e| ToolError::invalid(format!("MNN 加载失败：{e}")));
+    log::info!(
+        "engine switch to MNN completed in {} ms",
+        switch_started.elapsed().as_millis()
+    );
+    result
 }
 
 #[cfg(test)]

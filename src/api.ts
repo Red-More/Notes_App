@@ -20,6 +20,7 @@ import type {
   LocalModelSnapshot,
   LocalMnnModel,
   LocalMnnStatus,
+  LocalUnloadAllResult,
   McpServerInfo,
   McpToolInfo,
   MediaAsset,
@@ -628,6 +629,9 @@ export const localApi = {
   remove: (file: string) => invoke<void>('local_model_remove', { file }),
   /** Create/update the stable local entry, activate it and load the model. */
   activate: (file: string) => invoke<void>('local_model_activate', { file }),
+  /** Manually unload both engines; generating engines are skipped. */
+  unloadAll: () =>
+    invoke<LocalUnloadAllResult>('local_models_unload_all'),
 }
 
 /**
