@@ -220,13 +220,36 @@ export function makeStreamFn(conversationId: number): StreamFn {
         lastJobByConversation.set(conversationId, job.id)
         if (aborted) await chatApi.cancelJob(job.id).catch(() => {})
 
-        // Re-watch a bounded number of times: a closed/lagged channel is
-        // repaired by the snapshot, never by silently dropping events.
-        for (let attempt = 0; attempt < 3 && !terminal; attempt += 1) {
-          await chatApi.watchJob(job.id, channel, lastSeq)
+        // A job still waiting in the single local lane has no live channel yet,
+        // so `watch_job` returns immediately. Keep polling the snapshot with
+        // backoff until a terminal state arrives; only a long silence is fatal.
+        const POLL_START_MS = 500
+        const POLL_MAX_MS = 3000
+        const IDLE_LIMIT_MS = 10 * 60 * 1000
+        let pollMs = POLL_START_MS
+        let idleSince = Date.now()
+        while (!terminal) {
+          const seqBefore = lastSeq
+          try {
+            await chatApi.watchJob(job.id, channel, lastSeq)
+          } catch {
+            // A lost channel is repaired by the snapshot poll below.
+          }
           if (terminal) break
-          const latest = await chatApi.jobSnapshot(job.id)
-          applySnapshot(latest)
+          try {
+            applySnapshot(await chatApi.jobSnapshot(job.id))
+          } catch {
+            // Keep polling: the job may still be queued or running.
+          }
+          if (terminal) break
+          if (lastSeq !== seqBefore) {
+            idleSince = Date.now()
+            pollMs = POLL_START_MS
+          } else if (Date.now() - idleSince >= IDLE_LIMIT_MS) {
+            break
+          }
+          await new Promise((resolve) => setTimeout(resolve, pollMs))
+          pollMs = Math.min(pollMs * 2, POLL_MAX_MS)
         }
       } catch (error) {
         if (!terminal) {

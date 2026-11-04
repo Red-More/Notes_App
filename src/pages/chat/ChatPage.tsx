@@ -47,6 +47,8 @@ interface Bubble {
   text: string
   isError?: boolean
   streaming?: boolean
+  /** Job still waiting in the local lane: show a queue hint instead of dots. */
+  queued?: boolean
   /** Token usage of a settled assistant reply. */
   usage?: MessageUsage | null
   /** Reasoning text streamed before the visible answer. */
@@ -218,6 +220,7 @@ async function loadActiveJob(
       kind: 'assistant',
       text,
       streaming: pending,
+      queued: job.status === 'queued',
       isError: failed,
       usage: failed ? null : job.usage,
       thinking: thoughts.length > 0 ? thoughts.join('\n') : null,
@@ -603,6 +606,7 @@ export default function ChatPage({ isActive }: Props) {
           const id = messageKey('a')
           streamingIdRef.current = id
           const convId = conversationRef.current?.id
+          const jobId = convId === undefined ? undefined : lastJobId(convId)
           setItems((prev) => [
             ...prev,
             {
@@ -610,9 +614,25 @@ export default function ChatPage({ isActive }: Props) {
               kind: 'assistant',
               text: '',
               streaming: true,
-              jobId: convId === undefined ? undefined : lastJobId(convId),
+              jobId,
             },
           ])
+          // A job may sit in the local lane before it starts; label it as queued.
+          if (jobId !== undefined) {
+            void chatApi.jobSnapshot(jobId).then(
+              (job) => {
+                if (job.status !== 'queued') return
+                setItems((prev) =>
+                  prev.map((item) =>
+                    item.id === id && item.kind === 'assistant' && item.text === ''
+                      ? { ...item, queued: true }
+                      : item,
+                  ),
+                )
+              },
+              () => {},
+            )
+          }
           scrollToBottom()
           break
         }
@@ -624,7 +644,7 @@ export default function ChatPage({ isActive }: Props) {
             setItems((prev) =>
               prev.map((item) =>
                 item.id === id && item.kind === 'assistant'
-                  ? { ...item, text: item.text + update.delta }
+                  ? { ...item, text: item.text + update.delta, queued: false }
                   : item,
               ),
             )
@@ -643,7 +663,7 @@ export default function ChatPage({ isActive }: Props) {
               setItems((prev) =>
                 prev.map((item) =>
                   item.id === id && item.kind === 'assistant'
-                    ? { ...item, thinking: (item.thinking ?? '') + update.delta }
+                    ? { ...item, thinking: (item.thinking ?? '') + update.delta, queued: false }
                     : item,
                 ),
               )
@@ -1539,7 +1559,7 @@ export default function ChatPage({ isActive }: Props) {
                         <div
                           className={`chat-bubble ${item.kind} ${item.isError ? 'error' : ''}`}
                         >
-                          {item.text || (item.streaming ? '…' : '')}
+                          {item.text || (item.streaming ? (item.queued ? '排队中…' : '…') : '')}
                         </div>
                       )}
                       {item.kind === 'assistant' && !item.streaming && (

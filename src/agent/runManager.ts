@@ -9,7 +9,7 @@
 import type { Agent, AgentEvent, AgentMessage } from '@earendil-works/pi-agent-core'
 import type { AssistantMessage } from '@earendil-works/pi-ai'
 import { chatApi } from '../api'
-import type { MessageUsage } from '../types'
+import type { ChatJobSnapshot, MessageUsage } from '../types'
 import { extractAssistant } from './runtime'
 import { lastJobId } from './stream'
 
@@ -25,6 +25,11 @@ export interface Run {
 }
 
 const runs = new Map<number, Run>()
+
+/** A job only owns a persisted row once it reached a terminal state. */
+function jobSettled(job: ChatJobSnapshot): boolean {
+  return job.status === 'done' || job.status === 'failed' || job.status === 'cancelled'
+}
 
 function usageFromMessage(message: AssistantMessage): MessageUsage | null {
   const usage = message.usage
@@ -94,8 +99,17 @@ function persistEvent(run: Run, event: AgentEvent): void {
         : text
       if (shown.trim() === '' && toolCalls === null) return
       const jobId = lastJobId(run.conversationId) ?? null
-      enqueue(run, () =>
-        chatApi.append({
+      enqueue(run, async () => {
+        // Never persist an unfinished job's outcome: a queued or running job
+        // still owns the turn, and its own terminal event writes the real row.
+        if (jobId !== null) {
+          try {
+            if (!jobSettled(await chatApi.jobSnapshot(jobId))) return
+          } catch {
+            // Snapshot unavailable: fall through so the message is not lost.
+          }
+        }
+        await chatApi.append({
           conversationId: run.conversationId,
           messages: [
             {
@@ -109,8 +123,8 @@ function persistEvent(run: Run, event: AgentEvent): void {
               jobId,
             },
           ],
-        }),
-      )
+        })
+      })
       return
     }
     case 'tool_execution_end': {
