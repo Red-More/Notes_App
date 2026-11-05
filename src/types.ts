@@ -187,6 +187,14 @@ export interface Doc {
   deletedAt: string | null
 }
 
+/** 保存回执：只携带定位与时间戳，正文留在后端。 */
+export interface DocSaveReceipt {
+  id: number
+  path: string
+  rev: number
+  updatedAt: string
+}
+
 /** 文档版本；id 来自 version_meta，全局唯一。 */
 export interface DocVersion {
   id: number

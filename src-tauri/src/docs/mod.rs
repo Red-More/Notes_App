@@ -30,7 +30,7 @@ use crate::vfs::{
     VirtualFs,
 };
 
-use types::{Doc, DocFields, ListQuery};
+use types::{Doc, DocFields, DocSaveReceipt, ListQuery};
 use util::{
     basename, doc_date, doc_from_row, fetch_row, folder_map, folder_path, head_content, parent_dir,
     root_for, safe_segment, unique_file_path,
@@ -92,6 +92,16 @@ pub fn list(vfs: &VirtualFs, query: ListQuery) -> Result<Vec<Doc>, ToolError> {
             args.push(SqlValue::Text(search.to_string()));
         }
     }
+
+    // Restrict to an explicit path set (search reuses the `fs_grep` hits).
+    if let Some(paths) = query.paths.as_deref() {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; paths.len()].join(",");
+        sql.push_str(&format!(" AND i.path IN ({placeholders})"));
+        args.extend(paths.iter().map(|path| SqlValue::Text(path.clone())));
+    }
     sql.push_str(" ORDER BY i.mtime DESC LIMIT 2000");
 
     let mut stmt = conn.prepare(&sql)?;
@@ -122,7 +132,24 @@ pub fn list(vfs: &VirtualFs, query: ListQuery) -> Result<Vec<Doc>, ToolError> {
     sort_docs(&mut docs, query.sort.as_deref().unwrap_or("updated"));
     let limit = query.limit.unwrap_or(1000).clamp(1, 2000);
     docs.truncate(limit);
+    apply_content_policy(&mut docs, &query);
     Ok(docs)
+}
+
+/// List callers can skip bodies or request a short preview, which keeps large
+/// result sets off the IPC payload. Filtering above already used the parsed
+/// fields, so clearing content here does not change matching semantics.
+fn apply_content_policy(docs: &mut [Doc], query: &ListQuery) {
+    let skip_content = query.include_content == Some(false);
+    for doc in docs {
+        if skip_content {
+            doc.content.clear();
+        } else if let Some(limit) = query.preview_chars {
+            if doc.content.chars().count() > limit {
+                doc.content = doc.content.chars().take(limit).collect();
+            }
+        }
+    }
 }
 
 /// 新建文档。内容与 fields 由调用方给出，后端负责生成唯一路径与 frontmatter。
@@ -203,7 +230,7 @@ pub fn save(
     fields: Option<DocFields>,
     folder_id: Option<i64>,
     expect_rev: Option<i64>,
-) -> Result<Doc, ToolError> {
+) -> Result<DocSaveReceipt, ToolError> {
     let tx = vfs.conn_mut().transaction()?;
     let row = fetch_row(&tx, id, false)?;
     // The row reader falls back to an empty body when the head blob is gone,
@@ -283,7 +310,12 @@ pub fn save(
     // 内容未变化且未移动时，不追加空 rev，避免自动保存把历史撑爆。
     if new_path == row.path && markdown == head {
         drop(tx);
-        return get(vfs, id, false);
+        return Ok(DocSaveReceipt {
+            id,
+            path: row.path,
+            rev: row.head_rev,
+            updated_at: row.mtime,
+        });
     }
 
     let next = row.head_rev + 1;
@@ -296,8 +328,10 @@ pub fn save(
         "UPDATE inodes SET path = ?1, head_rev = ?2, size = ?3, mtime = ?4 WHERE inode = ?5",
         params![new_path, next, markdown.len() as i64, now, id],
     )?;
-    meta::upsert(&tx, id, &new_path, &markdown)?;
-    crate::vfs::index::refresh(&tx, id, &new_path, &markdown)?;
+    // Parse the rewritten document once and share it with both mirrors.
+    let written = meta::parse_document(&markdown);
+    meta::upsert_parts(&tx, id, &new_path, &written)?;
+    crate::vfs::index::refresh_parts(&tx, id, &new_path, &written)?;
     crate::vfs::fts::index_document(&tx, id, &markdown)?;
     tx.execute(
         "INSERT OR IGNORE INTO version_meta
@@ -305,9 +339,15 @@ pub fn save(
          VALUES (?1, ?2, NULL, NULL, 0, ?3)",
         params![id, next, now],
     )?;
+    let receipt = DocSaveReceipt {
+        id,
+        path: new_path,
+        rev: next,
+        updated_at: now,
+    };
     tx.commit()?;
 
-    get(vfs, id, false)
+    Ok(receipt)
 }
 
 /// 批量软删除（进入回收站）。

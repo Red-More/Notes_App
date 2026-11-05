@@ -26,6 +26,16 @@ pub const DIM_TAG: &str = "tag";
 /// 重建一个 inode 的全部索引行。调用方必须已在事务中。
 pub fn refresh(conn: &Connection, inode: i64, path: &str, content: &str) -> rusqlite::Result<()> {
     let parts = meta::parse_document(content);
+    refresh_parts(conn, inode, path, &parts)
+}
+
+/// Same as [`refresh`] but reuses an already parsed document.
+pub fn refresh_parts(
+    conn: &Connection,
+    inode: i64,
+    path: &str,
+    parts: &meta::DocumentParts,
+) -> rusqlite::Result<()> {
     let kind = parts
         .kind
         .clone()

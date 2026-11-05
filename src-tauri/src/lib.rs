@@ -114,6 +114,7 @@ pub fn run() {
             commands::folder::folder_delete,
             commands::folder::folder_set_pinned,
             commands::version::version_list,
+            commands::version::version_content,
             commands::version::version_create,
             commands::version::version_restore,
             commands::version::version_delete,

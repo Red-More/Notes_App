@@ -316,13 +316,13 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
         setCreatedAt(note.createdAt)
         setUpdatedAt(note.updatedAt)
       } else {
-        const note = await api.saveNote({
+        const receipt = await api.saveNote({
           id: noteIdRef.current,
           title: t,
           content: c,
           folderId: currentFolderId,
         })
-        setUpdatedAt(note.updatedAt)
+        setUpdatedAt(receipt.updatedAt)
       }
       lastSavedRef.current = { title: t, content: c }
       // The content may have changed again mid-write; reflect that state.
@@ -607,6 +607,26 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     }
   }
 
+  /** Version bodies are not part of the list; fetch one when it is shown. */
+  const openVersionPreview = async (v: NoteVersion) => {
+    setVersionsOpen(false)
+    try {
+      setPreviewVersion({ ...v, content: await api.getVersionContent(v.id) })
+    } catch (e) {
+      console.error(e)
+      toast(friendlyError(e))
+    }
+  }
+
+  const openVersionCompare = async (v: NoteVersion) => {
+    try {
+      setCompareVersion({ ...v, content: await api.getVersionContent(v.id) })
+    } catch (e) {
+      console.error(e)
+      toast(friendlyError(e))
+    }
+  }
+
   const handleDeleteVersion = async (v: NoteVersion) => {
     setDeleteVersionConfirm(null)
     try {
@@ -645,13 +665,13 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     if (noteIdRef.current == null) return
     try {
       // Folder-only change: persist the selection without touching the content.
-      const note = await api.saveNote({
+      const receipt = await api.saveNote({
         id: noteIdRef.current,
         title,
         content,
         folderId: fid,
       })
-      setUpdatedAt(note.updatedAt)
+      setUpdatedAt(receipt.updatedAt)
       lastSavedRef.current = { title, content }
       setDirty(false)
       setSaveState('clean')
@@ -1346,10 +1366,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
             <div key={v.id} className="version-item">
               <div
                 className="version-main"
-                onClick={() => {
-                  setVersionsOpen(false)
-                  setPreviewVersion(v)
-                }}
+                onClick={() => void openVersionPreview(v)}
               >
                 <div className="version-head">
                   <span className="version-no">{fmtVersion(v.versionNumber)}</span>
@@ -1363,10 +1380,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
                   type="button"
                   className="icon-btn"
                   aria-label="预览"
-                  onClick={() => {
-                    setVersionsOpen(false)
-                    setPreviewVersion(v)
-                  }}
+                  onClick={() => void openVersionPreview(v)}
                 >
                   <IconEye size={18} />
                 </button>
@@ -1382,7 +1396,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
                   type="button"
                   className="icon-btn"
                   aria-label="对比"
-                  onClick={() => setCompareVersion(v)}
+                  onClick={() => void openVersionCompare(v)}
                 >
                   <IconCompare size={18} />
                 </button>

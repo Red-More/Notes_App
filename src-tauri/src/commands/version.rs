@@ -18,6 +18,12 @@ pub fn version_list(
 }
 
 #[tauri::command]
+pub fn version_content(state: State<'_, VfsState>, version_id: i64) -> Result<String, ToolError> {
+    let vfs = crate::lock(&state.0);
+    versions::content(&vfs, version_id)
+}
+
+#[tauri::command]
 pub fn version_create(state: State<'_, VfsState>, doc_id: i64) -> Result<DocVersion, ToolError> {
     let mut vfs = crate::lock(&state.0);
     versions::create(&mut vfs, doc_id)

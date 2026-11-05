@@ -29,7 +29,10 @@ export default function DiffViewerModal({ paths, title, onClose }: Props) {
     let cancelled = false
     const run = async () => {
       try {
-        const docs = await docApi.list({ limit: 2000 })
+        // Only the changed paths are needed; skip bodies for the whole store.
+        const docs = paths.length
+          ? await docApi.list({ paths, includeContent: false })
+          : []
         const result: FileDiff[] = []
         for (const path of paths) {
           const doc = docs.find((item) => item.path === path)
@@ -39,8 +42,13 @@ export default function DiffViewerModal({ paths, title, onClose }: Props) {
           const previous = versions
             .filter((version) => version.versionNumber < doc.rev)
             .sort((a, b) => b.versionNumber - a.versionNumber)[0]
-          const current = head?.content ?? doc.content
-          const rows = previous ? diffLines(previous.content, current) : diffLines('', current)
+          // Version bodies are fetched on demand, one revision at a time.
+          const current = head
+            ? await docApi.versionContent(head.id)
+            : (await docApi.get(doc.id)).content
+          const rows = previous
+            ? diffLines(await docApi.versionContent(previous.id), current)
+            : diffLines('', current)
           result.push({
             path,
             status: previous ? 'modified' : 'new',

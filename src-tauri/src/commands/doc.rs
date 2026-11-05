@@ -4,7 +4,7 @@ use tauri::State;
 
 use crate::docs::{
     self,
-    types::{Doc, DocFields, ListQuery},
+    types::{Doc, DocFields, DocSaveReceipt, ListQuery},
 };
 use crate::vfs::error::ToolError;
 use crate::vfs::VfsState;
@@ -23,6 +23,12 @@ pub fn doc_list(
     tag: Option<String>,
     month: Option<String>,
     limit: Option<usize>,
+    // Lightweight mode: `false` skips document bodies.
+    include_content: Option<bool>,
+    // Body preview length in characters.
+    preview_chars: Option<usize>,
+    // Restrict to these virtual paths (search reuses `fs_grep` hits).
+    paths: Option<Vec<String>>,
 ) -> Result<Vec<Doc>, ToolError> {
     let vfs = crate::lock(&state.0);
     docs::list(
@@ -37,6 +43,9 @@ pub fn doc_list(
             tag,
             month,
             limit,
+            include_content,
+            preview_chars,
+            paths,
         },
     )
 }
@@ -76,7 +85,7 @@ pub fn doc_save(
     fields: Option<DocFields>,
     folder_id: Option<i64>,
     expect_rev: Option<i64>,
-) -> Result<Doc, ToolError> {
+) -> Result<DocSaveReceipt, ToolError> {
     let mut vfs = crate::lock(&state.0);
     docs::save(&mut vfs, id, title, content, fields, folder_id, expect_rev)
 }

@@ -92,4 +92,20 @@ pub struct ListQuery {
     pub tag: Option<String>,
     pub month: Option<String>,
     pub limit: Option<usize>,
+    /// 为 `false` 时不返回正文，列表视图只需要元数据与字段。
+    pub include_content: Option<bool>,
+    /// 正文预览长度（字符数）；仅在没有关闭正文时生效。
+    pub preview_chars: Option<usize>,
+    /// 限定到这些虚拟路径，用于复用 `fs_grep` 已得到的命中集合。
+    pub paths: Option<Vec<String>>,
+}
+
+/// 保存后的轻量回执：列表/编辑器只需要定位与时间戳，不再回传整篇正文。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocSaveReceipt {
+    pub id: i64,
+    pub path: String,
+    pub rev: i64,
+    pub updated_at: String,
 }

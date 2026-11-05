@@ -15,6 +15,7 @@ use super::util::{basename, fetch_row, now};
 
 /// 列出一个文档的所有版本（新版本在前）。
 /// `include_auto=false` 时只返回手工快照（is_manual=1），保持旧版 UI 语义。
+/// 不返回正文：版本历史只需要标题与时间，正文由 `content` 按需单取。
 pub fn list(
     vfs: &VirtualFs,
     doc_id: i64,
@@ -160,6 +161,36 @@ pub fn restore(vfs: &mut VirtualFs, version_id: i64) -> Result<super::types::Doc
     super::get(vfs, doc_id, false)
 }
 
+/// Read the body of one version on demand (already stripped of frontmatter).
+pub fn content(vfs: &VirtualFs, version_id: i64) -> Result<String, ToolError> {
+    let conn = vfs.conn();
+    let target: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT inode, rev FROM version_meta WHERE id = ?1",
+            params![version_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((doc_id, rev)) = target else {
+        return Err(ToolError::NotFound {
+            path: format!("version#{version_id}"),
+        });
+    };
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT content FROM blobs WHERE inode = ?1 AND rev = ?2",
+            params![doc_id, rev],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(raw) = raw else {
+        return Err(ToolError::NotFound {
+            path: format!("version#{version_id}"),
+        });
+    };
+    Ok(meta::parse_document(&raw).body)
+}
+
 /// 删除非当前版本；当前 head 不允许删除。
 pub fn delete(vfs: &mut VirtualFs, version_id: i64) -> Result<(), ToolError> {
     let tx = vfs.conn_mut().transaction()?;
@@ -220,7 +251,8 @@ fn build_version(
         doc_id,
         version_number: rev,
         title: parts.title.unwrap_or_else(|| fallback_title.to_string()),
-        content: parts.body,
+        // Bodies stay in storage; callers fetch one version on demand.
+        content: String::new(),
         label,
         label_description,
         is_manual,

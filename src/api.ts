@@ -9,6 +9,7 @@ import type {
   Doc,
   DocFields,
   DocRef,
+  DocSaveReceipt,
   DocVersion,
   Folder,
   FolderStats,
@@ -55,6 +56,12 @@ export type DocListParams = {
   tag?: string
   month?: string
   limit?: number
+  /** Skip document bodies; list views only need metadata and fields. */
+  includeContent?: boolean
+  /** Truncate bodies to this many characters when content is included. */
+  previewChars?: number
+  /** Restrict to these virtual paths, reusing a preceding `fs_grep` result. */
+  paths?: string[]
 }
 
 export type DocCreateParams = {
@@ -82,7 +89,7 @@ export const docApi = {
   list: (params: DocListParams) => invoke<Doc[]>('doc_list', params),
   get: (id: number, includeDeleted = false) => invoke<Doc>('doc_get', { id, includeDeleted }),
   create: (params: DocCreateParams) => invoke<Doc>('doc_create', params),
-  save: (params: DocSaveParams) => invoke<Doc>('doc_save', params),
+  save: (params: DocSaveParams) => invoke<DocSaveReceipt>('doc_save', params),
   delete: (ids: number[]) => invoke<void>('doc_delete', { ids }),
   restore: (ids: number[]) => invoke<void>('doc_restore', { ids }),
   purge: (ids: number[]) => invoke<void>('doc_purge', { ids }),
@@ -92,6 +99,8 @@ export const docApi = {
 
   listVersions: (docId: number, includeAuto = false) =>
     invoke<DocVersion[]>('version_list', { docId, includeAuto }),
+  /** Fetch one version's body on demand; the list omits bodies. */
+  versionContent: (versionId: number) => invoke<string>('version_content', { versionId }),
   createVersion: (docId: number) => invoke<DocVersion>('version_create', { docId }),
   restoreVersion: (versionId: number) => invoke<Doc>('version_restore', { versionId }),
   deleteVersion: (versionId: number) => invoke<void>('version_delete', { versionId }),
@@ -280,19 +289,21 @@ export const api = {
   },
   /**
    * M1-6：笔记搜索统一走 `fs_grep`（FTS5 + LIKE 回退），不再依赖 doc_list 的 instr。
-   * grep 返回命中路径，再取同一批文档做领域映射与排序。
+   * grep 的命中路径直接作为 doc_list 的过滤条件，避免拉取全量列表再按 path 筛选。
    */
   searchNotes: async (params: { search: string; folderId?: number; unclassified?: boolean }) => {
     const hits = await api.fsGrep({ pattern: params.search, type: 'note', maxResults: 200 })
-    const docs = await docApi.list({
-      kind: 'note',
-      folderId: params.folderId,
-      unclassified: params.unclassified,
-      limit: 2000,
-    })
-    const matched = new Set(hits.hits.map((hit) => hit.path))
+    const paths = hits.hits.map((hit) => hit.path)
+    const docs = paths.length
+      ? await docApi.list({
+          kind: 'note',
+          folderId: params.folderId,
+          unclassified: params.unclassified,
+          paths,
+        })
+      : []
     return {
-      notes: docs.filter((doc) => matched.has(doc.path)).map(docToNote),
+      notes: docs.map(docToNote),
       fallback: hits.fallback,
     }
   },
@@ -312,15 +323,13 @@ export const api = {
     content: string
     folderId: number | null
   }) =>
-    docToNote(
-      await docApi.save({
-        id: params.id,
-        title: params.title,
-        content: params.content,
-        // 后端约定：-1 表示默认文件夹，undefined/null 表示不移动。
-        folderId: params.folderId ?? -1,
-      }),
-    ),
+    docApi.save({
+      id: params.id,
+      title: params.title,
+      content: params.content,
+      // 后端约定：-1 表示默认文件夹，undefined/null 表示不移动。
+      folderId: params.folderId ?? -1,
+    }),
   deleteNotes: (ids: number[]) => docApi.delete(ids),
   setNotesPinned: (params: { ids: number[]; pinned: boolean }) => docApi.setPinned(params),
   moveNotes: (params: { ids: number[]; folderId: number | null }) => docApi.move(params),
@@ -335,7 +344,8 @@ export const api = {
 
   // ---- Recycle bin ----
   listDeletedNotes: async () => {
-    const docs = await docApi.list({ kind: 'note', deleted: true })
+    // Metadata only: the recycle bin shows title and timestamps.
+    const docs = await docApi.list({ kind: 'note', deleted: true, includeContent: false })
     return docs.map(docToNote)
   },
   restoreNotes: (ids: number[]) => docApi.restore(ids),
@@ -347,6 +357,8 @@ export const api = {
     const versions = await docApi.listVersions(noteId)
     return versions.map(docToNoteVersion)
   },
+  /** One version's body, fetched when the user previews or compares it. */
+  getVersionContent: (versionId: number) => docApi.versionContent(versionId),
   restoreVersion: async (versionId: number) => docToNote(await docApi.restoreVersion(versionId)),
   createVersion: async (noteId: number) => docToNoteVersion(await docApi.createVersion(noteId)),
   deleteVersion: (versionId: number) => docApi.deleteVersion(versionId),
@@ -359,7 +371,8 @@ export const api = {
    * Used by chat tool cards to undo an Agent write/edit.
    */
   restorePreviousDocRevision: async (path: string) => {
-    const docs = await docApi.list({ limit: 2000 })
+    // Only the id is needed here, so ask for the single path without a body.
+    const docs = await docApi.list({ paths: [path], includeContent: false })
     const doc = docs.find((item) => item.path === path)
     if (!doc) throw new Error(`未找到文档：${path}`)
     return restorePreviousRevision(doc.id)
@@ -407,20 +420,18 @@ export const api = {
     dueDate?: string | null
     reminder?: boolean
   }) =>
-    docToTodo(
-      await docApi.save({
-        id: params.id,
-        title: params.title,
-        fields: {
-          category: params.category ?? '默认',
-          dueDate: params.dueDate ?? null,
-          reminder: params.reminder ?? false,
-        },
-      }),
-    ),
+    docApi.save({
+      id: params.id,
+      title: params.title,
+      fields: {
+        category: params.category ?? '默认',
+        dueDate: params.dueDate ?? null,
+        reminder: params.reminder ?? false,
+      },
+    }),
   toggleTodo: async (id: number) => {
     const doc = await docApi.get(id)
-    return docToTodo(await docApi.save({ id, fields: { completed: !bool(doc.fields.completed) } }))
+    return docApi.save({ id, fields: { completed: !bool(doc.fields.completed) } })
   },
   deleteTodo: async (id: number) => {
     // 待办没有回收站入口：先软删再物理删除，保持旧版“删除即消失”的语义。
@@ -430,7 +441,8 @@ export const api = {
 
   // ---- Schedules (doc kind = event) ----
   listSchedules: async (month: string) => {
-    const docs = await docApi.list({ kind: 'event', month })
+    // Calendar only renders fields, never the body.
+    const docs = await docApi.list({ kind: 'event', month, includeContent: false })
     return docs.map(docToSchedule)
   },
   createSchedule: async (params: {
@@ -464,19 +476,17 @@ export const api = {
     note?: string | null
     reminder?: boolean
   }) =>
-    docToSchedule(
-      await docApi.save({
-        id: params.id,
-        title: params.title,
-        fields: {
-          date: params.date,
-          startTime: params.startTime ?? null,
-          endTime: params.endTime ?? null,
-          note: params.note ?? null,
-          reminder: params.reminder ?? false,
-        },
-      }),
-    ),
+    docApi.save({
+      id: params.id,
+      title: params.title,
+      fields: {
+        date: params.date,
+        startTime: params.startTime ?? null,
+        endTime: params.endTime ?? null,
+        note: params.note ?? null,
+        reminder: params.reminder ?? false,
+      },
+    }),
   deleteSchedule: async (id: number) => {
     await docApi.delete([id])
     await docApi.purge([id])
@@ -488,6 +498,7 @@ export const api = {
       kind: 'contact',
       tag: params.tag,
       search: params.search,
+      includeContent: false,
     })
     return docs.map(docToContact)
   },
@@ -522,19 +533,17 @@ export const api = {
     notes?: string | null
     tag?: string
   }) =>
-    docToContact(
-      await docApi.save({
-        id: params.id,
-        title: params.name,
-        fields: {
-          phone: params.phone ?? null,
-          email: params.email ?? null,
-          company: params.company ?? null,
-          notes: params.notes ?? null,
-          tag: params.tag ?? '默认',
-        },
-      }),
-    ),
+    docApi.save({
+      id: params.id,
+      title: params.name,
+      fields: {
+        phone: params.phone ?? null,
+        email: params.email ?? null,
+        company: params.company ?? null,
+        notes: params.notes ?? null,
+        tag: params.tag ?? '默认',
+      },
+    }),
   deleteContact: async (id: number) => {
     await docApi.delete([id])
     await docApi.purge([id])
