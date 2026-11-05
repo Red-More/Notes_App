@@ -34,6 +34,22 @@ pub(super) fn now(conn: &Connection) -> Result<String, ToolError> {
     Ok(conn.query_row("SELECT datetime('now','localtime')", [], |r| r.get(0))?)
 }
 
+/// Load the body stored for one revision. `None` means the row is missing,
+/// which lets callers tell a corrupted store apart from an empty document.
+pub(super) fn head_content(
+    conn: &Connection,
+    inode: i64,
+    rev: i64,
+) -> Result<Option<String>, ToolError> {
+    Ok(conn
+        .query_row(
+            "SELECT content FROM blobs WHERE inode = ?1 AND rev = ?2",
+            params![inode, rev],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 /// 文档类型对应的根目录。
 pub(super) fn root_for(kind: &str) -> Result<&'static str, ToolError> {
     match kind {

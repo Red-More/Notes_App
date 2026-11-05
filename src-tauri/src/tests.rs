@@ -367,6 +367,33 @@ fn version_restore_appends_new_revision() {
 }
 
 #[test]
+fn save_refuses_when_head_blob_is_missing() {
+    let mut vfs = test_vfs();
+    let doc = docs::create(&mut vfs, "note", "损坏文档", "原始正文", None, None).unwrap();
+    // Simulate a damaged store: drop the body of the current revision.
+    vfs.conn_mut()
+        .execute(
+            "DELETE FROM blobs WHERE inode = ?1 AND rev = ?2",
+            params![doc.id, doc.rev],
+        )
+        .expect("drop head blob");
+
+    // A metadata-only save must fail instead of rewriting the document without content.
+    match docs::save(
+        &mut vfs,
+        doc.id,
+        Some("新标题".into()),
+        None,
+        None,
+        None,
+        None,
+    ) {
+        Err(ToolError::Storage { .. }) => {}
+        _ => panic!("save must refuse when the head body is missing"),
+    }
+}
+
+#[test]
 fn cross_index_refreshes_on_write_and_save() {
     let mut vfs = test_vfs();
     let initial = fields(&[

@@ -32,8 +32,8 @@ use crate::vfs::{
 
 use types::{Doc, DocFields, ListQuery};
 use util::{
-    basename, doc_date, doc_from_row, fetch_row, folder_map, folder_path, parent_dir, root_for,
-    safe_segment, unique_file_path,
+    basename, doc_date, doc_from_row, fetch_row, folder_map, folder_path, head_content, parent_dir,
+    root_for, safe_segment, unique_file_path,
 };
 
 /// 读取单个文档。
@@ -206,7 +206,14 @@ pub fn save(
 ) -> Result<Doc, ToolError> {
     let tx = vfs.conn_mut().transaction()?;
     let row = fetch_row(&tx, id, false)?;
-    let parts = meta::parse_document(&row.content);
+    // The row reader falls back to an empty body when the head blob is gone,
+    // so refuse to save instead of silently rewriting the document without content.
+    let Some(head) = head_content(&tx, id, row.head_rev)? else {
+        return Err(ToolError::Storage {
+            message: format!("inode {id} has no body for rev={}", row.head_rev),
+        });
+    };
+    let parts = meta::parse_document(&head);
     let kind = row
         .meta_kind
         .clone()
@@ -274,7 +281,7 @@ pub fn save(
         });
     }
     // 内容未变化且未移动时，不追加空 rev，避免自动保存把历史撑爆。
-    if new_path == row.path && markdown == row.content {
+    if new_path == row.path && markdown == head {
         drop(tx);
         return get(vfs, id, false);
     }
