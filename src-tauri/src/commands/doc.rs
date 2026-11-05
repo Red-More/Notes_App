@@ -24,7 +24,7 @@ pub fn doc_list(
     month: Option<String>,
     limit: Option<usize>,
 ) -> Result<Vec<Doc>, ToolError> {
-    let vfs = state.0.lock().unwrap();
+    let vfs = crate::lock(&state.0);
     docs::list(
         &vfs,
         ListQuery {
@@ -47,7 +47,7 @@ pub fn doc_get(
     id: i64,
     include_deleted: Option<bool>,
 ) -> Result<Doc, ToolError> {
-    let vfs = state.0.lock().unwrap();
+    let vfs = crate::lock(&state.0);
     docs::get(&vfs, id, include_deleted.unwrap_or(false))
 }
 
@@ -61,7 +61,7 @@ pub fn doc_create(
     folder_id: Option<i64>,
     fields: Option<DocFields>,
 ) -> Result<Doc, ToolError> {
-    let mut vfs = state.0.lock().unwrap();
+    let mut vfs = crate::lock(&state.0);
     docs::create(&mut vfs, &kind, &title, &content, folder_id, fields)
 }
 
@@ -77,31 +77,31 @@ pub fn doc_save(
     folder_id: Option<i64>,
     expect_rev: Option<i64>,
 ) -> Result<Doc, ToolError> {
-    let mut vfs = state.0.lock().unwrap();
+    let mut vfs = crate::lock(&state.0);
     docs::save(&mut vfs, id, title, content, fields, folder_id, expect_rev)
 }
 
 #[tauri::command]
 pub fn doc_delete(state: State<'_, VfsState>, ids: Vec<i64>) -> Result<(), ToolError> {
-    let mut vfs = state.0.lock().unwrap();
+    let mut vfs = crate::lock(&state.0);
     docs::delete_many(&mut vfs, &ids)
 }
 
 #[tauri::command]
 pub fn doc_restore(state: State<'_, VfsState>, ids: Vec<i64>) -> Result<(), ToolError> {
-    let mut vfs = state.0.lock().unwrap();
+    let mut vfs = crate::lock(&state.0);
     docs::restore_many(&mut vfs, &ids)
 }
 
 #[tauri::command]
 pub fn doc_purge(state: State<'_, VfsState>, ids: Vec<i64>) -> Result<(), ToolError> {
-    let mut vfs = state.0.lock().unwrap();
+    let mut vfs = crate::lock(&state.0);
     docs::purge_many(&mut vfs, &ids)
 }
 
 #[tauri::command]
 pub fn doc_empty_trash(state: State<'_, VfsState>) -> Result<(), ToolError> {
-    let mut vfs = state.0.lock().unwrap();
+    let mut vfs = crate::lock(&state.0);
     docs::empty_trash(&mut vfs)
 }
 
@@ -111,7 +111,7 @@ pub fn doc_set_pinned(
     ids: Vec<i64>,
     pinned: bool,
 ) -> Result<(), ToolError> {
-    let mut vfs = state.0.lock().unwrap();
+    let mut vfs = crate::lock(&state.0);
     docs::set_pinned(&mut vfs, &ids, pinned)
 }
 
@@ -122,6 +122,6 @@ pub fn doc_move(
     ids: Vec<i64>,
     folder_id: Option<i64>,
 ) -> Result<(), ToolError> {
-    let mut vfs = state.0.lock().unwrap();
+    let mut vfs = crate::lock(&state.0);
     docs::move_many(&mut vfs, &ids, folder_id)
 }

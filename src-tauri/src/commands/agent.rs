@@ -25,7 +25,7 @@ use crate::vfs::VfsState;
 pub fn chat_list(
     state: State<'_, VfsState>,
 ) -> Result<Vec<conversations::Conversation>, ToolError> {
-    let vfs = state.0.lock().unwrap();
+    let vfs = crate::lock(&state.0);
     conversations::list(&vfs)
 }
 
@@ -35,7 +35,7 @@ pub fn chat_create(
     state: State<'_, VfsState>,
     title: Option<String>,
 ) -> Result<conversations::Conversation, ToolError> {
-    let vfs = state.0.lock().unwrap();
+    let vfs = crate::lock(&state.0);
     let settings = model_store::settings(vfs.conn(), &[])?;
     let active = settings
         .active_id
@@ -46,13 +46,13 @@ pub fn chat_create(
 
 #[tauri::command]
 pub fn chat_rename(state: State<'_, VfsState>, id: i64, title: String) -> Result<(), ToolError> {
-    let vfs = state.0.lock().unwrap();
+    let vfs = crate::lock(&state.0);
     conversations::rename(&vfs, id, title)
 }
 
 #[tauri::command]
 pub fn chat_delete(state: State<'_, VfsState>, id: i64) -> Result<(), ToolError> {
-    let vfs = state.0.lock().unwrap();
+    let vfs = crate::lock(&state.0);
     conversations::delete(&vfs, id)
 }
 
@@ -61,7 +61,7 @@ pub fn chat_messages(
     state: State<'_, VfsState>,
     conversation_id: i64,
 ) -> Result<Vec<conversations::ChatMessage>, ToolError> {
-    let vfs = state.0.lock().unwrap();
+    let vfs = crate::lock(&state.0);
     conversations::messages(&vfs, conversation_id)
 }
 
@@ -71,7 +71,7 @@ pub fn chat_append(
     conversation_id: i64,
     messages: Vec<conversations::NewMessage>,
 ) -> Result<Vec<conversations::ChatMessage>, ToolError> {
-    let vfs = state.0.lock().unwrap();
+    let vfs = crate::lock(&state.0);
     conversations::append(&vfs, conversation_id, messages)
 }
 
@@ -82,7 +82,7 @@ pub fn chat_truncate(
     conversation_id: i64,
     message_id: i64,
 ) -> Result<usize, ToolError> {
-    let vfs = state.0.lock().unwrap();
+    let vfs = crate::lock(&state.0);
     conversations::truncate_after(&vfs, conversation_id, message_id)
 }
 
@@ -105,7 +105,7 @@ pub fn agent_settings(
     vfs_state: State<'_, VfsState>,
     agent_state: State<'_, AgentState>,
 ) -> Result<AgentSettings, ToolError> {
-    let vfs = vfs_state.0.lock().unwrap();
+    let vfs = crate::lock(&vfs_state.0);
     model_store::cleanup_legacy(vfs.conn(), &agent_state.secrets);
     let keys = key_status(vfs.conn(), &agent_state.secrets)?;
     model_store::settings(vfs.conn(), &keys)
@@ -143,7 +143,7 @@ pub fn agent_model_save(
     if creating && new_key.is_none() {
         return Err(ToolError::invalid("API Key 必填"));
     }
-    let vfs = vfs_state.0.lock().unwrap();
+    let vfs = crate::lock(&vfs_state.0);
     model_store::cleanup_legacy(vfs.conn(), &agent_state.secrets);
     let saved = model_store::save(
         vfs.conn(),
@@ -179,7 +179,7 @@ pub fn agent_model_delete(
     agent_state: State<'_, AgentState>,
     id: String,
 ) -> Result<(), ToolError> {
-    let vfs = vfs_state.0.lock().unwrap();
+    let vfs = crate::lock(&vfs_state.0);
     model_store::delete(vfs.conn(), &id)?;
     if let Err(e) = agent_state.secrets.delete(&id) {
         log::warn!("model key cleanup failed for {id}: {e}");
@@ -192,7 +192,7 @@ pub fn agent_model_delete(
 
 #[tauri::command]
 pub fn agent_model_activate(state: State<'_, VfsState>, id: String) -> Result<(), ToolError> {
-    let vfs = state.0.lock().unwrap();
+    let vfs = crate::lock(&state.0);
     model_store::set_active(vfs.conn(), &id)
 }
 
@@ -209,7 +209,7 @@ pub async fn agent_stream(
     request.context.messages = llm::trim_messages(&request.context.messages);
 
     let (entry, params, snapshot) = {
-        let vfs = vfs_state.0.lock().unwrap();
+        let vfs = crate::lock(&vfs_state.0);
         model_store::cleanup_legacy(vfs.conn(), &state.secrets);
         let entry = model_store::resolve(vfs.conn(), &request.model.provider)?;
         // Only chat entries can stream into the agent; media kinds stay inactive.
@@ -225,7 +225,7 @@ pub async fn agent_stream(
     // The single egress gate: S0 and un-redacted S1 never reach the network.
     let decision = privacy::egress::guard(&request.context.messages, &snapshot);
     {
-        let vfs = vfs_state.0.lock().unwrap();
+        let vfs = crate::lock(&vfs_state.0);
         if let Err(e) = privacy::egress::record_audit(vfs.conn(), &entry.id, "chat", &decision) {
             log::warn!("egress audit write failed: {e}");
         }
@@ -289,7 +289,7 @@ pub async fn agent_models_list(
                 return Err(ToolError::invalid("请先填写 API Key 再拉取模型列表"));
             }
             let stored = {
-                let vfs = vfs_state.0.lock().unwrap();
+                let vfs = crate::lock(&vfs_state.0);
                 model_store::resolve(vfs.conn(), id)?
             };
             state
@@ -352,7 +352,7 @@ pub async fn agent_test_connection(
                 return Err(ToolError::invalid("请先填写 API Key"));
             }
             let stored_id = {
-                let vfs = vfs_state.0.lock().unwrap();
+                let vfs = crate::lock(&vfs_state.0);
                 model_store::resolve(vfs.conn(), entry.id.as_str())?.id
             };
             state
@@ -371,7 +371,7 @@ pub fn agent_params_get(
     vfs_state: State<'_, VfsState>,
     model_entry_id: String,
 ) -> Result<LlmParams, ToolError> {
-    let vfs = vfs_state.0.lock().unwrap();
+    let vfs = crate::lock(&vfs_state.0);
     model_store::resolve(vfs.conn(), &model_entry_id)?;
     Ok(params::get(vfs.conn(), &model_entry_id))
 }
@@ -383,7 +383,7 @@ pub fn agent_params_set(
     model_entry_id: String,
     params: LlmParams,
 ) -> Result<(), ToolError> {
-    let vfs = vfs_state.0.lock().unwrap();
+    let vfs = crate::lock(&vfs_state.0);
     model_store::resolve(vfs.conn(), &model_entry_id)?;
     params::save(vfs.conn(), &model_entry_id, &params)
 }

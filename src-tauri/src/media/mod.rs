@@ -39,7 +39,7 @@ impl MediaState {
 
     /// Register (or reuse) the cancellation flag for one job.
     pub fn register_cancel(&self, id: i64) -> Arc<AtomicBool> {
-        let mut map = self.cancels.lock().unwrap();
+        let mut map = crate::lock(&self.cancels);
         map.entry(id).or_default().clone()
     }
 
@@ -50,22 +50,22 @@ impl MediaState {
 
     /// Drop the flag once the job reached a terminal state.
     pub fn release(&self, id: i64) {
-        self.cancels.lock().unwrap().remove(&id);
+        crate::lock(&self.cancels).remove(&id);
     }
 
     /// Attach a Channel used to push status/progress to the UI.
     pub fn watch(&self, id: i64, channel: Channel<JobEvent>) {
-        self.events.lock().unwrap().insert(id, channel);
+        crate::lock(&self.events).insert(id, channel);
     }
 
     /// Push one snapshot; terminal events also release the channel.
     pub fn emit(&self, id: i64, event: JobEvent) {
         let terminal = event.status.is_terminal();
-        if let Some(channel) = self.events.lock().unwrap().get(&id) {
+        if let Some(channel) = crate::lock(&self.events).get(&id) {
             let _ = channel.send(event);
         }
         if terminal {
-            self.events.lock().unwrap().remove(&id);
+            crate::lock(&self.events).remove(&id);
         }
     }
 }

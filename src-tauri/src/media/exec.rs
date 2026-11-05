@@ -40,7 +40,7 @@ enum Outcome {
 pub async fn run(app: AppHandle, job_id: i64) {
     let (kind, entry, job_params, params) = {
         let vfs = app.state::<VfsState>();
-        let db = vfs.0.lock().unwrap();
+        let db = crate::lock(&vfs.0);
         let job = match jobs::get(db.conn(), job_id) {
             Ok(job) => job,
             Err(e) => {
@@ -91,7 +91,7 @@ pub async fn run(app: AppHandle, job_id: i64) {
     };
     {
         let vfs = app.state::<VfsState>();
-        let db = vfs.0.lock().unwrap();
+        let db = crate::lock(&vfs.0);
         match jobs::mark_running(db.conn(), job_id) {
             Ok(job) => {
                 let event = jobs::JobEvent::from(&job);
@@ -157,7 +157,7 @@ pub async fn run(app: AppHandle, job_id: i64) {
             let root = app.state::<MediaState>().root.clone();
             let stored = {
                 let vfs = app.state::<VfsState>();
-                let db = vfs.0.lock().unwrap();
+                let db = crate::lock(&vfs.0);
                 assets::store(db.conn(), &root, &bytes, mime, meta)
             };
             match stored {
@@ -227,7 +227,7 @@ fn job_usage(
                 .and_then(Value::as_i64)
                 .and_then(|id| {
                     let vfs = app.state::<VfsState>();
-                    let db = vfs.0.lock().unwrap();
+                    let db = crate::lock(&vfs.0);
                     assets::get(db.conn(), id).ok()
                 })
                 .and_then(|asset| asset.duration_ms)
@@ -476,7 +476,7 @@ async fn asr(
         .ok_or_else(|| "缺少 assetId".to_string())?;
     let (asset, path) = {
         let vfs = app.state::<VfsState>();
-        let db = vfs.0.lock().unwrap();
+        let db = crate::lock(&vfs.0);
         let asset = assets::get(db.conn(), asset_id).map_err(|e| e.to_string())?;
         let path = assets::path(&app.state::<MediaState>().root, &asset);
         (asset, path)
@@ -804,7 +804,7 @@ fn video_progress(payload: &Value) -> Option<u32> {
 fn update_progress(app: &AppHandle, job_id: i64, percent: u32) {
     let event = {
         let vfs = app.state::<VfsState>();
-        let db = vfs.0.lock().unwrap();
+        let db = crate::lock(&vfs.0);
         match jobs::set_progress(db.conn(), job_id, percent) {
             Ok(job) => Some(jobs::JobEvent::from(&job)),
             Err(e) => {
@@ -888,7 +888,7 @@ fn finish_with_cost(
 ) {
     let event = {
         let vfs = app.state::<VfsState>();
-        let db = vfs.0.lock().unwrap();
+        let db = crate::lock(&vfs.0);
         match jobs::finish(db.conn(), job_id, status, asset_id, result, error, units, cost_usd) {
             Ok(job) => Some(jobs::JobEvent::from(&job)),
             Err(e) => {

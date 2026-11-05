@@ -42,7 +42,7 @@ pub fn export_doc<R: Runtime>(
     dest_path: String,
 ) -> Result<(), ToolError> {
     let bytes = {
-        let vfs = state.0.lock().unwrap();
+        let vfs = crate::lock(&state.0);
         export::markdown(&vfs, doc_id)?.into_bytes()
     };
     write_bytes(&app, &dest_path, &bytes)
@@ -57,7 +57,7 @@ pub fn export_docs<R: Runtime>(
     dest_path: String,
 ) -> Result<(), ToolError> {
     let bytes = {
-        let vfs = state.0.lock().unwrap();
+        let vfs = crate::lock(&state.0);
         let entries = export::collect(&vfs, &ids)?;
         if entries.is_empty() {
             return Err(ToolError::invalid("没有可导出的笔记"));
@@ -76,7 +76,7 @@ pub fn export_folder<R: Runtime>(
     dest_path: String,
 ) -> Result<(), ToolError> {
     let bytes = {
-        let vfs = state.0.lock().unwrap();
+        let vfs = crate::lock(&state.0);
         let entries = export::collect_folder(&vfs, folder_id)?;
         export::zip_entries(&entries)?
     };

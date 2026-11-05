@@ -18,14 +18,14 @@ pub struct SkillImportInput {
 /// 列出全部技能（含禁用项），只返回摘要。
 #[tauri::command]
 pub fn skill_list(state: State<'_, VfsState>) -> Result<Vec<SkillSummary>, ToolError> {
-    let vfs = state.0.lock().unwrap();
+    let vfs = crate::lock(&state.0);
     skills::list(&vfs)
 }
 
 /// 读取单个技能的完整正文，用于触发后的按需注入。
 #[tauri::command]
 pub fn skill_read(state: State<'_, VfsState>, id: String) -> Result<SkillDetail, ToolError> {
-    let vfs = state.0.lock().unwrap();
+    let vfs = crate::lock(&state.0);
     skills::read(&vfs, &id)
 }
 
@@ -35,7 +35,7 @@ pub fn skill_save(
     state: State<'_, VfsState>,
     input: SkillInput,
 ) -> Result<SkillSummary, ToolError> {
-    let mut vfs = state.0.lock().unwrap();
+    let mut vfs = crate::lock(&state.0);
     skills::save(&mut vfs, input)
 }
 
@@ -46,14 +46,14 @@ pub fn skill_set_enabled(
     id: String,
     enabled: bool,
 ) -> Result<(), ToolError> {
-    let vfs = state.0.lock().unwrap();
+    let vfs = crate::lock(&state.0);
     skills::set_enabled(&vfs, &id, enabled)
 }
 
 /// 卸载技能（物理删除技能目录）。
 #[tauri::command]
 pub fn skill_delete(state: State<'_, VfsState>, id: String) -> Result<(), ToolError> {
-    let mut vfs = state.0.lock().unwrap();
+    let mut vfs = crate::lock(&state.0);
     skills::delete(&mut vfs, &id)
 }
 
@@ -63,21 +63,21 @@ pub fn skill_import(
     state: State<'_, VfsState>,
     input: SkillImportInput,
 ) -> Result<SkillSummary, ToolError> {
-    let mut vfs = state.0.lock().unwrap();
+    let mut vfs = crate::lock(&state.0);
     skills::import_package(&mut vfs, &input.filename, &input.data)
 }
 
 /// 列出 `/life/agent/skills-drafts` 中等待用户审核的草稿。
 #[tauri::command]
 pub fn skill_draft_list(state: State<'_, VfsState>) -> Result<Vec<SkillSummary>, ToolError> {
-    let vfs = state.0.lock().unwrap();
+    let vfs = crate::lock(&state.0);
     skills::list_drafts(&vfs)
 }
 
 /// 预览草稿正文。
 #[tauri::command]
 pub fn skill_draft_read(state: State<'_, VfsState>, id: String) -> Result<SkillDetail, ToolError> {
-    let vfs = state.0.lock().unwrap();
+    let vfs = crate::lock(&state.0);
     skills::read_draft(&vfs, &id)
 }
 
@@ -87,13 +87,13 @@ pub fn skill_draft_promote(
     state: State<'_, VfsState>,
     id: String,
 ) -> Result<SkillSummary, ToolError> {
-    let mut vfs = state.0.lock().unwrap();
+    let mut vfs = crate::lock(&state.0);
     skills::promote_draft(&mut vfs, &id)
 }
 
 /// 丢弃草稿。
 #[tauri::command]
 pub fn skill_draft_delete(state: State<'_, VfsState>, id: String) -> Result<(), ToolError> {
-    let mut vfs = state.0.lock().unwrap();
+    let mut vfs = crate::lock(&state.0);
     skills::delete_draft(&mut vfs, &id)
 }

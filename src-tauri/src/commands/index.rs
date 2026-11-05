@@ -16,13 +16,13 @@ pub fn index_query(
     kind: Option<String>,
     limit: Option<usize>,
 ) -> Result<Vec<DocRef>, ToolError> {
-    let vfs = state.0.lock().unwrap();
+    let vfs = crate::lock(&state.0);
     index::query(&vfs, &dimension, &value, kind.as_deref(), limit)
 }
 
 /// 手动重建 FTS 检索索引（启动自愈之外的人工入口），返回重建的文档数。
 #[tauri::command]
 pub fn search_reindex(state: State<'_, VfsState>) -> Result<usize, ToolError> {
-    let vfs = state.0.lock().unwrap();
+    let vfs = crate::lock(&state.0);
     Ok(fts::rebuild_all(vfs.conn())?)
 }

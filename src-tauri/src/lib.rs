@@ -10,9 +10,15 @@ mod skills;
 mod tests;
 mod vfs;
 
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use tauri::Manager;
 use vfs::{VfsState, VirtualFs};
+
+/// Take the guard even when a previous holder panicked. These mutexes only
+/// protect in-process state, so poisoning must not take down every later call.
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

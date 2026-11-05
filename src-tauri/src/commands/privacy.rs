@@ -14,7 +14,7 @@ use crate::vfs::VfsState;
 
 #[tauri::command]
 pub fn privacy_labels_list(state: State<'_, VfsState>) -> Result<Vec<Label>, ToolError> {
-    let vfs = state.0.lock().unwrap();
+    let vfs = crate::lock(&state.0);
     policy::list_labels(vfs.conn())
 }
 
@@ -24,19 +24,19 @@ pub fn privacy_label_set(
     path: String,
     level: i64,
 ) -> Result<Label, ToolError> {
-    let vfs = state.0.lock().unwrap();
+    let vfs = crate::lock(&state.0);
     policy::set_label(vfs.conn(), &path, level)
 }
 
 #[tauri::command]
 pub fn privacy_label_delete(state: State<'_, VfsState>, path: String) -> Result<(), ToolError> {
-    let vfs = state.0.lock().unwrap();
+    let vfs = crate::lock(&state.0);
     policy::delete_label(vfs.conn(), &path)
 }
 
 #[tauri::command]
 pub fn privacy_entities_list(state: State<'_, VfsState>) -> Result<Vec<EntityRecord>, ToolError> {
-    let vfs = state.0.lock().unwrap();
+    let vfs = crate::lock(&state.0);
     entity::list(vfs.conn())
 }
 
@@ -48,7 +48,7 @@ pub fn privacy_entity_add(
     value: String,
 ) -> Result<EntityRecord, ToolError> {
     let kind = EntityKind::from_str(&kind).ok_or_else(|| ToolError::invalid("未知实体类型"))?;
-    let vfs = vfs_state.0.lock().unwrap();
+    let vfs = crate::lock(&vfs_state.0);
     entity::add(vfs.conn(), &agent_state.secrets, kind, &value)
 }
 
@@ -58,7 +58,7 @@ pub fn privacy_entity_delete(
     agent_state: State<'_, AgentState>,
     alias: String,
 ) -> Result<(), ToolError> {
-    let vfs = vfs_state.0.lock().unwrap();
+    let vfs = crate::lock(&vfs_state.0);
     entity::remove(vfs.conn(), &agent_state.secrets, &alias)
 }
 
@@ -67,6 +67,6 @@ pub fn privacy_audit_list(
     state: State<'_, VfsState>,
     limit: Option<usize>,
 ) -> Result<Vec<AuditRecord>, ToolError> {
-    let vfs = state.0.lock().unwrap();
+    let vfs = crate::lock(&state.0);
     Ok(egress::list_audit(vfs.conn(), limit.unwrap_or(20))?)
 }

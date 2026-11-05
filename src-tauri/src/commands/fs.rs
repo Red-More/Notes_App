@@ -20,7 +20,7 @@ pub fn fs_read(
     end_line: Option<usize>,
     include_meta: Option<bool>,
 ) -> Result<ReadResult, ToolError> {
-    let vfs = state.0.lock().unwrap();
+    let vfs = crate::lock(&state.0);
     vfs.read(ReadRequest {
         path,
         rev,
@@ -39,7 +39,7 @@ pub fn fs_write(
     create_parents: Option<bool>,
     auto_frontmatter: Option<bool>,
 ) -> Result<WriteReceipt, ToolError> {
-    let mut vfs = state.0.lock().unwrap();
+    let mut vfs = crate::lock(&state.0);
     vfs.write(WriteRequest {
         path,
         content,
@@ -59,7 +59,7 @@ pub fn fs_edit(
     replace_all: Option<bool>,
     expect_rev: Option<i64>,
 ) -> Result<EditReceipt, ToolError> {
-    let mut vfs = state.0.lock().unwrap();
+    let mut vfs = crate::lock(&state.0);
     vfs.edit(EditRequest {
         path,
         old_string,
@@ -78,7 +78,7 @@ pub fn fs_glob(
     root: Option<String>,
     case_sensitive: Option<bool>,
 ) -> Result<Vec<GlobEntry>, ToolError> {
-    let vfs = state.0.lock().unwrap();
+    let vfs = crate::lock(&state.0);
     vfs.glob(GlobRequest {
         pattern,
         root,
@@ -97,7 +97,7 @@ pub fn fs_grep(
     max_results: Option<usize>,
     context_lines: Option<usize>,
 ) -> Result<GrepResponse, ToolError> {
-    let vfs = state.0.lock().unwrap();
+    let vfs = crate::lock(&state.0);
     vfs.grep(GrepRequest {
         pattern,
         path,

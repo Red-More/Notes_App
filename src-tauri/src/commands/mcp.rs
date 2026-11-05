@@ -15,7 +15,7 @@ pub fn mcp_server_list(
     vfs_state: State<'_, VfsState>,
     agent: State<'_, AgentState>,
 ) -> Result<Vec<McpServerView>, ToolError> {
-    let vfs = vfs_state.0.lock().unwrap();
+    let vfs = crate::lock(&vfs_state.0);
     mcp::list(vfs.conn(), &agent.secrets)
 }
 
@@ -25,7 +25,7 @@ pub fn mcp_server_save(
     agent: State<'_, AgentState>,
     input: McpServerInput,
 ) -> Result<McpServerView, ToolError> {
-    let vfs = vfs_state.0.lock().unwrap();
+    let vfs = crate::lock(&vfs_state.0);
     mcp::save(vfs.conn(), &agent.secrets, input)
 }
 
@@ -35,7 +35,7 @@ pub fn mcp_server_delete(
     agent: State<'_, AgentState>,
     id: String,
 ) -> Result<(), ToolError> {
-    let vfs = vfs_state.0.lock().unwrap();
+    let vfs = crate::lock(&vfs_state.0);
     mcp::delete(vfs.conn(), &agent.secrets, &id)
 }
 
@@ -47,7 +47,7 @@ pub async fn mcp_server_tools(
     id: String,
 ) -> Result<Vec<McpTool>, ToolError> {
     let server = {
-        let vfs = vfs_state.0.lock().unwrap();
+        let vfs = crate::lock(&vfs_state.0);
         mcp::config(vfs.conn(), &id)?
     };
     let token = mcp::token(&agent.secrets, &id);
@@ -63,7 +63,7 @@ pub async fn mcp_all_tools(
     agent: State<'_, AgentState>,
 ) -> Result<Vec<McpTool>, ToolError> {
     let servers = {
-        let vfs = vfs_state.0.lock().unwrap();
+        let vfs = crate::lock(&vfs_state.0);
         mcp::enabled_servers(vfs.conn())
     };
     let mut tools: Vec<McpTool> = Vec::new();
@@ -90,7 +90,7 @@ pub async fn mcp_tool_call(
     arguments: Value,
 ) -> Result<String, ToolError> {
     let server = {
-        let vfs = vfs_state.0.lock().unwrap();
+        let vfs = crate::lock(&vfs_state.0);
         mcp::config(vfs.conn(), &server_id)?
     };
     if !server.enabled {

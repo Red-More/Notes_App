@@ -22,7 +22,7 @@ pub fn media_job_submit(
     on_event: Channel<jobs::JobEvent>,
 ) -> Result<jobs::Job, ToolError> {
     let job = {
-        let vfs = vfs_state.0.lock().unwrap();
+        let vfs = crate::lock(&vfs_state.0);
         jobs::submit(vfs.conn(), input)?
     };
     media.register_cancel(job.id);
@@ -41,13 +41,13 @@ pub fn media_job_list(
     vfs_state: State<'_, VfsState>,
     limit: Option<i64>,
 ) -> Result<Vec<jobs::Job>, ToolError> {
-    let vfs = vfs_state.0.lock().unwrap();
+    let vfs = crate::lock(&vfs_state.0);
     jobs::list(vfs.conn(), limit.unwrap_or(50))
 }
 
 #[tauri::command]
 pub fn media_job_get(vfs_state: State<'_, VfsState>, id: i64) -> Result<jobs::Job, ToolError> {
-    let vfs = vfs_state.0.lock().unwrap();
+    let vfs = crate::lock(&vfs_state.0);
     jobs::get(vfs.conn(), id)
 }
 
@@ -60,7 +60,7 @@ pub fn media_job_cancel(
     // Signal the runner first, then persist the terminal state.
     media.cancel_flag(id).store(true, Ordering::SeqCst);
     let job = {
-        let vfs = vfs_state.0.lock().unwrap();
+        let vfs = crate::lock(&vfs_state.0);
         jobs::cancel(vfs.conn(), id)?
     };
     media.emit(id, jobs::JobEvent::from(&job));
@@ -70,7 +70,7 @@ pub fn media_job_cancel(
 
 #[tauri::command]
 pub fn media_asset_get(vfs_state: State<'_, VfsState>, id: i64) -> Result<assets::Asset, ToolError> {
-    let vfs = vfs_state.0.lock().unwrap();
+    let vfs = crate::lock(&vfs_state.0);
     assets::get(vfs.conn(), id)
 }
 
@@ -80,7 +80,7 @@ pub fn media_asset_path(
     media: State<'_, MediaState>,
     id: i64,
 ) -> Result<String, ToolError> {
-    let vfs = vfs_state.0.lock().unwrap();
+    let vfs = crate::lock(&vfs_state.0);
     let asset = assets::get(vfs.conn(), id)?;
     Ok(assets::path(&media.root, &asset).to_string_lossy().into_owned())
 }
@@ -100,7 +100,7 @@ pub fn media_asset_data(
     id: i64,
 ) -> Result<AssetData, ToolError> {
     let (asset, path) = {
-        let vfs = vfs_state.0.lock().unwrap();
+        let vfs = crate::lock(&vfs_state.0);
         let asset = assets::get(vfs.conn(), id)?;
         let path = assets::path(&media.root, &asset);
         (asset, path)
@@ -121,7 +121,7 @@ pub fn media_asset_gc(
     media: State<'_, MediaState>,
     retention_days: Option<i64>,
 ) -> Result<assets::GcReport, ToolError> {
-    let vfs = vfs_state.0.lock().unwrap();
+    let vfs = crate::lock(&vfs_state.0);
     assets::gc(vfs.conn(), &media.root, retention_days.unwrap_or(30))
 }
 
@@ -143,7 +143,7 @@ pub fn media_asset_store(
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(input.data.as_bytes())
         .map_err(|e| ToolError::invalid(format!("音频数据不是合法 base64：{e}")))?;
-    let vfs = vfs_state.0.lock().unwrap();
+    let vfs = crate::lock(&vfs_state.0);
     assets::store(
         vfs.conn(),
         &media.root,
