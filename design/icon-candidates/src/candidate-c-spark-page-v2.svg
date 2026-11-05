@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Flat accent-deep page: white star contrast is a constant 3.12:1 -->
+  <rect x="272" y="252" width="480" height="520" rx="72" fill="#F06607"/>
+
+  <!-- Sparkle: 370px across (77% of page width), inner radius 0.38R, centered on 512,512 -->
+  <path fill="#FFFFFF" d="
+    M512 327
+    L562 463
+    L697 512
+    L562 562
+    L512 697
+    L462 562
+    L327 512
+    L462 463
+    Z"/>
+</svg>

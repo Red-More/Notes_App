@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Notes · 图标候选 v1 / v2 对比</title>
+<style>
+  :root {
+    --page: #f4f4f6;
+    --card: #ffffff;
+    --ink: #17181c;
+    --muted: #6b6f7a;
+    --line: #e5e6ea;
+    --accent: #ff7a1a;
+    --accent-deep: #f06607;
+    --graphite: #1f2128;
+    --light-swatch: #f7f7f9;
+    --dark-swatch: #1b1c21;
+    --font: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    --mono: ui-monospace, 'Cascadia Code', 'Consolas', monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 44px 24px 64px;
+    background: var(--page);
+    color: var(--ink);
+    font-family: var(--font);
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  h1 { margin: 0 0 8px; font-size: 29px; letter-spacing: -0.02em; }
+  .lede { margin: 0; color: var(--muted); font-size: 14.5px; line-height: 1.65; max-width: 800px; }
+  .note {
+    margin-top: 18px; padding: 13px 16px; background: #fff8f2;
+    border: 1px solid #ffe3cf; border-radius: 12px;
+    color: #74431c; font-size: 13px; line-height: 1.7;
+  }
+  .note strong { color: #b4520a; }
+
+  .dir { margin-top: 46px; }
+  .dir-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .tag {
+    font-family: var(--mono); font-size: 11px; font-weight: 700;
+    color: var(--accent-deep); background: rgba(255, 122, 26, 0.1);
+    border-radius: 6px; padding: 3px 8px;
+  }
+  .dir-head h2 { margin: 0; font-size: 20px; letter-spacing: -0.01em; }
+  .rec {
+    font-size: 11px; color: #0a7a4a; background: #e7f7ef;
+    border: 1px solid #c6ead8; border-radius: 999px; padding: 3px 10px;
+  }
+  .dir-lede { margin: 0 0 14px; color: var(--muted); font-size: 13.5px; line-height: 1.7; max-width: 900px; }
+
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px; }
+  .card-label { font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 10px; display: flex; justify-content: space-between; }
+  .card-label b { color: var(--ink); font-weight: 600; letter-spacing: 0; }
+  .stages { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .stage { border-radius: 12px; height: 150px; display: flex; align-items: center; justify-content: center; }
+  .stage.light { background: var(--light-swatch); border: 1px solid #ebebef; }
+  .stage.dark { background: var(--dark-swatch); }
+  .stage img { width: 112px; height: 112px; display: block; }
+  .stage-cap { font-size: 11px; color: var(--muted); text-align: center; margin-top: 6px; }
+
+  .changes {
+    margin: 14px 0 0; padding: 12px 14px; border-left: 3px solid rgba(255, 122, 26, 0.45);
+    background: #fbfbfc; border-radius: 0 10px 10px 0;
+    font-size: 12.5px; line-height: 1.8; color: #4a4e57;
+  }
+  .changes li { margin-left: 14px; padding-left: 2px; }
+  .changes li::marker { color: var(--accent); }
+  .changes strong { color: var(--ink); }
+
+  .size-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+  .size-block { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; }
+  .size-block.dark { background: var(--dark-swatch); border-color: #2c2d31; }
+  .size-cap { font-size: 11px; color: var(--muted); margin-bottom: 8px; display: flex; align-items: center; gap: 7px; }
+  .size-block.dark .size-cap { color: #9ba0ac; }
+  .size-cap i { width: 8px; height: 8px; border-radius: 50%; background: #d9dade; display: block; }
+  .size-block.dark .size-cap i { background: #4b4f59; }
+  .grid { display: grid; grid-template-columns: 46px 1fr 1fr; align-items: center; }
+  .col, .row { font-family: var(--mono); font-size: 10.5px; color: var(--muted); letter-spacing: 0.04em; }
+  .size-block.dark .col, .size-block.dark .row { color: #9ba0ac; }
+  .col { text-align: center; padding-bottom: 6px; }
+  .row { padding: 6px 0; }
+  .cell { display: flex; align-items: center; justify-content: center; min-height: 44px; }
+  .cell img { display: block; }
+
+  footer { margin-top: 50px; border-top: 1px solid var(--line); padding-top: 22px; color: var(--muted); font-size: 13px; line-height: 1.8; }
+  footer h4 { margin: 0 0 8px; color: var(--ink); font-size: 13.5px; }
+  footer code { font-family: var(--mono); font-size: 12px; background: #eceef2; border-radius: 5px; padding: 2px 6px; color: #2c2f36; }
+  .swatches { display: flex; gap: 16px; margin: 4px 0 18px; flex-wrap: wrap; }
+  .swatch { display: flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 11px; color: #4a4e57; }
+  .swatch i { width: 20px; height: 20px; border-radius: 5px; border: 1px solid rgba(0,0,0,0.08); display: block; }
+
+  @media (max-width: 860px) {
+    .pair, .size-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>Notes · 图标候选 v1 / v2 对比</h1>
+    <p class="lede">每个方案给出 v1（上一轮基准）与 v2（本轮修正）的原生渲染：16 / 24 / 32 / 48 / 256 / 1024 px。所有 PNG 均由 SVG 按目标尺寸直接渲染，没有先放大再缩小。透明背景，未改动 <code>src-tauri/icons/</code> 与 <code>tauri.conf.json</code>。</p>
+    <div class="note">
+      <strong>这一轮修的是什么：</strong>A 增加小尺寸可保留的装订边；B 改为浅桃底板以适配浅色 UI；C 放大并锐化星芒、去掉文本条，使 24–32px 仍能读出星形。每个方案下方列出具体数值改动与对比度依据。
+    </div>
+  </header>
+
+  <!-- A -->
+  <section class="dir">
+    <div class="dir-head">
+      <span class="tag">A</span>
+      <h2>纸页</h2>
+      <span class="rec">v2 推荐</span>
+    </div>
+    <p class="dir-lede">v1 的纸页 + 两行字在 16px 最稳定，但轮廓与通用文档图标相同。v2 不增加细线，而是把识别特征做成色块：纸页左缘一条 112px 石墨装订边。</p>
+
+    <div class="pair">
+      <article class="card">
+        <div class="card-label"><b>v1 · 基准</b><span>无装订边</span></div>
+        <div class="stages">
+          <div>
+            <div class="stage light"><img src="png/candidate-a-sheet-256.png" width="112" height="112" alt="A v1 浅色"></div>
+            <div class="stage-cap">浅色背景</div>
+          </div>
+          <div>
+            <div class="stage dark"><img src="png/candidate-a-sheet-256.png" width="112" height="112" alt="A v1 深色"></div>
+            <div class="stage-cap">深色背景</div>
+          </div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-label"><b>v2 · 装订边</b><span>+112px 石墨边</span></div>
+        <div class="stages">
+          <div>
+            <div class="stage light"><img src="png/candidate-a-sheet-v2-256.png" width="112" height="112" alt="A v2 浅色"></div>
+            <div class="stage-cap">浅色背景</div>
+          </div>
+          <div>
+            <div class="stage dark"><img src="png/candidate-a-sheet-v2-256.png" width="112" height="112" alt="A v2 深色"></div>
+            <div class="stage-cap">深色背景</div>
+          </div>
+        </div>
+      </article>
+    </div>
+
+    <ul class="changes">
+      <li><strong>装订边 112px</strong>（页面宽 392px 的 28.6%）：16px 下 1.75px、24px 下 2.6px、32px 下 3.5px，是色块而非细线，缩小后不会消失。</li>
+      <li><strong>文本行右移 76px</strong>，宽度缩短为 192 / 136px，形成“页边留白 + 正文”的笔记本结构；行高 64px 在 16px 下仍占 1px。</li>
+      <li><strong>对比度</strong>：白纸对橙底 3.29:1；石墨装订边对白纸 15.80:1。折角、824px 安全区、圆角 185 保持不变。</li>
+    </ul>
+
+    <div class="size-grid">
+      <div class="size-block">
+        <div class="size-cap"><i></i>浅色背景（#F7F7F9）· 原生像素</div>
+        <div class="grid">
+          <div></div><div class="col">v1</div><div class="col">v2</div>
+          <div class="row">16</div>
+          <div class="cell"><img src="png/candidate-a-sheet-16.png" width="16" height="16" alt="A v1 16px"></div>
+          <div class="cell"><img src="png/candidate-a-sheet-v2-16.png" width="16" height="16" alt="A v2 16px"></div>
+          <div class="row">24</div>
+          <div class="cell"><img src="png/candidate-a-sheet-24.png" width="24" height="24" alt="A v1 24px"></div>
+          <div class="cell"><img src="png/candidate-a-sheet-v2-24.png" width="24" height="24" alt="A v2 24px"></div>
+          <div class="row">32</div>
+          <div class="cell"><img src="png/candidate-a-sheet-32.png" width="32" height="32" alt="A v1 32px"></div>
+          <div class="cell"><img src="png/candidate-a-sheet-v2-32.png" width="32" height="32" alt="A v2 32px"></div>
+          <div class="row">48</div>
+          <div class="cell"><img src="png/candidate-a-sheet-48.png" width="48" height="48" alt="A v1 48px"></div>
+          <div class="cell"><img src="png/candidate-a-sheet-v2-48.png" width="48" height="48" alt="A v2 48px"></div>
+        </div>
+      </div>
+
+      <div class="size-block dark">
+        <div class="size-cap"><i></i>深色背景（#1B1C21）· 原生像素</div>
+        <div class="grid">
+          <div></div><div class="col">v1</div><div class="col">v2</div>
+          <div class="row">16</div>
+          <div class="cell"><img src="png/candidate-a-sheet-16.png" width="16" height="16" alt="A v1 16px 深色"></div>
+          <div class="cell"><img src="png/candidate-a-sheet-v2-16.png" width="16" height="16" alt="A v2 16px 深色"></div>
+          <div class="row">24</div>
+          <div class="cell"><img src="png/candidate-a-sheet-24.png" width="24" height="24" alt="A v1 24px 深色"></div>
+          <div class="cell"><img src="png/candidate-a-sheet-v2-24.png" width="24" height="24" alt="A v2 24px 深色"></div>
+          <div class="row">32</div>
+          <div class="cell"><img src="png/candidate-a-sheet-32.png" width="32" height="32" alt="A v1 32px 深色"></div>
+          <div class="cell"><img src="png/candidate-a-sheet-v2-32.png" width="32" height="32" alt="A v2 32px 深色"></div>
+          <div class="row">48</div>
+          <div class="cell"><img src="png/candidate-a-sheet-48.png" width="48" height="48" alt="A v1 48px 深色"></div>
+          <div class="cell"><img src="png/candidate-a-sheet-v2-48.png" width="48" height="48" alt="A v2 48px 深色"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- B -->
+  <section class="dir">
+    <div class="dir-head">
+      <span class="tag">B</span>
+      <h2>字母 N</h2>
+    </div>
+    <p class="dir-lede">v1 的石墨底板在 16px 下最清晰，但大面积深色与应用的浅色界面割裂。v2 只换底板：同一套 N 字形放到浅桃色底板上。</p>
+
+    <div class="pair">
+      <article class="card">
+        <div class="card-label"><b>v1 · 石墨底</b><span>#1F2128 底板</span></div>
+        <div class="stages">
+          <div>
+            <div class="stage light"><img src="png/candidate-b-n-mark-256.png" width="112" height="112" alt="B v1 浅色"></div>
+            <div class="stage-cap">浅色背景</div>
+          </div>
+          <div>
+            <div class="stage dark"><img src="png/candidate-b-n-mark-256.png" width="112" height="112" alt="B v1 深色"></div>
+            <div class="stage-cap">深色背景</div>
+          </div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-label"><b>v2 · 浅桃底</b><span>#FFD8B4 → #FFBE85</span></div>
+        <div class="stages">
+          <div>
+            <div class="stage light"><img src="png/candidate-b-n-mark-v2-256.png" width="112" height="112" alt="B v2 浅色"></div>
+            <div class="stage-cap">浅色背景</div>
+          </div>
+          <div>
+            <div class="stage dark"><img src="png/candidate-b-n-mark-v2-256.png" width="112" height="112" alt="B v2 深色"></div>
+            <div class="stage-cap">深色背景</div>
+          </div>
+        </div>
+      </article>
+    </div>
+
+    <ul class="changes">
+      <li><strong>底板改为浅桃渐变</strong>，#1F2128 → #FFD8B4 / #FFBE85，保留橙色系与浅色界面的连贯。</li>
+      <li><strong>N 字形零改动</strong>：460×554 主体、140px 竖笔、斜带宽度与渐变方向全部沿用 v1，避免重新验证小尺寸结构。</li>
+      <li><strong>对比度</strong>：N 对底板 9.92–12.04:1；底板对深色桌面 10.49–12.74:1；底板对浅色桌面仅 1.25–1.51:1，底边在浅色桌面上会弱化，识别由 15.0:1 的字形承担。</li>
+    </ul>
+
+    <div class="size-grid">
+      <div class="size-block">
+        <div class="size-cap"><i></i>浅色背景（#F7F7F9）· 原生像素</div>
+        <div class="grid">
+          <div></div><div class="col">v1</div><div class="col">v2</div>
+          <div class="row">16</div>
+          <div class="cell"><img src="png/candidate-b-n-mark-16.png" width="16" height="16" alt="B v1 16px"></div>
+          <div class="cell"><img src="png/candidate-b-n-mark-v2-16.png" width="16" height="16" alt="B v2 16px"></div>
+          <div class="row">24</div>
+          <div class="cell"><img src="png/candidate-b-n-mark-24.png" width="24" height="24" alt="B v1 24px"></div>
+          <div class="cell"><img src="png/candidate-b-n-mark-v2-24.png" width="24" height="24" alt="B v2 24px"></div>
+          <div class="row">32</div>
+          <div class="cell"><img src="png/candidate-b-n-mark-32.png" width="32" height="32" alt="B v1 32px"></div>
+          <div class="cell"><img src="png/candidate-b-n-mark-v2-32.png" width="32" height="32" alt="B v2 32px"></div>
+          <div class="row">48</div>
+          <div class="cell"><img src="png/candidate-b-n-mark-48.png" width="48" height="48" alt="B v1 48px"></div>
+          <div class="cell"><img src="png/candidate-b-n-mark-v2-48.png" width="48" height="48" alt="B v2 48px"></div>
+        </div>
+      </div>
+
+      <div class="size-block dark">
+        <div class="size-cap"><i></i>深色背景（#1B1C21）· 原生像素</div>
+        <div class="grid">
+          <div></div><div class="col">v1</div><div class="col">v2</div>
+          <div class="row">16</div>
+          <div class="cell"><img src="png/candidate-b-n-mark-16.png" width="16" height="16" alt="B v1 16px 深色"></div>
+          <div class="cell"><img src="png/candidate-b-n-mark-v2-16.png" width="16" height="16" alt="B v2 16px 深色"></div>
+          <div class="row">24</div>
+          <div class="cell"><img src="png/candidate-b-n-mark-24.png" width="24" height="24" alt="B v1 24px 深色"></div>
+          <div class="cell"><img src="png/candidate-b-n-mark-v2-24.png" width="24" height="24" alt="B v2 24px 深色"></div>
+          <div class="row">32</div>
+          <div class="cell"><img src="png/candidate-b-n-mark-32.png" width="32" height="32" alt="B v1 32px 深色"></div>
+          <div class="cell"><img src="png/candidate-b-n-mark-v2-32.png" width="32" height="32" alt="B v2 32px 深色"></div>
+          <div class="row">48</div>
+          <div class="cell"><img src="png/candidate-b-n-mark-48.png" width="48" height="48" alt="B v1 48px 深色"></div>
+          <div class="cell"><img src="png/candidate-b-n-mark-v2-48.png" width="48" height="48" alt="B v2 48px 深色"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- C -->
+  <section class="dir">
+    <div class="dir-head">
+      <span class="tag">C</span>
+      <h2>纸页 + 星芒</h2>
+    </div>
+    <p class="dir-lede">v1 的星芒直径只有 290px、内/外半径比 0.54，在 24px 下退化成白点。v2 把星芒放大到页宽的 77%，锐化腰部，并删除压在下方的文本条。</p>
+
+    <div class="pair">
+      <article class="card">
+        <div class="card-label"><b>v1 · 基准</b><span>星芒 290px + 文本条</span></div>
+        <div class="stages">
+          <div>
+            <div class="stage light"><img src="png/candidate-c-spark-page-256.png" width="112" height="112" alt="C v1 浅色"></div>
+            <div class="stage-cap">浅色背景</div>
+          </div>
+          <div>
+            <div class="stage dark"><img src="png/candidate-c-spark-page-256.png" width="112" height="112" alt="C v1 深色"></div>
+            <div class="stage-cap">深色背景</div>
+          </div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-label"><b>v2 · 放大星芒</b><span>星芒 370px · 无文本条</span></div>
+        <div class="stages">
+          <div>
+            <div class="stage light"><img src="png/candidate-c-spark-page-v2-256.png" width="112" height="112" alt="C v2 浅色"></div>
+            <div class="stage-cap">浅色背景</div>
+          </div>
+          <div>
+            <div class="stage dark"><img src="png/candidate-c-spark-page-v2-256.png" width="112" height="112" alt="C v2 深色"></div>
+            <div class="stage-cap">深色背景</div>
+          </div>
+        </div>
+      </article>
+    </div>
+
+    <ul class="changes">
+      <li><strong>星芒 290 → 370px 直径</strong>（页宽的 77%）；内/外半径比 0.54 → 0.38，腰部更窄，24px 下 8.7px、32px 下 11.6px 时仍能读出四个尖角。</li>
+      <li><strong>删除底部文本条</strong>，页面高度 560 → 520，星芒与页面同心（512,512），小尺寸不再出现白条与星芒粘连。</li>
+      <li><strong>页面改为纯 #F06607</strong>，白星对比度恒为 3.18:1；页面对浅色桌面的对比为 2.97:1、对深色桌面 5.35:1，避免渐变导致星芒局部对比不足。</li>
+    </ul>
+
+    <div class="size-grid">
+      <div class="size-block">
+        <div class="size-cap"><i></i>浅色背景（#F7F7F9）· 原生像素</div>
+        <div class="grid">
+          <div></div><div class="col">v1</div><div class="col">v2</div>
+          <div class="row">16</div>
+          <div class="cell"><img src="png/candidate-c-spark-page-16.png" width="16" height="16" alt="C v1 16px"></div>
+          <div class="cell"><img src="png/candidate-c-spark-page-v2-16.png" width="16" height="16" alt="C v2 16px"></div>
+          <div class="row">24</div>
+          <div class="cell"><img src="png/candidate-c-spark-page-24.png" width="24" height="24" alt="C v1 24px"></div>
+          <div class="cell"><img src="png/candidate-c-spark-page-v2-24.png" width="24" height="24" alt="C v2 24px"></div>
+          <div class="row">32</div>
+          <div class="cell"><img src="png/candidate-c-spark-page-32.png" width="32" height="32" alt="C v1 32px"></div>
+          <div class="cell"><img src="png/candidate-c-spark-page-v2-32.png" width="32" height="32" alt="C v2 32px"></div>
+          <div class="row">48</div>
+          <div class="cell"><img src="png/candidate-c-spark-page-48.png" width="48" height="48" alt="C v1 48px"></div>
+          <div class="cell"><img src="png/candidate-c-spark-page-v2-48.png" width="48" height="48" alt="C v2 48px"></div>
+        </div>
+      </div>
+
+      <div class="size-block dark">
+        <div class="size-cap"><i></i>深色背景（#1B1C21）· 原生像素</div>
+        <div class="grid">
+          <div></div><div class="col">v1</div><div class="col">v2</div>
+          <div class="row">16</div>
+          <div class="cell"><img src="png/candidate-c-spark-page-16.png" width="16" height="16" alt="C v1 16px 深色"></div>
+          <div class="cell"><img src="png/candidate-c-spark-page-v2-16.png" width="16" height="16" alt="C v2 16px 深色"></div>
+          <div class="row">24</div>
+          <div class="cell"><img src="png/candidate-c-spark-page-24.png" width="24" height="24" alt="C v1 24px 深色"></div>
+          <div class="cell"><img src="png/candidate-c-spark-page-v2-24.png" width="24" height="24" alt="C v2 24px 深色"></div>
+          <div class="row">32</div>
+          <div class="cell"><img src="png/candidate-c-spark-page-32.png" width="32" height="32" alt="C v1 32px 深色"></div>
+          <div class="cell"><img src="png/candidate-c-spark-page-v2-32.png" width="32" height="32" alt="C v2 32px 深色"></div>
+          <div class="row">48</div>
+          <div class="cell"><img src="png/candidate-c-spark-page-48.png" width="48" height="48" alt="C v1 48px 深色"></div>
+          <div class="cell"><img src="png/candidate-c-spark-page-v2-48.png" width="48" height="48" alt="C v2 48px 深色"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <h4>配色</h4>
+    <div class="swatches">
+      <span class="swatch"><i style="background:#FFD8B4"></i>#FFD8B4</span>
+      <span class="swatch"><i style="background:#FFBE85"></i>#FFBE85</span>
+      <span class="swatch"><i style="background:#FFA653"></i>#FFA653</span>
+      <span class="swatch"><i style="background:#FF7A1A"></i>#FF7A1A</span>
+      <span class="swatch"><i style="background:#F06607"></i>#F06607</span>
+      <span class="swatch"><i style="background:#1F2128"></i>#1F2128</span>
+      <span class="swatch"><i style="background:#FFFDF7"></i>#FFFDF7</span>
+    </div>
+    <h4>素材</h4>
+    <p style="margin:0 0 10px">v2 矢量源：<code>src/candidate-a-sheet-v2.svg</code>、<code>src/candidate-b-n-mark-v2.svg</code>、<code>src/candidate-c-spark-page-v2.svg</code><br>
+    v2 PNG：<code>png/&lt;candidate&gt;-v2-{16,24,32,48,256,1024}.png</code>；v1 PNG 保留原命名。全部透明背景。</p>
+    <h4>应用到 Tauri（示例，未执行）</h4>
+    <p style="margin:0">确认方案后，用 1024px 源图或 SVG 运行 <code>pnpm tauri icon design/icon-candidates/src/candidate-a-sheet-v2.svg</code>，输出到 <code>src-tauri/icons/</code>：<code>32x32.png</code>、<code>64x64.png</code>、<code>128x128.png</code>、<code>128x128@2x.png</code>、<code>icon.png</code>、<code>icon.icns</code>、<code>icon.ico</code>、<code>StoreLogo.png</code>、<code>Square*Logo.png</code>，以及 <code>android/</code>、<code>ios/</code> 移动端图标。现有 <code>bundle.icon</code> 引用的 5 个文件名与生成结果一致，配置无需改动。</p>
+  </footer>
+
+</div>
+</body>
+</html>

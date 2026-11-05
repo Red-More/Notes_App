@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="c-page" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFA653"/>
+      <stop offset="0.55" stop-color="#FF7A1A"/>
+      <stop offset="1" stop-color="#EE5F04"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Page body: portrait silhouette carries the "note" reading on its own -->
+  <rect x="272" y="232" width="480" height="560" rx="72" fill="url(#c-page)"/>
+
+  <!-- AI sparkle: four-point star with a plump body, still readable at 16px -->
+  <path fill="#FFFDF7" stroke="#FFFDF7" stroke-width="12" stroke-linejoin="round" d="
+    M512 300
+    L554 403
+    L657 445
+    L554 487
+    L512 590
+    L470 487
+    L367 445
+    L470 403
+    Z"/>
+
+  <!-- Single text line anchors the note metaphor without small-size clutter -->
+  <rect x="392" y="672" width="240" height="64" rx="32" fill="#FFFDF7"/>
+</svg>
