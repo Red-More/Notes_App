@@ -425,10 +425,53 @@ export default function ChatPage({ isActive }: Props) {
   const bootRef = useRef(false)
   // 落库串行化：assistant 消息必须先于其 toolResult 写入，否则历史无法还原。
   const persistQueueRef = useRef<Promise<unknown>>(Promise.resolve())
+  // Coalesced streaming state: deltas accumulate here and are applied once per
+  // animation frame instead of re-rendering the list for every token.
+  const streamDeltaRef = useRef<{ id: string; delta: string } | null>(null)
+  const streamFrameRef = useRef<number | null>(null)
+  // Scroll writes from deltas ride along with the same frame's list update.
+  const streamScrollRef = useRef(false)
 
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
+  }, [])
+
+  /** Apply the pending delta and scroll position in a single batched update. */
+  const flushStreamFrame = useCallback(() => {
+    streamFrameRef.current = null
+    const pending = streamDeltaRef.current
+    streamDeltaRef.current = null
+    if (pending) {
+      setItems((prev) =>
+        prev.map((item) =>
+          item.id === pending.id && item.kind === 'assistant'
+            ? { ...item, text: item.text + pending.delta }
+            : item,
+        ),
+      )
+    }
+    if (streamScrollRef.current) {
+      streamScrollRef.current = false
+      const el = scrollRef.current
+      if (el) el.scrollTop = el.scrollHeight
+    }
+  }, [])
+
+  /** Schedule one flush; further deltas in the same frame only extend the buffer. */
+  const scheduleStreamFlush = useCallback(() => {
+    if (streamFrameRef.current !== null) return
+    streamFrameRef.current = requestAnimationFrame(flushStreamFrame)
+  }, [flushStreamFrame])
+
+  /** Drop buffered deltas; a queued frame must not touch state after teardown. */
+  const cancelStreamFrame = useCallback(() => {
+    if (streamFrameRef.current !== null) {
+      cancelAnimationFrame(streamFrameRef.current)
+      streamFrameRef.current = null
+    }
+    streamDeltaRef.current = null
+    streamScrollRef.current = false
   }, [])
 
   const handleScroll = useCallback(() => {
@@ -527,14 +570,13 @@ export default function ChatPage({ isActive }: Props) {
           if (update.type === 'text_delta') {
             const id = streamingIdRef.current
             if (!id) return
-            setItems((prev) =>
-              prev.map((item) =>
-                item.id === id && item.kind === 'assistant'
-                  ? { ...item, text: item.text + update.delta }
-                  : item,
-              ),
-            )
-            scrollToBottom()
+            const pending = streamDeltaRef.current
+            streamDeltaRef.current =
+              pending && pending.id === id
+                ? { id, delta: pending.delta + update.delta }
+                : { id, delta: update.delta }
+            streamScrollRef.current = true
+            scheduleStreamFlush()
             return
           }
           // Reasoning streams before the visible answer; keep it collapsible.
@@ -631,6 +673,9 @@ export default function ChatPage({ isActive }: Props) {
               ? '已取消'
               : `${onlineRef.current ? '' : '当前处于离线模式，'}回答失败：${message.errorMessage ?? '未知错误'}`
             : text
+          // The final message is authoritative: drop queued deltas so a late
+          // frame cannot append already-settled text to this bubble.
+          cancelStreamFrame()
           setItems((prev) => {
             if (shown.trim() === '') return prev.filter((item) => item.id !== id)
             return prev.map((item) =>
@@ -708,6 +753,7 @@ export default function ChatPage({ isActive }: Props) {
           break
         }
         case 'agent_end': {
+          cancelStreamFrame()
           setStreaming(false)
           setQueuedCount(0)
           pendingInitialUserRef.current = false
@@ -717,7 +763,7 @@ export default function ChatPage({ isActive }: Props) {
           break
       }
     },
-    [enqueuePersist, persistAssistant, persistTool, scrollToBottom],
+    [enqueuePersist, persistAssistant, persistTool, scrollToBottom, cancelStreamFrame, scheduleStreamFlush],
   )
 
   const disposeAgent = useCallback(() => {
@@ -728,8 +774,10 @@ export default function ChatPage({ isActive }: Props) {
     // 中断旧流后立即复位发送状态：abort 产生的 agent_end 会因退订而丢失，不能再依赖它。
     streamingIdRef.current = null
     pendingInitialUserRef.current = false
+    // Pending frames must not call setState after the transcript was replaced.
+    cancelStreamFrame()
     setStreaming(false)
-  }, [])
+  }, [cancelStreamFrame])
 
   /** Build an Agent for the given transcript; returns null when no model is usable. */
   const buildAgent = useCallback(
