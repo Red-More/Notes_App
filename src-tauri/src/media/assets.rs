@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use crate::vfs::error::ToolError;
 
 /// Hard ceiling for one asset; providers never return more than this.
-const MAX_ASSET_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const MAX_ASSET_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

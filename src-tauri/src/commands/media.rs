@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, State};
 
+use crate::agent::AgentState;
 use crate::media::{assets, exec, jobs, MediaState};
+use crate::privacy::{egress, policy};
 use crate::vfs::error::ToolError;
 use crate::vfs::VfsState;
 
@@ -18,11 +20,25 @@ pub fn media_job_submit(
     app: AppHandle,
     vfs_state: State<'_, VfsState>,
     media: State<'_, MediaState>,
+    agent: State<'_, AgentState>,
     input: jobs::NewJob,
     on_event: Channel<jobs::JobEvent>,
 ) -> Result<jobs::Job, ToolError> {
     let job = {
         let vfs = crate::lock(&vfs_state.0);
+        // Media payloads carry note text/prompts to the vendor; run the same
+        // egress gate as chat so S0/S1 content cannot leave un-judged.
+        let snapshot = policy::Snapshot::load(vfs.conn(), &agent.secrets)?;
+        let decision = egress::guard_text(&jobs::egress_text(&input.params), &snapshot);
+        if let Err(e) = egress::record_audit(vfs.conn(), &input.model_entry, "media", &decision) {
+            log::warn!("egress audit failed: {e}");
+        }
+        if decision.blocked() {
+            let message = decision
+                .message
+                .unwrap_or_else(|| "隐私拦截：媒体请求包含敏感内容".to_string());
+            return Err(ToolError::invalid(message));
+        }
         jobs::submit(vfs.conn(), input)?
     };
     media.register_cancel(job.id);
@@ -140,6 +156,12 @@ pub fn media_asset_store(
     media: State<'_, MediaState>,
     input: AssetStoreInput,
 ) -> Result<assets::Asset, ToolError> {
+    // Cheap pre-check on the encoded length so an oversized payload cannot be
+    // materialised in memory before the asset-size limit is applied.
+    let max_encoded = assets::MAX_ASSET_BYTES.saturating_mul(4) / 3 + 4;
+    if input.data.len() > max_encoded {
+        return Err(ToolError::invalid("音频数据超出大小上限"));
+    }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(input.data.as_bytes())
         .map_err(|e| ToolError::invalid(format!("音频数据不是合法 base64：{e}")))?;

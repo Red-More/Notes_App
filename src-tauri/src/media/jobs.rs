@@ -199,6 +199,16 @@ pub fn submit(conn: &Connection, input: NewJob) -> Result<Job, ToolError> {
     get(conn, conn.last_insert_rowid())
 }
 
+/// Text fields that leave the device for a media job; the egress gate scans
+/// them before the job is queued.
+pub fn egress_text(params: &Value) -> String {
+    ["text", "prompt"]
+        .iter()
+        .filter_map(|field| params.get(*field).and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn get(conn: &Connection, id: i64) -> Result<Job, ToolError> {
     let raw = conn
         .query_row(

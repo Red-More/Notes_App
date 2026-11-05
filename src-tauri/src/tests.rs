@@ -2542,6 +2542,28 @@ fn privacy_egress_allows_s2_and_records_audit() {
 }
 
 #[test]
+fn privacy_media_gate_blocks_entities_only() {
+    let (dir, store) = privacy_store("egress-media");
+    let vfs = test_vfs();
+    let snapshot = policy::Snapshot::load(vfs.conn(), &store).unwrap();
+
+    // A prompt without sensitive entities must still reach the vendor.
+    let plain = egress::guard_text("画一只橘猫坐在窗台上", &snapshot);
+    assert!(!plain.blocked());
+    assert_eq!(plain.decision, "allow");
+
+    // Both `text` (tts/classify) and `prompt` (image/video) are covered.
+    let params = serde_json::json!({ "text": "画一只橘猫", "prompt": "海边日落" });
+    assert_eq!(jobs::egress_text(&params), "画一只橘猫\n海边日落");
+
+    // Recognizable entities in a media prompt are blocked before upload.
+    let sensitive = egress::guard_text("把这段话发给 a.b@example.com", &snapshot);
+    assert!(sensitive.blocked());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn privacy_entity_vault_matches_normalized_values() {
     let (dir, store) = privacy_store("entity");
     let vfs = test_vfs();

@@ -82,6 +82,11 @@ fn read_servers(conn: &Connection) -> Vec<McpServer> {
     read_setting(conn, KEY_SERVERS)
         .and_then(|raw| serde_json::from_str::<Vec<McpServer>>(&raw).ok())
         .unwrap_or_default()
+        .into_iter()
+        // Re-validate on read so a tampered settings row cannot redirect tool
+        // calls to an internal/plaintext host (same rule as model entries).
+        .filter(|server| crate::agent::model_store::validate_base_url(&server.url).is_ok())
+        .collect()
 }
 
 fn write_servers(conn: &Connection, servers: &[McpServer]) -> Result<(), ToolError> {

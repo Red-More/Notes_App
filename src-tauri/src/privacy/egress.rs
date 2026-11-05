@@ -88,6 +88,17 @@ pub fn guard(messages: &[Value], snapshot: &Snapshot) -> Decision {
     }
 }
 
+/// Judge a plain-text payload that has no document-path provenance (media jobs).
+/// Declared level stays S2 because there is no path reference, but recognizers
+/// and configured entities still apply, so sensitive text is blocked before upload.
+pub fn guard_text(text: &str, snapshot: &Snapshot) -> Decision {
+    let message = serde_json::json!({
+        "role": "user",
+        "content": [{ "type": "text", "text": text }],
+    });
+    guard(&[message], snapshot)
+}
+
 fn verdict(
     level: Level,
     declared: Level,
