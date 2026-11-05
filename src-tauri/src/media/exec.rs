@@ -133,7 +133,16 @@ pub async fn run(app: AppHandle, job_id: i64) {
     };
 
     let cancel = app.state::<MediaState>().register_cancel(job_id);
-    let outcome = execute(&app, job_id, kind, &entry, &params, &job_params, &key, &cancel).await;
+    let outcome = execute(
+        &app,
+        (job_id, &cancel),
+        kind,
+        &entry,
+        &params,
+        &job_params,
+        &key,
+    )
+    .await;
     app.state::<MediaState>().release(job_id);
     // The cancel command already wrote the terminal state; do not overwrite it.
     if cancel.load(Ordering::SeqCst) {
@@ -149,8 +158,10 @@ pub async fn run(app: AppHandle, job_id: i64) {
                 None,
                 Some(&text),
                 None,
-                Some(units),
-                Some(cost),
+                Some(jobs::Usage {
+                    units,
+                    cost_usd: cost,
+                }),
             )
         }
         Ok(Outcome::Asset { bytes, mime, meta }) => {
@@ -170,8 +181,10 @@ pub async fn run(app: AppHandle, job_id: i64) {
                         Some(asset.id),
                         None,
                         None,
-                        Some(units),
-                        Some(cost),
+                        Some(jobs::Usage {
+                            units,
+                            cost_usd: cost,
+                        }),
                     )
                 }
                 Err(e) => finish(
@@ -241,14 +254,14 @@ fn job_usage(
 
 async fn execute(
     app: &AppHandle,
-    job_id: i64,
+    run: (i64, &AtomicBool),
     kind: jobs::JobKind,
     entry: &ModelEntry,
     params: &LlmParams,
     job: &Value,
     key: &str,
-    cancel: &AtomicBool,
 ) -> Result<Outcome, String> {
+    let (job_id, cancel) = run;
     match kind {
         jobs::JobKind::Classify => classify(app, entry, params, job, key, cancel).await,
         jobs::JobKind::Tts => tts(app, entry, params, job, key, cancel).await,
@@ -873,7 +886,7 @@ fn finish(
     result: Option<&str>,
     error: Option<&str>,
 ) {
-    finish_with_cost(app, job_id, status, asset_id, result, error, None, None);
+    finish_with_cost(app, job_id, status, asset_id, result, error, None);
 }
 
 fn finish_with_cost(
@@ -883,13 +896,12 @@ fn finish_with_cost(
     asset_id: Option<i64>,
     result: Option<&str>,
     error: Option<&str>,
-    units: Option<f64>,
-    cost_usd: Option<f64>,
+    usage: Option<jobs::Usage>,
 ) {
     let event = {
         let vfs = app.state::<VfsState>();
         let db = crate::lock(&vfs.0);
-        match jobs::finish(db.conn(), job_id, status, asset_id, result, error, units, cost_usd) {
+        match jobs::finish(db.conn(), job_id, status, asset_id, result, error, usage) {
             Ok(job) => Some(jobs::JobEvent::from(&job)),
             Err(e) => {
                 // A cancelled job is already terminal; nothing to persist.

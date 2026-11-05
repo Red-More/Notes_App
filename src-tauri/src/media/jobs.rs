@@ -266,6 +266,13 @@ pub fn set_progress(conn: &Connection, id: i64, percent: u32) -> Result<Job, Too
     get(conn, id)
 }
 
+/// Billable usage reported when a job finishes.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Usage {
+    pub units: f64,
+    pub cost_usd: f64,
+}
+
 /// Finish a running/pending job with a terminal status.
 pub fn finish(
     conn: &Connection,
@@ -274,8 +281,7 @@ pub fn finish(
     asset_id: Option<i64>,
     result: Option<&str>,
     error: Option<&str>,
-    units: Option<f64>,
-    cost_usd: Option<f64>,
+    usage: Option<Usage>,
 ) -> Result<Job, ToolError> {
     let job = get(conn, id)?;
     if job.status.is_terminal() {
@@ -284,6 +290,8 @@ pub fn finish(
     if !status.is_terminal() {
         return Err(ToolError::invalid("必须使用终态结束作业"));
     }
+    let units = usage.map(|value| value.units);
+    let cost_usd = usage.map(|value| value.cost_usd);
     conn.execute(
         "UPDATE media_jobs
          SET status = ?2,

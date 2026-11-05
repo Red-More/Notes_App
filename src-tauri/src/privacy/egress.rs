@@ -224,9 +224,7 @@ fn normalize_ref(raw: &str) -> Option<String> {
     if raw.is_empty() {
         return None;
     }
-    let cut = raw
-        .find(|c| matches!(c, '*' | '?' | '['))
-        .unwrap_or(raw.len());
+    let cut = raw.find(['*', '?', '[']).unwrap_or(raw.len());
     let scope = raw[..cut].trim_end_matches('/');
     let scope = if scope.is_empty() { raw } else { scope };
     cap_gate::normalize_path(scope).ok()

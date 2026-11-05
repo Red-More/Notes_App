@@ -199,17 +199,15 @@ fn scan_government_ids(compact: &[(char, usize)], runs: &[(usize, usize)]) -> Ve
                     });
                 }
             }
-            17 => {
+            17 if end < compact.len() && matches!(compact[end].0, 'x' | 'X') => {
                 // The check digit may be `X`, which is not part of the digit run.
-                if end < compact.len() && matches!(compact[end].0, 'x' | 'X') {
-                    let candidate = format!("{}X", digits(start..end));
-                    if gb11643_valid(&candidate) {
-                        spans.push(Span {
-                            kind: DetectedKind::GovtId,
-                            start: compact[start].1,
-                            end: compact[end].1 + 1,
-                        });
-                    }
+                let candidate = format!("{}X", digits(start..end));
+                if gb11643_valid(&candidate) {
+                    spans.push(Span {
+                        kind: DetectedKind::GovtId,
+                        start: compact[start].1,
+                        end: compact[end].1 + 1,
+                    });
                 }
             }
             _ => {}
@@ -238,7 +236,7 @@ fn luhn_valid(digits: &[char]) -> bool {
         sum += value;
         double = !double;
     }
-    sum % 10 == 0
+    sum.is_multiple_of(10)
 }
 
 fn scan_bank_cards(compact: &[(char, usize)], runs: &[(usize, usize)]) -> Vec<Span> {

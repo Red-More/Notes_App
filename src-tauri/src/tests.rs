@@ -928,8 +928,10 @@ fn media_jobs_persist_cancel_and_recover() {
         None,
         None,
         None,
-        Some(1.0),
-        Some(0.04),
+        Some(jobs::Usage {
+            units: 1.0,
+            cost_usd: 0.04,
+        }),
     )
     .unwrap();
     assert_eq!(done.status, jobs::JobStatus::Succeeded);
