@@ -19,6 +19,9 @@
         { "path": "$DOWNLOAD/**" },
         { "path": "$DOCUMENT/**" },
         { "path": "$DESKTOP/**" }
+      ],
+      "deny": [
+        { "path": "$APPDATA/**" }
       ]
     }
   ]
