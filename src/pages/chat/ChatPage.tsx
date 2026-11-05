@@ -53,6 +53,8 @@ interface Bubble {
   /** Data URLs of images attached to a user turn. */
   images?: string[]
   imageAssetIds?: number[]
+  /** Paths touched by this reply, cached when the reply settles. */
+  changes?: string[]
 }
 
 /** One image staged in the composer. */
@@ -159,7 +161,22 @@ function recordsToItems(
       })
     }
   }
+  // Cache touched paths once per load; streaming renders only read them.
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index]
+    if (item.kind === 'assistant') item.changes = turnChanges(items, index)
+  }
   return items
+}
+
+/** Insert or update a tool card without touching the rest of the transcript. */
+function upsertToolCard(items: Item[], id: string, toolName: string, args: string): Item[] {
+  if (!items.some((item) => item.id === id && item.kind === 'tool')) {
+    return [...items, { id, kind: 'tool', toolName, args, status: 'running', text: '' }]
+  }
+  return items.map((item) =>
+    item.id === id && item.kind === 'tool' ? { ...item, toolName, args } : item,
+  )
 }
 
 function toolResultText(result: unknown): string {
@@ -425,9 +442,16 @@ export default function ChatPage({ isActive }: Props) {
   const bootRef = useRef(false)
   // 落库串行化：assistant 消息必须先于其 toolResult 写入，否则历史无法还原。
   const persistQueueRef = useRef<Promise<unknown>>(Promise.resolve())
-  // Coalesced streaming state: deltas accumulate here and are applied once per
-  // animation frame instead of re-rendering the list for every token.
-  const streamDeltaRef = useRef<{ id: string; delta: string } | null>(null)
+  // Coalesced streaming state: text, reasoning, and tool-argument deltas
+  // accumulate here and are applied once per animation frame instead of
+  // re-rendering the list for every token. Tool arguments stay raw in the
+  // buffer and are stringified a single time when the frame is flushed.
+  const streamDeltaRef = useRef<{
+    id: string
+    text: string
+    thinking: string
+    tools: Map<string, { name: string; args: unknown }>
+  } | null>(null)
   const streamFrameRef = useRef<number | null>(null)
   // Scroll writes from deltas ride along with the same frame's list update.
   const streamScrollRef = useRef(false)
@@ -437,19 +461,51 @@ export default function ChatPage({ isActive }: Props) {
     if (el) el.scrollTop = el.scrollHeight
   }, [])
 
-  /** Apply the pending delta and scroll position in a single batched update. */
+  /** Buffer for the given assistant message, reset when another message starts. */
+  const streamBufferFor = useCallback((id: string) => {
+    const pending = streamDeltaRef.current
+    if (pending && pending.id === id) return pending
+    const fresh = {
+      id,
+      text: '',
+      thinking: '',
+      tools: new Map<string, { name: string; args: unknown }>(),
+    }
+    streamDeltaRef.current = fresh
+    return fresh
+  }, [])
+
+  /** Apply all pending deltas and the scroll position in a single batched update. */
   const flushStreamFrame = useCallback(() => {
     streamFrameRef.current = null
     const pending = streamDeltaRef.current
     streamDeltaRef.current = null
     if (pending) {
-      setItems((prev) =>
-        prev.map((item) =>
-          item.id === pending.id && item.kind === 'assistant'
-            ? { ...item, text: item.text + pending.delta }
-            : item,
-        ),
-      )
+      // Stringify each tool's final argument snapshot once per frame, not per delta.
+      const toolArgs = new Map<string, { toolName: string; args: string }>()
+      for (const [id, tool] of pending.tools) {
+        toolArgs.set(id, { toolName: tool.name, args: JSON.stringify(tool.args ?? {}) })
+      }
+      setItems((prev) => {
+        let next = prev
+        if (pending.text || pending.thinking) {
+          next = next.map((item) =>
+            item.id === pending.id && item.kind === 'assistant'
+              ? {
+                  ...item,
+                  text: pending.text ? item.text + pending.text : item.text,
+                  thinking: pending.thinking
+                    ? (item.thinking ?? '') + pending.thinking
+                    : item.thinking,
+                }
+              : item,
+          )
+        }
+        for (const [id, patch] of toolArgs) {
+          next = upsertToolCard(next, id, patch.toolName, patch.args)
+        }
+        return next
+      })
     }
     if (streamScrollRef.current) {
       streamScrollRef.current = false
@@ -570,11 +626,7 @@ export default function ChatPage({ isActive }: Props) {
           if (update.type === 'text_delta') {
             const id = streamingIdRef.current
             if (!id) return
-            const pending = streamDeltaRef.current
-            streamDeltaRef.current =
-              pending && pending.id === id
-                ? { id, delta: pending.delta + update.delta }
-                : { id, delta: update.delta }
+            streamBufferFor(id).text += update.delta
             streamScrollRef.current = true
             scheduleStreamFlush()
             return
@@ -588,16 +640,17 @@ export default function ChatPage({ isActive }: Props) {
             const id = streamingIdRef.current
             if (!id) return
             if (update.type === 'thinking_delta') {
-              setItems((prev) =>
-                prev.map((item) =>
-                  item.id === id && item.kind === 'assistant'
-                    ? { ...item, thinking: (item.thinking ?? '') + update.delta }
-                    : item,
-                ),
-              )
+              // Reasoning deltas share the text frame buffer to avoid one
+              // re-render per token.
+              streamBufferFor(id).thinking += update.delta
+              streamScrollRef.current = true
+              scheduleStreamFlush()
             } else if (update.type === 'thinking_end') {
               const block = update.partial.content[update.contentIndex]
               const signature = block?.type === 'thinking' ? (block.thinkingSignature ?? null) : null
+              // Apply buffered reasoning first: a single-frame reasoning block
+              // would otherwise miss the `item.thinking` check below.
+              flushStreamFrame()
               setItems((prev) =>
                 prev.map((item) =>
                   item.id === id && item.kind === 'assistant' && item.thinking
@@ -617,29 +670,21 @@ export default function ChatPage({ isActive }: Props) {
           ) {
             const block = update.partial.content[update.contentIndex]
             if (block?.type !== 'toolCall') return
-            const args = JSON.stringify(block.arguments ?? {})
-            setItems((prev) => {
-              const exists = prev.some((item) => item.id === block.id && item.kind === 'tool')
-              if (!exists) {
-                return [
-                  ...prev,
-                  {
-                    id: block.id,
-                    kind: 'tool',
-                    toolName: block.name,
-                    args,
-                    status: 'running',
-                    text: '',
-                  },
-                ]
-              }
-              return prev.map((item) =>
-                item.id === block.id && item.kind === 'tool'
-                  ? { ...item, toolName: block.name, args }
-                  : item,
-              )
-            })
-            scrollToBottom()
+            const id = streamingIdRef.current
+            if (!id || update.type === 'toolcall_end') {
+              // `toolcall_end` carries the authoritative arguments: apply it
+              // now and drop any buffered arguments for this call.
+              const pending = streamDeltaRef.current
+              if (pending && pending.id === id) pending.tools.delete(block.id)
+              const args = JSON.stringify(block.arguments ?? {})
+              setItems((prev) => upsertToolCard(prev, block.id, block.name, args))
+              scrollToBottom()
+              return
+            }
+            // Keep raw arguments in the buffer; stringify once per frame.
+            streamBufferFor(id).tools.set(block.id, { name: block.name, args: block.arguments ?? {} })
+            streamScrollRef.current = true
+            scheduleStreamFlush()
           }
           break
         }
@@ -678,7 +723,7 @@ export default function ChatPage({ isActive }: Props) {
           cancelStreamFrame()
           setItems((prev) => {
             if (shown.trim() === '') return prev.filter((item) => item.id !== id)
-            return prev.map((item) =>
+            const next = prev.map((item) =>
               item.id === id && item.kind === 'assistant'
                 ? {
                     ...item,
@@ -691,6 +736,13 @@ export default function ChatPage({ isActive }: Props) {
                   }
                 : item,
             )
+            // Settled replies never change again: cache touched paths once here
+            // instead of rescanning the transcript on every streaming frame.
+            const index = next.findIndex((item) => item.id === id && item.kind === 'assistant')
+            const settled = index >= 0 ? next[index] : null
+            if (!settled || settled.kind !== 'assistant') return next
+            const changes = turnChanges(next, index)
+            return next.map((item, i) => (i === index ? { ...settled, changes } : item))
           })
           streamingIdRef.current = null
           settledRef.current = true
@@ -763,7 +815,16 @@ export default function ChatPage({ isActive }: Props) {
           break
       }
     },
-    [enqueuePersist, persistAssistant, persistTool, scrollToBottom, cancelStreamFrame, scheduleStreamFlush],
+    [
+      enqueuePersist,
+      persistAssistant,
+      persistTool,
+      scrollToBottom,
+      cancelStreamFrame,
+      scheduleStreamFlush,
+      streamBufferFor,
+      flushStreamFrame,
+    ],
   )
 
   const disposeAgent = useCallback(() => {
@@ -1353,9 +1414,9 @@ export default function ChatPage({ isActive }: Props) {
             }
           />
         ) : (
-          items.map((item, index) => {
-            const changes =
-              item.kind === 'assistant' && !item.streaming ? turnChanges(items, index) : []
+          items.map((item) => {
+            // Settled replies carry their touched paths computed at settle time.
+            const changes = item.kind === 'assistant' && !item.streaming ? item.changes ?? [] : []
             const usage = item.kind === 'assistant' ? item.usage : null
             const cost = usage ? usageCost(usage, activeModel) : null
             return (
