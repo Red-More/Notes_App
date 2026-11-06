@@ -54,11 +54,22 @@ pub struct ChatMessage {
     pub thinking_signature: Option<String>,
     /// JSON array of media asset ids attached to this user message.
     pub image_asset_ids: Option<String>,
+    /// Agent run that owns/produced this row.
+    pub run_id: Option<i64>,
+    /// JSON arguments of a tool call, kept so history can restore the card.
+    pub tool_args: Option<String>,
+    pub tool_duration_ms: Option<i64>,
+    /// True when the reply was cut short by a cancel/interruption.
+    pub is_partial: bool,
+    /// stop | aborted | error, when recorded.
+    pub stop_reason: Option<String>,
+    /// Non-null marks this user row as guidance injected into that run.
+    pub steer_of_run: Option<i64>,
     pub created_at: String,
 }
 
 /// 追加消息的入参。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewMessage {
     pub role: String,
@@ -80,6 +91,18 @@ pub struct NewMessage {
     pub thinking_signature: Option<String>,
     #[serde(default)]
     pub image_asset_ids: Option<String>,
+    #[serde(default)]
+    pub run_id: Option<i64>,
+    #[serde(default)]
+    pub tool_args: Option<String>,
+    #[serde(default)]
+    pub tool_duration_ms: Option<i64>,
+    #[serde(default)]
+    pub is_partial: bool,
+    #[serde(default)]
+    pub stop_reason: Option<String>,
+    #[serde(default)]
+    pub steer_of_run: Option<i64>,
 }
 
 fn now(conn: &Connection) -> Result<String, ToolError> {
@@ -204,22 +227,37 @@ pub fn delete(vfs: &VirtualFs, id: i64) -> Result<(), ToolError> {
     Ok(())
 }
 
+/// Columns selected for every `ChatMessage` read; keep in sync with `row_to_message`.
+const MESSAGE_COLUMNS: &str = "id, role, content, tool_calls, tool_call_id, tool_name, is_error,
+    created_at, usage_input, usage_output, usage_total, usage_cache_read, usage_cache_write,
+    thinking, thinking_signature, image_asset_ids, run_id, tool_args, tool_duration_ms,
+    is_partial, stop_reason, steer_of_run";
+
 /// 读取一条会话的消息，按 id 升序。
 pub fn messages(vfs: &VirtualFs, conversation_id: i64) -> Result<Vec<ChatMessage>, ToolError> {
     let conn = vfs.conn();
     ensure_exists(conn, conversation_id)?;
-    let mut stmt = conn.prepare(
-        "SELECT id, role, content, tool_calls, tool_call_id, tool_name, is_error, created_at,
-                usage_input, usage_output, usage_total, usage_cache_read, usage_cache_write,
-                thinking, thinking_signature, image_asset_ids
-         FROM messages WHERE conversation_id = ?1 ORDER BY id ASC",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {MESSAGE_COLUMNS} FROM messages WHERE conversation_id = ?1 ORDER BY id ASC"
+    ))?;
     let rows = stmt.query_map(params![conversation_id], row_to_message)?;
     let mut out = Vec::new();
     for row in rows {
         out.push(row?);
     }
     Ok(out)
+}
+
+/// First user message owned by a run; used by the queue view.
+pub fn message_for_run(conn: &Connection, run_id: i64) -> Result<Option<ChatMessage>, ToolError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {MESSAGE_COLUMNS} FROM messages
+         WHERE run_id = ?1 AND role = 'user' ORDER BY id ASC LIMIT 1"
+    ))?;
+    let row = stmt
+        .query_row(params![run_id], row_to_message)
+        .optional()?;
+    Ok(row)
 }
 
 /// 批量追加消息，并推进会话的 updated_at。
@@ -236,61 +274,10 @@ pub fn append(
     let conn = vfs.conn();
     ensure_exists(conn, conversation_id)?;
     let at = now(conn)?;
-    // 先整批校验，避免事务中途失败留下部分消息。
-    for item in &items {
-        validate_role(&item.role)?;
-        if item.content.len() > MAX_MESSAGE_BYTES {
-            return Err(ToolError::invalid("单条消息超过 1MB 上限"));
-        }
-        if let Some(calls) = &item.tool_calls {
-            if calls.len() > MAX_MESSAGE_BYTES {
-                return Err(ToolError::invalid("工具调用记录过大"));
-            }
-        }
-    }
-    // 整批插入 + updated_at 推进放在同一事务里，失败即整体回滚。
     let tx = conn.unchecked_transaction()?;
     let mut inserted = Vec::new();
     for item in items {
-        tx.execute(
-            "INSERT INTO messages
-                 (conversation_id, role, content, tool_calls, tool_call_id, tool_name, is_error,
-                  usage_input, usage_output, usage_total, usage_cache_read, usage_cache_write,
-                  thinking, thinking_signature, image_asset_ids, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-            params![
-                conversation_id,
-                item.role,
-                item.content,
-                item.tool_calls,
-                item.tool_call_id,
-                item.tool_name,
-                if item.is_error { 1 } else { 0 },
-                item.usage.map(|usage| usage.input),
-                item.usage.map(|usage| usage.output),
-                item.usage.map(|usage| usage.total_tokens),
-                item.usage.map(|usage| usage.cache_read),
-                item.usage.map(|usage| usage.cache_write),
-                item.thinking,
-                item.thinking_signature,
-                item.image_asset_ids,
-                at
-            ],
-        )?;
-        inserted.push(ChatMessage {
-            id: tx.last_insert_rowid(),
-            role: item.role,
-            content: item.content,
-            tool_calls: item.tool_calls,
-            tool_call_id: item.tool_call_id,
-            tool_name: item.tool_name,
-            is_error: item.is_error,
-            usage: item.usage,
-            thinking: item.thinking,
-            thinking_signature: item.thinking_signature,
-            image_asset_ids: item.image_asset_ids,
-            created_at: at.clone(),
-        });
+        inserted.push(insert_message(&tx, conversation_id, item, &at)?);
     }
     tx.execute(
         "UPDATE conversations SET updated_at = ?1 WHERE id = ?2",
@@ -298,6 +285,77 @@ pub fn append(
     )?;
     tx.commit()?;
     Ok(inserted)
+}
+
+/// Validate and insert one message. Shared by `append` and the run ledger.
+pub fn insert_message(
+    tx: &Connection,
+    conversation_id: i64,
+    item: NewMessage,
+    at: &str,
+) -> Result<ChatMessage, ToolError> {
+    validate_role(&item.role)?;
+    if item.content.len() > MAX_MESSAGE_BYTES {
+        return Err(ToolError::invalid("单条消息超过 1MB 上限"));
+    }
+    if let Some(calls) = &item.tool_calls {
+        if calls.len() > MAX_MESSAGE_BYTES {
+            return Err(ToolError::invalid("工具调用记录过大"));
+        }
+    }
+    tx.execute(
+        "INSERT INTO messages
+             (conversation_id, role, content, tool_calls, tool_call_id, tool_name, is_error,
+              usage_input, usage_output, usage_total, usage_cache_read, usage_cache_write,
+              thinking, thinking_signature, image_asset_ids, run_id, tool_args,
+              tool_duration_ms, is_partial, stop_reason, steer_of_run, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                 ?17, ?18, ?19, ?20, ?21, ?22)",
+        params![
+            conversation_id,
+            item.role,
+            item.content,
+            item.tool_calls,
+            item.tool_call_id,
+            item.tool_name,
+            if item.is_error { 1 } else { 0 },
+            item.usage.map(|usage| usage.input),
+            item.usage.map(|usage| usage.output),
+            item.usage.map(|usage| usage.total_tokens),
+            item.usage.map(|usage| usage.cache_read),
+            item.usage.map(|usage| usage.cache_write),
+            item.thinking,
+            item.thinking_signature,
+            item.image_asset_ids,
+            item.run_id,
+            item.tool_args,
+            item.tool_duration_ms,
+            if item.is_partial { 1 } else { 0 },
+            item.stop_reason,
+            item.steer_of_run,
+            at
+        ],
+    )?;
+    Ok(ChatMessage {
+        id: tx.last_insert_rowid(),
+        role: item.role,
+        content: item.content,
+        tool_calls: item.tool_calls,
+        tool_call_id: item.tool_call_id,
+        tool_name: item.tool_name,
+        is_error: item.is_error,
+        usage: item.usage,
+        thinking: item.thinking,
+        thinking_signature: item.thinking_signature,
+        image_asset_ids: item.image_asset_ids,
+        run_id: item.run_id,
+        tool_args: item.tool_args,
+        tool_duration_ms: item.tool_duration_ms,
+        is_partial: item.is_partial,
+        stop_reason: item.stop_reason,
+        steer_of_run: item.steer_of_run,
+        created_at: at.to_string(),
+    })
 }
 
 fn ensure_exists(conn: &Connection, id: i64) -> Result<(), ToolError> {
@@ -358,6 +416,12 @@ fn row_to_message(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
         thinking: r.get(13)?,
         thinking_signature: r.get(14)?,
         image_asset_ids: r.get(15)?,
+        run_id: r.get(16)?,
+        tool_args: r.get(17)?,
+        tool_duration_ms: r.get(18)?,
+        is_partial: r.get::<_, Option<i64>>(19)?.unwrap_or(0) != 0,
+        stop_reason: r.get(20)?,
+        steer_of_run: r.get(21)?,
         created_at: r.get(7)?,
     })
 }

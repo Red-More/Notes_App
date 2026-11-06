@@ -6,7 +6,16 @@ import type { AssistantMessage } from '@earendil-works/pi-ai'
 import type { StreamFn } from '@earendil-works/pi-agent-core'
 import { AgentRuntime, type AgentRuntimeDeps, type RuntimeSnapshot } from './AgentRuntime'
 import type { Bubble } from './chatView'
-import type { ChatConversation, ChatMessageRecord, NewChatMessage } from '../types'
+import type {
+  AgentRun,
+  AgentRunState,
+  AgentRunStart,
+  AgentRunStatus,
+  AgentRunTrigger,
+  ChatConversation,
+  ChatMessageRecord,
+  NewChatMessage,
+} from '../types'
 
 const profile = {
   provider: 'test',
@@ -36,38 +45,98 @@ function assistantMessage(text = ''): AssistantMessage {
   } as AssistantMessage
 }
 
-/** In-memory stand-in for SQLite plus the other runtime dependencies. */
+interface FinishCall {
+  runId: number
+  status: AgentRunStatus
+  partial: string | null
+  errorCode: string | null
+  stepCount: number
+  writeCount: number
+}
+
+/** In-memory stand-in for SQLite, including the run ledger. */
 function memoryDeps(conversation: ChatConversation) {
   const rows = new Map<number, ChatMessageRecord[]>()
   const writes: { conversationId: number; messages: NewChatMessage[] }[] = []
+  const runs: AgentRun[] = []
+  const finishes: FinishCall[] = []
+  const transitions: { runId: number; status: AgentRunStatus }[] = []
+  const truncates: { conversationId: number; messageId: number }[] = []
   let nextId = 1
+  let nextRunId = 1
+  const stamp = () => new Date().toISOString()
+
+  const insert = (conversationId: number, message: NewChatMessage): ChatMessageRecord => {
+    const list = rows.get(conversationId) ?? []
+    const record: ChatMessageRecord = {
+      id: nextId++,
+      role: message.role,
+      content: message.content,
+      toolCalls: message.toolCalls ?? null,
+      toolCallId: message.toolCallId ?? null,
+      toolName: message.toolName ?? null,
+      isError: message.isError ?? false,
+      usage: message.usage ?? null,
+      thinking: message.thinking ?? null,
+      thinkingSignature: message.thinkingSignature ?? null,
+      imageAssetIds: message.imageAssetIds ?? null,
+      runId: message.runId ?? null,
+      toolArgs: message.toolArgs ?? null,
+      toolDurationMs: message.toolDurationMs ?? null,
+      isPartial: message.isPartial ?? false,
+      stopReason: message.stopReason ?? null,
+      steerOfRun: message.steerOfRun ?? null,
+      createdAt: stamp(),
+    }
+    rows.set(conversationId, [...list, record])
+    return record
+  }
+
+  const executing = (conversationId: number) =>
+    runs.some(
+      (run) =>
+        run.conversationId === conversationId &&
+        (run.status === 'running' || run.status === 'cancelling'),
+    )
+
+  const startRun = async (
+    conversationId: number,
+    trigger: AgentRunTrigger,
+    modelEntry: string,
+    message?: NewChatMessage | null,
+  ): Promise<AgentRunStart> => {
+    const complete = [...(rows.get(conversationId) ?? [])].reverse().find((item) => !item.isPartial)
+    const run: AgentRun = {
+      runId: nextRunId++,
+      conversationId,
+      status: executing(conversationId) ? 'queued' : 'running',
+      trigger,
+      modelEntry,
+      stepCount: 0,
+      writeCount: 0,
+      lastSeq: 0,
+      partial: null,
+      errorCode: null,
+      resumeFromMessageId: trigger === 'resume' ? (complete?.id ?? null) : null,
+      createdAt: stamp(),
+      updatedAt: stamp(),
+      endedAt: null,
+    }
+    runs.push(run)
+    const record = message ? insert(conversationId, { ...message, runId: run.runId }) : null
+    return { run: { ...run }, message: record }
+  }
 
   const deps: AgentRuntimeDeps = {
     loadMessages: async (conversationId) => [...(rows.get(conversationId) ?? [])],
     loadImages: async () => new Map(),
     append: async (conversationId, messages) => {
       writes.push({ conversationId, messages })
-      const list = rows.get(conversationId) ?? []
-      for (const message of messages) {
-        list.push({
-          id: nextId++,
-          role: message.role,
-          content: message.content,
-          toolCalls: message.toolCalls ?? null,
-          toolCallId: message.toolCallId ?? null,
-          toolName: message.toolName ?? null,
-          isError: message.isError ?? false,
-          usage: message.usage ?? null,
-          thinking: message.thinking ?? null,
-          thinkingSignature: message.thinkingSignature ?? null,
-          imageAssetIds: message.imageAssetIds ?? null,
-          createdAt: new Date().toISOString(),
-        })
-      }
-      rows.set(conversationId, list)
-      return list
+      for (const message of messages) insert(conversationId, message)
+      return rows.get(conversationId) ?? []
     },
     truncate: async (conversationId, messageId) => {
+      truncates.push({ conversationId, messageId })
       const list = rows.get(conversationId) ?? []
       const index = list.findIndex((record) => record.id === messageId)
       if (index >= 0) rows.set(conversationId, list.slice(0, index + 1))
@@ -75,12 +144,64 @@ function memoryDeps(conversation: ChatConversation) {
     loadSkills: async () => [],
     loadMcpTools: async () => [],
     createConversation: async (title) => ({ ...conversation, id: 2, title }),
+    startRun,
+    resumeRun: (conversationId, modelEntry) =>
+      startRun(conversationId, 'resume', modelEntry, null),
+    transitionRun: async (runId, status) => {
+      const run = runs.find((item) => item.runId === runId)
+      if (!run) throw new Error(`run ${runId} not found`)
+      transitions.push({ runId, status })
+      run.status = status
+      run.updatedAt = stamp()
+      return { ...run }
+    },
+    finishRun: async (runId, status, data) => {
+      const run = runs.find((item) => item.runId === runId)
+      if (!run) throw new Error(`run ${runId} not found`)
+      finishes.push({ runId, status, ...data })
+      run.status = status
+      run.partial = data.partial
+      run.errorCode = data.errorCode
+      run.stepCount = data.stepCount
+      run.writeCount = data.writeCount
+      run.lastSeq = data.lastSeq
+      run.updatedAt = stamp()
+      run.endedAt = stamp()
+    },
+    touchRun: async (runId, stepCount, writeCount, lastSeq) => {
+      const run = runs.find((item) => item.runId === runId)
+      if (!run) return
+      run.stepCount = stepCount
+      run.writeCount = writeCount
+      run.lastSeq = lastSeq
+    },
+    loadRunState: async (conversationId): Promise<AgentRunState> => {
+      const list = runs.filter((run) => run.conversationId === conversationId)
+      const active =
+        [...list].reverse().find((run) => run.status === 'running' || run.status === 'cancelling') ??
+        null
+      const latest = list.length > 0 ? list[list.length - 1] : null
+      const queued = list
+        .filter((run) => run.status === 'queued')
+        .map((run) => ({
+          run: { ...run },
+          userMessage:
+            (rows.get(conversationId) ?? []).find(
+              (record) => record.role === 'user' && record.runId === run.runId,
+            ) ?? null,
+        }))
+      return {
+        active: active ? { ...active } : null,
+        latest: latest ? { ...latest } : null,
+        queued,
+      }
+    },
   }
 
   const assistantRows = (conversationId: number) =>
     (rows.get(conversationId) ?? []).filter((record) => record.role === 'assistant')
 
-  return { deps, rows, writes, assistantRows }
+  return { deps, rows, writes, runs, finishes, transitions, truncates, assistantRows }
 }
 
 function conversation(id = 1, title = '测试对话'): ChatConversation {
@@ -231,6 +352,11 @@ describe('AgentRuntime', () => {
     expect(rows).toHaveLength(1)
     expect(rows[0].content).toBe('半句')
     expect(store.writes.filter((write) => write.messages[0].role === 'assistant')).toHaveLength(1)
+
+    // The ledger keeps the partial snapshot for the "continue" banner.
+    const cancelled = store.finishes.filter((call) => call.status === 'cancelled')
+    expect(cancelled).toHaveLength(1)
+    expect(JSON.parse(cancelled[0].partial ?? '{}')).toEqual({ text: '半句' })
   })
 
   it('waits for the close-out write before disposing (page switch loses nothing)', async () => {
@@ -281,5 +407,67 @@ describe('AgentRuntime', () => {
     expect(replies[0].errorCode).toBe('rate_limited')
     expect(replies[0].text).toContain('请求过于频繁')
     expect(runtime.snapshot().error?.code).toBe('rate_limited')
+  })
+
+  it('persists a queued follow-up and restores it when the conversation reopens', async () => {
+    const { streamFn, runs } = controlledStreamFn()
+    const { runtime, store } = runtimeWith(streamFn)
+
+    await runtime.open(conversation(), profile)
+    const pending = runtime.prompt({ text: '第一问', attachments: [] })
+    await waitFor(() => runs.length === 1)
+    await waitFor(() => runtime.snapshot().items.some((item) => item.kind === 'assistant'))
+    runs[0].delta('半句', '半句')
+    await waitFor(() => (assistants(runtime.snapshot())[0]?.text ?? '').includes('半句'))
+
+    await runtime.followUp('第二问')
+    expect(runtime.snapshot().queued).toBe(1)
+    expect(store.runs.filter((run) => run.status === 'queued')).toHaveLength(1)
+    // The queued user message is written up front so re-entry can show it.
+    expect((store.rows.get(1) ?? []).filter((row) => row.role === 'user').map((row) => row.content))
+      .toEqual(['第一问', '第二问'])
+
+    await runtime.dispose()
+    await pending
+
+    // Page switch: the queue is read back from the ledger, not rebuilt in memory.
+    await runtime.open(conversation(), profile)
+    expect(runtime.snapshot().queued).toBe(1)
+    expect(
+      runtime.snapshot().items.filter((item) => item.kind === 'user').map((item) => item.text),
+    ).toEqual(['第一问', '第二问'])
+  })
+
+  it('starts a resume run from the user turn and drops the partial answer', async () => {
+    const { streamFn, runs } = controlledStreamFn()
+    const { runtime, store } = runtimeWith(streamFn)
+
+    await runtime.open(conversation(), profile)
+    const pending = runtime.prompt({ text: '写一段', attachments: [] })
+    await waitFor(() => runs.length === 1)
+    await waitFor(() => runtime.snapshot().items.some((item) => item.kind === 'assistant'))
+    runs[0].delta('半句', '半句')
+    await waitFor(() => (assistants(runtime.snapshot())[0]?.text ?? '').includes('半句'))
+    await runtime.dispose()
+    await pending
+
+    // Simulate the startup reconcile: an executor row becomes interrupted.
+    store.runs[0].status = 'interrupted'
+    await runtime.open(conversation(), profile)
+    expect(runtime.snapshot().interrupted?.runId).toBe(store.runs[0].runId)
+
+    const resumed = runtime.resume()
+    await waitFor(() => runs.length === 2)
+
+    const resumeRun = store.runs.find((run) => run.trigger === 'resume')
+    expect(resumeRun?.status).toBe('running')
+    const userRow = (store.rows.get(1) ?? []).find((row) => row.role === 'user')
+    expect(resumeRun?.resumeFromMessageId).toBe(userRow?.id)
+    expect(store.truncates.at(-1)).toEqual({ conversationId: 1, messageId: userRow?.id })
+
+    runs[1].finish('继续答')
+    await resumed
+    expect(store.finishes.some((call) => call.runId === resumeRun?.runId && call.status === 'succeeded'))
+      .toBe(true)
   })
 })

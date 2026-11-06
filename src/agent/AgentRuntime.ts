@@ -11,10 +11,16 @@ import type { Agent } from '@earendil-works/pi-agent-core'
 import type { AgentMessage, AgentEvent, StreamFn } from '@earendil-works/pi-agent-core'
 import type { ImageContent } from '@earendil-works/pi-ai'
 import type {
+  AgentRun,
+  AgentRunStart,
+  AgentRunState,
+  AgentRunStatus,
+  AgentRunTrigger,
   ChatConversation,
   ChatMessageRecord,
   McpToolInfo,
   NewChatMessage,
+  QueuedRun,
   SkillSummary,
 } from '../types'
 import { buildSkillsIndex } from './skills'
@@ -58,13 +64,40 @@ export interface AgentRuntimeDeps {
   loadSkills(): Promise<SkillSummary[]>
   loadMcpTools(): Promise<McpToolInfo[]>
   createConversation(title: string): Promise<ChatConversation>
+  /** Run ledger: the database is the queue, so re-entry never loses work. */
+  startRun(
+    conversationId: number,
+    trigger: AgentRunTrigger,
+    modelEntry: string,
+    message?: NewChatMessage | null,
+  ): Promise<AgentRunStart>
+  resumeRun(conversationId: number, modelEntry: string): Promise<AgentRunStart>
+  transitionRun(runId: number, status: AgentRunStatus): Promise<AgentRun>
+  finishRun(
+    runId: number,
+    status: AgentRunStatus,
+    data: {
+      partial: string | null
+      errorCode: string | null
+      stepCount: number
+      writeCount: number
+      lastSeq: number
+    },
+  ): Promise<unknown>
+  touchRun(runId: number, stepCount: number, writeCount: number, lastSeq: number): Promise<unknown>
+  loadRunState(conversationId: number): Promise<AgentRunState>
 }
 
 export interface RuntimeSnapshot {
   conversationId: number | null
   status: RuntimeStatus
+  /** Pending runs read from the ledger (survives page switches). */
   queued: number
   items: Item[]
+  /** Executing run, if any; re-entry can render its status. */
+  run: AgentRun | null
+  /** Last interrupted run, for the "continue" banner. */
+  interrupted: AgentRun | null
   /** Last failed/cancelled run; cleared when the next run starts. */
   error: ErrorInfo | null
   revision: number
@@ -114,7 +147,19 @@ export class AgentRuntime {
   private scheduled = false
 
   private writing: Promise<void> = Promise.resolve()
+  private runWriting: Promise<void> = Promise.resolve()
   private listeners = new Set<(snapshot: RuntimeSnapshot) => void>()
+
+  /** Ledger state mirrored in memory; the DB stays authoritative. */
+  private currentRun: AgentRun | null = null
+  private interrupted: AgentRun | null = null
+  private queue: QueuedRun[] = []
+  private runSteps = 0
+  private runWrites = 0
+  private cancelRequested = false
+  private pumping = false
+  /** Steering texts already written; their pi user events must not duplicate. */
+  private steering: { text: string; runId: number | null }[] = []
 
   constructor(options: AgentRuntimeOptions) {
     this.deps = options.deps
@@ -132,10 +177,25 @@ export class AgentRuntime {
     this.status = 'idle'
     this.lastError = null
     this.view = createView([])
+    this.currentRun = null
+    this.interrupted = null
+    this.queue = []
+    this.runSteps = 0
+    this.runWrites = 0
+    this.cancelRequested = false
+    this.steering = []
 
     const records = await this.deps.loadMessages(conversation.id)
     this.images = await this.deps.loadImages(records).catch(() => new Map())
     this.view = createView(projectHistory(records, this.images))
+    // Restore the ledger view: queued work and the interrupted banner survive
+    // page switches because they are read from SQLite, not memory.
+    const runState = await this.deps.loadRunState(conversation.id).catch(
+      () => ({ active: null, latest: null, queued: [] }) as AgentRunState,
+    )
+    this.currentRun = runState.active
+    this.queue = runState.queued
+    this.interrupted = runState.latest?.status === 'interrupted' ? runState.latest : null
 
     if (profile) {
       const skills = await this.deps.loadSkills().catch(() => [])
@@ -172,16 +232,91 @@ export class AgentRuntime {
     const conversation = this.conversation
     if (!agent || !conversation) throw new Error('会话尚未就绪')
     if (this.status !== 'idle') throw new Error('上一条回复尚未结束')
+    // The previous run may still be settling; a stale executor would make the
+    // new run look queued even though nothing is running.
+    await this.drainRunWrites()
 
     const text = input.text.trim()
     if (text === '' && input.attachments.length === 0) return
     const imageIds = input.attachments.map((file) => file.assetId)
     const dataUrls = input.attachments.map((file) => file.dataUrl)
 
+    // The ledger insert and the user message share one transaction.
+    const started = await this.deps.startRun(conversation.id, 'prompt', conversation.provider, {
+      role: 'user',
+      content: text,
+      imageAssetIds: imageIds.length > 0 ? JSON.stringify(imageIds) : null,
+    })
+    if (started.run.status !== 'running') {
+      this.queue.push({ run: started.run, userMessage: started.message })
+      this.addUserItem(started, text, imageIds, dataUrls)
+      this.emit()
+      return
+    }
+    this.beginRun(started)
+    this.addUserItem(started, text, imageIds, dataUrls)
+    this.emit()
+    await this.runTurn(text, input.attachments)
+  }
+
+  /** Inject guidance at the next turn boundary, persisted with its run marker. */
+  steer(text: string): void {
+    const message = text.trim()
+    const conversation = this.conversation
+    if (!message || !this.agent || !conversation) return
+    const runId = this.currentRun?.runId ?? null
+    // Record the text so its pi user event does not persist a second row.
+    this.steering.push({ text: message, runId })
+    this.enqueueWrite(conversation.id, [
+      { role: 'user', content: message, runId, steerOfRun: runId },
+    ])
+    this.agent.steer({ role: 'user', content: message, timestamp: Date.now() } as AgentMessage)
+    this.emit()
+  }
+
+  /** Queue a run; it starts when the current one reaches a terminal state. */
+  async followUp(text: string): Promise<void> {
+    const message = text.trim()
+    const conversation = this.conversation
+    if (!message || !conversation) return
+    const started = await this.deps.startRun(conversation.id, 'prompt', conversation.provider, {
+      role: 'user',
+      content: message,
+    })
+    if (started.run.status !== 'running') {
+      this.queue.push({ run: started.run, userMessage: started.message })
+      this.addUserItem(started, message, [], [])
+      this.emit()
+      return
+    }
+    // No executor was active, so the queued message starts immediately.
+    this.beginRun(started)
+    this.addUserItem(started, message, [], [])
+    this.emit()
+    await this.runTurn(message, [])
+  }
+
+  private beginRun(started: AgentRunStart): void {
+    this.currentRun = started.run
+    this.runSteps = 0
+    this.runWrites = 0
+    this.cancelRequested = false
     this.lastError = null
+    this.interrupted = null
     this.status = 'running'
     this.view = beginPrompt(this.view)
-    const generated = nextItemId(this.view, 'u')
+  }
+
+  /** Append the optimistic user bubble; its row id comes from the ledger insert. */
+  private addUserItem(
+    started: AgentRunStart,
+    text: string,
+    imageIds: number[],
+    dataUrls: string[],
+  ): void {
+    const generated = started.message
+      ? { view: this.view, id: `m-${started.message.id}` }
+      : nextItemId(this.view, 'u')
     this.view = {
       ...generated.view,
       items: [
@@ -195,17 +330,12 @@ export class AgentRuntime {
         },
       ],
     }
-    this.emit()
+  }
 
-    this.enqueueWrite(conversation.id, [
-      {
-        role: 'user',
-        content: text,
-        imageAssetIds: imageIds.length > 0 ? JSON.stringify(imageIds) : null,
-      },
-    ])
-
-    const images: ImageContent[] = input.attachments.map((file) => ({
+  private async runTurn(text: string, attachments: Attachment[]): Promise<void> {
+    const agent = this.agent
+    if (!agent) return
+    const images: ImageContent[] = attachments.map((file) => ({
       type: 'image',
       data: file.data,
       mimeType: file.mime,
@@ -216,28 +346,17 @@ export class AgentRuntime {
     } catch (error) {
       this.handleThrown(error)
     } finally {
-      // Event callbacks may already have settled the run; TS cannot see that.
-      if ((this.status as RuntimeStatus) !== 'idle') {
-        this.status = 'idle'
-        this.emit()
-      }
+      this.settleAfterRun()
     }
   }
 
-  /** Inject guidance at the next turn boundary. */
-  steer(text: string): void {
-    const message = text.trim()
-    if (!message || !this.agent) return
-    this.agent.steer({ role: 'user', content: message, timestamp: Date.now() } as AgentMessage)
-    this.emit()
-  }
-
-  /** Queue a message that starts after the current run finishes. */
-  followUp(text: string): void {
-    const message = text.trim()
-    if (!message || !this.agent) return
-    this.agent.followUp({ role: 'user', content: message, timestamp: Date.now() } as AgentMessage)
-    this.emit()
+  /** A thrown run has no `agent_end`; settle it as failed and clear the status. */
+  private settleAfterRun(): void {
+    if ((this.status as RuntimeStatus) !== 'idle') {
+      this.status = 'idle'
+      this.emit()
+    }
+    void this.settleRun('failed')
   }
 
   /**
@@ -246,13 +365,28 @@ export class AgentRuntime {
    */
   async cancel(): Promise<void> {
     const agent = this.agent
-    if (!agent || this.status === 'idle') return
+    if (!agent && !this.currentRun) return
+    this.cancelRequested = true
     this.status = 'cancelling'
-    // Drop queued guidance so stopping really stops the run.
-    agent.clearAllQueues()
-    agent.abort()
-    await agent.waitForIdle()
+    this.emit()
+    const runId = this.currentRun?.runId
+    if (runId !== undefined) {
+      try {
+        this.currentRun = await this.deps.transitionRun(runId, 'cancelling')
+      } catch (error) {
+        console.error('标记运行取消失败', error)
+      }
+    }
+    if (agent) {
+      // Drop in-loop guidance so stopping really stops the run.
+      agent.clearAllQueues()
+      agent.abort()
+      await agent.waitForIdle()
+    }
     await this.drain()
+    await this.settleRun('cancelled')
+    await this.cancelQueued()
+    await this.drainRunWrites()
     this.status = 'idle'
     this.emit()
   }
@@ -262,6 +396,7 @@ export class AgentRuntime {
     const conversation = this.conversation
     const profile = this.profile
     if (!conversation || !profile || this.status !== 'idle') throw new Error('会话尚未就绪')
+    await this.drainRunWrites()
 
     const records = await this.deps.loadMessages(conversation.id)
     const match = /^m-(\d+)$/.exec(messageKey)
@@ -273,6 +408,23 @@ export class AgentRuntime {
     let userIndex = target - 1
     while (userIndex >= 0 && records[userIndex].role !== 'user') userIndex -= 1
     if (userIndex < 0) throw new Error('没有可重试的回答')
+
+    const started = await this.deps.startRun(conversation.id, 'retry', profile.provider, null)
+    if (started.run.status !== 'running') {
+      await this.deps.finishRun(started.run.runId, 'cancelled', {
+        partial: null,
+        errorCode: 'cancelled',
+        stepCount: 0,
+        writeCount: 0,
+        lastSeq: 0,
+      })
+      throw new Error('上一条回复尚未结束')
+    }
+    this.currentRun = started.run
+    this.runSteps = 0
+    this.runWrites = 0
+    this.cancelRequested = false
+    this.interrupted = null
 
     await this.drain()
     await this.deps.truncate(conversation.id, records[userIndex].id)
@@ -296,11 +448,62 @@ export class AgentRuntime {
     } catch (error) {
       this.handleThrown(error)
     } finally {
-      // Event callbacks may already have settled the run; TS cannot see that.
-      if ((this.status as RuntimeStatus) !== 'idle') {
-        this.status = 'idle'
-        this.emit()
-      }
+      this.settleAfterRun()
+    }
+  }
+
+  /**
+   * Start a `resume` run after an interruption. The partial answer is dropped
+   * and the model continues from the user turn; nothing auto-sends on startup.
+   */
+  async resume(): Promise<void> {
+    const conversation = this.conversation
+    const profile = this.profile
+    if (!conversation || !profile || this.status !== 'idle') throw new Error('会话尚未就绪')
+    await this.drainRunWrites()
+
+    const started = await this.deps.resumeRun(conversation.id, profile.provider)
+    if (started.run.status !== 'running') {
+      await this.deps.finishRun(started.run.runId, 'cancelled', {
+        partial: null,
+        errorCode: 'cancelled',
+        stepCount: 0,
+        writeCount: 0,
+        lastSeq: 0,
+      })
+      throw new Error('上一条回复尚未结束')
+    }
+    this.currentRun = started.run
+    this.runSteps = 0
+    this.runWrites = 0
+    this.cancelRequested = false
+    this.lastError = null
+    this.interrupted = null
+
+    await this.drain()
+    const resumeFrom = started.run.resumeFromMessageId
+    if (resumeFrom !== null) await this.deps.truncate(conversation.id, resumeFrom)
+    const records = await this.deps.loadMessages(conversation.id)
+    this.images = await this.deps.loadImages(records).catch(() => new Map())
+
+    this.teardownAgent()
+    this.view = createView(projectHistory(records, this.images))
+    this.view.settled = false
+    this.status = 'running'
+    this.emit()
+
+    try {
+      const skills = await this.deps.loadSkills().catch(() => [])
+      const mcpTools = await this.deps.loadMcpTools().catch(() => [])
+      this.skillsIndex = buildSkillsIndex(skills)
+      const agent = await this.buildAgent(profile, records, skills, mcpTools)
+      this.unsubscribe = agent.subscribe((event) => this.onEvent(event))
+      this.agent = agent
+      await agent.continue()
+    } catch (error) {
+      this.handleThrown(error)
+    } finally {
+      this.settleAfterRun()
     }
   }
 
@@ -337,6 +540,10 @@ export class AgentRuntime {
           thinking: record.thinking,
           thinkingSignature: record.thinkingSignature,
           imageAssetIds: record.imageAssetIds,
+          toolArgs: record.toolArgs,
+          toolDurationMs: record.toolDurationMs,
+          isPartial: record.isPartial,
+          stopReason: record.stopReason,
         })),
       )
     }
@@ -353,15 +560,27 @@ export class AgentRuntime {
     const agent = this.agent
     if (!agent) {
       await this.drain()
+      await this.drainRunWrites()
       return
     }
     if (this.status !== 'idle') {
+      this.cancelRequested = true
       this.status = 'cancelling'
+      const runId = this.currentRun?.runId
+      if (runId !== undefined) {
+        try {
+          this.currentRun = await this.deps.transitionRun(runId, 'cancelling')
+        } catch (error) {
+          console.error('标记运行取消失败', error)
+        }
+      }
       agent.clearAllQueues()
       agent.abort()
       await agent.waitForIdle()
     }
     await this.drain()
+    await this.settleRun('cancelled')
+    await this.drainRunWrites()
     this.teardownAgent()
     this.status = 'idle'
     this.view = createView([])
@@ -386,18 +605,12 @@ export class AgentRuntime {
     return {
       conversationId: this.conversation?.id ?? null,
       status: this.status,
-      queued: this.queuedCount(),
+      queued: this.queue.length,
       items: this.view.items,
+      run: this.currentRun,
+      interrupted: this.interrupted,
       error: this.lastError,
       revision: this.revision,
-    }
-  }
-
-  private queuedCount(): number {
-    try {
-      return this.agent?.peekQueuedMessages().length ?? 0
-    } catch {
-      return 0
     }
   }
 
@@ -425,9 +638,17 @@ export class AgentRuntime {
       return
     }
     if (event.type === 'agent_end') {
+      const cancelled = this.cancelRequested
+      this.cancelRequested = false
       this.status = 'idle'
-      this.lastError = this.pickError()
+      this.lastError = cancelled ? null : this.pickError()
       this.emit()
+      // Settle the ledger row, then start the next queued run if any.
+      void this.settleRun(
+        cancelled ? 'cancelled' : this.lastError !== null ? 'failed' : 'succeeded',
+      ).then(() => {
+        if (!cancelled) void this.pumpQueue()
+      })
       return
     }
     if (event.type === 'message_end') {
@@ -443,7 +664,16 @@ export class AgentRuntime {
       this.emit()
       return
     }
+    if (event.type === 'tool_execution_start') {
+      this.runSteps += 1
+      this.emit()
+      return
+    }
     if (event.type === 'tool_execution_end') {
+      if (!event.isError && ['fs_write', 'fs_edit'].includes(event.toolName)) {
+        this.runWrites += 1
+      }
+      void this.touchRun()
       this.emit()
       return
     }
@@ -490,6 +720,9 @@ export class AgentRuntime {
             usage: effect.usage,
             thinking: effect.thinking,
             thinkingSignature: effect.thinkingSignature,
+            runId: this.currentRun?.runId ?? null,
+            stopReason: effect.stopReason,
+            isPartial: effect.isPartial,
           },
         ])
         return
@@ -502,12 +735,23 @@ export class AgentRuntime {
             toolCallId: effect.toolCallId,
             toolName: effect.toolName,
             isError: effect.isError,
+            toolArgs: effect.args || null,
+            toolDurationMs: effect.durationMs ?? null,
+            runId: this.currentRun?.runId ?? null,
           },
         ])
         return
       }
       case 'persist-user': {
-        this.enqueueWrite(conversationId, [{ role: 'user', content: effect.text }])
+        // Steering was written up front; its pi event must not duplicate it.
+        const steerIndex = this.steering.findIndex((item) => item.text === effect.text)
+        if (steerIndex >= 0) {
+          this.steering.splice(steerIndex, 1)
+          return
+        }
+        this.enqueueWrite(conversationId, [
+          { role: 'user', content: effect.text, runId: this.currentRun?.runId ?? null },
+        ])
         return
       }
       default:
@@ -529,6 +773,116 @@ export class AgentRuntime {
   /** Resolve once every queued write has settled. */
   private drain(): Promise<void> {
     return this.writing
+  }
+
+  // ---------------------------------------------------------------- run ledger
+
+  private enqueueRunWrite(task: () => Promise<unknown>): void {
+    this.runWriting = this.runWriting.then(
+      () => task().then(() => undefined),
+      () => task().then(() => undefined),
+    )
+    this.runWriting = this.runWriting.catch((error) => {
+      console.error('保存运行状态失败', error)
+    })
+  }
+
+  private drainRunWrites(): Promise<void> {
+    return this.runWriting
+  }
+
+  /** Close the ledger row exactly once; later calls are no-ops. */
+  private settleRun(status: 'succeeded' | 'failed' | 'cancelled'): Promise<void> {
+    const run = this.currentRun
+    if (!run) return Promise.resolve()
+    this.currentRun = null
+    // Cancelled or failed runs keep whatever text was already shown.
+    const partial = status === 'succeeded' ? null : this.lastPartialText()
+    const payload = partial !== null ? JSON.stringify({ text: partial }) : null
+    const errorCode = status === 'cancelled' ? 'cancelled' : (this.lastError?.code ?? null)
+    this.enqueueRunWrite(() =>
+      this.deps.finishRun(run.runId, status, {
+        partial: payload,
+        errorCode,
+        stepCount: this.runSteps,
+        writeCount: this.runWrites,
+        lastSeq: this.revision,
+      }),
+    )
+    return this.runWriting
+  }
+
+  /** Text already shown in the current (now closed) assistant bubble. */
+  private lastPartialText(): string | null {
+    for (let i = this.view.items.length - 1; i >= 0; i -= 1) {
+      const item = this.view.items[i]
+      // Never reach into a previous turn for the snapshot.
+      if (item.kind === 'user') return null
+      if (item.kind !== 'assistant') continue
+      // An error notice is not saved answer text; a cancelled bubble is.
+      if (item.isError && !item.cancelled) return null
+      return item.text.trim() === '' ? null : item.text
+    }
+    return null
+  }
+
+  private touchRun(): Promise<void> {
+    const run = this.currentRun
+    if (!run) return Promise.resolve()
+    this.enqueueRunWrite(() =>
+      this.deps.touchRun(run.runId, this.runSteps, this.runWrites, this.revision),
+    )
+    return this.runWriting
+  }
+
+  /** Cancelling a run also cancels everything waiting behind it. */
+  private async cancelQueued(): Promise<void> {
+    const queued = [...this.queue]
+    this.queue = []
+    this.emit()
+    for (const item of queued) {
+      this.enqueueRunWrite(() =>
+        this.deps.finishRun(item.run.runId, 'cancelled', {
+          partial: null,
+          errorCode: 'cancelled',
+          stepCount: 0,
+          writeCount: 0,
+          lastSeq: 0,
+        }),
+      )
+    }
+    await this.drainRunWrites()
+  }
+
+  /** Start the oldest queued run after the previous one reached a terminal state. */
+  private async pumpQueue(): Promise<void> {
+    if (this.pumping || this.status !== 'idle' || !this.agent || this.queue.length === 0) return
+    const next = this.queue[0]
+    const text = next.userMessage?.content ?? ''
+    if (text.trim() === '') {
+      this.queue.shift()
+      this.emit()
+      return
+    }
+    this.pumping = true
+    try {
+      const run = await this.deps.transitionRun(next.run.runId, 'running')
+      this.queue.shift()
+      this.currentRun = run
+      this.runSteps = 0
+      this.runWrites = 0
+      this.cancelRequested = false
+      this.lastError = null
+      this.interrupted = null
+      this.view = beginPrompt(this.view)
+      this.status = 'running'
+      this.emit()
+      await this.runTurn(text, [])
+    } finally {
+      this.pumping = false
+      this.settleAfterRun()
+      void this.pumpQueue()
+    }
   }
 
   /** A run that throws before any terminal event still leaves a visible bubble. */
@@ -558,7 +912,13 @@ export class AgentRuntime {
     const conversationId = this.conversation?.id
     if (conversationId) {
       this.enqueueWrite(conversationId, [
-        { role: 'assistant', content: errorText(info), isError: true },
+        {
+          role: 'assistant',
+          content: errorText(info),
+          isError: true,
+          runId: this.currentRun?.runId ?? null,
+          stopReason: 'error',
+        },
       ])
     }
     this.emit()

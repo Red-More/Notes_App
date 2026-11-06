@@ -16,7 +16,7 @@ use crate::agent::model_store::{
     self, AgentSettings, ApiFormat, ModelEntry, ModelInput, ModelKind, ModelView,
 };
 use crate::agent::params::{self, LlmParams};
-use crate::agent::{conversations, discovery, llm, AgentState};
+use crate::agent::{conversations, discovery, llm, runs, AgentState};
 use crate::privacy;
 use crate::vfs::error::ToolError;
 use crate::vfs::VfsState;
@@ -84,6 +84,90 @@ pub fn chat_truncate(
 ) -> Result<usize, ToolError> {
     let vfs = crate::lock(&state.0);
     conversations::truncate_after(&vfs, conversation_id, message_id)
+}
+
+/// Start a run and persist its user message in one transaction.
+#[tauri::command]
+pub fn chat_run_start(
+    state: State<'_, VfsState>,
+    conversation_id: i64,
+    trigger: String,
+    model_entry: String,
+    message: Option<conversations::NewMessage>,
+) -> Result<runs::RunStart, ToolError> {
+    let vfs = crate::lock(&state.0);
+    runs::start(&vfs, conversation_id, &trigger, &model_entry, message)
+}
+
+/// Move a run between non-terminal states; illegal transitions are rejected.
+#[tauri::command]
+pub fn chat_run_transition(
+    state: State<'_, VfsState>,
+    run_id: i64,
+    status: String,
+) -> Result<runs::AgentRun, ToolError> {
+    let vfs = crate::lock(&state.0);
+    runs::transition(&vfs, run_id, &status)
+}
+
+/// Finish a run, storing the partial snapshot and progress counters.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn chat_run_finish(
+    state: State<'_, VfsState>,
+    run_id: i64,
+    status: String,
+    partial: Option<String>,
+    error_code: Option<String>,
+    step_count: i64,
+    write_count: i64,
+    last_seq: i64,
+) -> Result<runs::AgentRun, ToolError> {
+    let vfs = crate::lock(&state.0);
+    runs::finish(
+        &vfs,
+        run_id,
+        &status,
+        partial,
+        error_code,
+        step_count,
+        write_count,
+        last_seq,
+    )
+}
+
+/// Refresh progress counters without changing the run status.
+#[tauri::command]
+pub fn chat_run_touch(
+    state: State<'_, VfsState>,
+    run_id: i64,
+    step_count: i64,
+    write_count: i64,
+    last_seq: i64,
+) -> Result<(), ToolError> {
+    let vfs = crate::lock(&state.0);
+    runs::touch(&vfs, run_id, step_count, write_count, last_seq)
+}
+
+/// Active executor, latest run and pending queue for a conversation.
+#[tauri::command]
+pub fn chat_run_state(
+    state: State<'_, VfsState>,
+    conversation_id: i64,
+) -> Result<runs::RunState, ToolError> {
+    let vfs = crate::lock(&state.0);
+    runs::state(&vfs, conversation_id)
+}
+
+/// Create a `resume` run; the caller decides whether to send the request.
+#[tauri::command]
+pub fn chat_run_resume(
+    state: State<'_, VfsState>,
+    conversation_id: i64,
+    model_entry: String,
+) -> Result<runs::RunStart, ToolError> {
+    let vfs = crate::lock(&state.0);
+    runs::start(&vfs, conversation_id, "resume", &model_entry, None)
 }
 
 fn key_status(

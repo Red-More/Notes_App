@@ -1,7 +1,8 @@
 //! Single source of truth for the `life.db` schema.
 //!
 //! This module no longer carries incremental migrations. A fresh database is
-//! created in one transaction (`create`) and stamped with `user_version = 1`.
+//! created in one transaction (`create`) and stamped with `user_version =
+//! SCHEMA_VERSION`.
 //! Opening an older or unexpected database is handled one layer up: `db::init`
 //! closes it, deletes the file (plus `-wal` / `-shm`) and lets `create` build
 //! the schema again. See `db/mod.rs`.
@@ -14,7 +15,7 @@
 use rusqlite::{params, Connection};
 
 /// Version stamped on databases created by this module.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Virtual file system root, kept in sync with `vfs::cap_gate::ROOT`.
 const ROOT: &str = "/life";
@@ -195,9 +196,41 @@ CREATE TABLE messages (
     thinking           TEXT,
     thinking_signature TEXT,
     image_asset_ids    TEXT,                  -- JSON array of asset ids
+    run_id             INTEGER,               -- agent run that produced/owns this row
+    tool_args          TEXT,                  -- JSON arguments for tool rows
+    tool_duration_ms   INTEGER,               -- wall-clock tool duration
+    is_partial         INTEGER,              -- 1 when the answer was cut short
+    stop_reason        TEXT,                  -- stop | aborted | error
+    steer_of_run       INTEGER,               -- non-null marks a steering message
     FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 );
 CREATE INDEX idx_messages_conversation ON messages(conversation_id, id);
+CREATE INDEX idx_messages_run ON messages(run_id);
+
+-- Agent run ledger: one row per prompt/steer/resume/retry attempt. The unique
+-- partial index allows many queued rows but only one executor per conversation.
+CREATE TABLE agent_runs (
+    run_id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id        INTEGER NOT NULL,
+    status                 TEXT NOT NULL
+                           CHECK (status IN ('queued', 'running', 'cancelling',
+                                             'succeeded', 'failed', 'cancelled', 'interrupted')),
+    trigger                TEXT NOT NULL CHECK (trigger IN ('prompt', 'steer', 'resume', 'retry')),
+    model_entry            TEXT NOT NULL DEFAULT '',
+    step_count             INTEGER NOT NULL DEFAULT 0,
+    write_count            INTEGER NOT NULL DEFAULT 0,
+    last_seq               INTEGER NOT NULL DEFAULT 0,
+    partial                TEXT,              -- JSON {text} snapshot on cancel/failure
+    error_code             TEXT,
+    resume_from_message_id INTEGER,
+    created_at             TEXT NOT NULL,
+    updated_at             TEXT NOT NULL,
+    ended_at               TEXT,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX idx_agent_runs_executing
+    ON agent_runs(conversation_id) WHERE status IN ('running', 'cancelling');
+CREATE INDEX idx_agent_runs_conversation ON agent_runs(conversation_id, run_id DESC);
 
 -- Non-secret settings only; API keys live in the Rust secret store.
 CREATE TABLE settings (

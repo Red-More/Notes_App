@@ -66,6 +66,12 @@ function record(partial: Partial<ChatMessageRecord> & { id: number }): ChatMessa
     thinking: null,
     thinkingSignature: null,
     imageAssetIds: null,
+    runId: null,
+    toolArgs: null,
+    toolDurationMs: null,
+    isPartial: false,
+    stopReason: null,
+    steerOfRun: null,
     createdAt: '2026-01-01 00:00:00',
   }
   return { ...base, ...partial }
@@ -152,5 +158,25 @@ describe('history projection', () => {
     expect(items[0].kind === 'user' && items[0].images).toEqual(['data:image/jpeg;base64,AAAA'])
     expect(items[1].kind === 'assistant' && items[1].text).toBe('这是图')
     expect(items[2].kind === 'tool' && items[2].status).toBe('done')
+  })
+
+  it('restores tool arguments and duration from persisted rows', () => {
+    const records: ChatMessageRecord[] = [
+      record({ id: 1, role: 'user', content: '改文件' }),
+      record({
+        id: 2,
+        role: 'tool',
+        content: '已写入',
+        toolName: 'fs_write',
+        toolArgs: '{"path":"/life/a.md"}',
+        toolDurationMs: 1200,
+      }),
+      record({ id: 3, role: 'assistant', content: '改好了' }),
+    ]
+
+    const items = project({ records, images: new Map(), events: [] })
+    const card = items.find((item) => item.kind === 'tool')
+    expect(card?.kind === 'tool' && card.args).toBe('{"path":"/life/a.md"}')
+    expect(card?.kind === 'tool' && card.durationMs).toBe(1200)
   })
 })

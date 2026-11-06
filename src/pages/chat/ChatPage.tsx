@@ -9,8 +9,13 @@ import type { AgentProfile } from '../../agent/runtime'
 import { profileFromSettings } from '../../agent/runtime'
 import { AgentRuntime, type Attachment } from '../../agent/AgentRuntime'
 import { createRuntimeDeps } from '../../agent/runtimeDeps'
-import { documentPath, type Item, type ToolCard } from '../../agent/chatView'
-import type { AgentSettings, ChatConversation, MessageUsage } from '../../types'
+import { documentPath, partialLength, type Item, type ToolCard } from '../../agent/chatView'
+import type {
+  AgentRun,
+  AgentSettings,
+  ChatConversation,
+  MessageUsage,
+} from '../../types'
 import { friendlyError, normalizeImage } from '../../utils'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { readFile } from '@tauri-apps/plugin-fs'
@@ -206,6 +211,8 @@ export default function ChatPage({ isActive }: Props) {
   // While a run is active, the composer enqueues instead of prompting.
   const [queueMode, setQueueMode] = useState<'steer' | 'followUp'>('steer')
   const [queuedCount, setQueuedCount] = useState(0)
+  // Last interrupted run, restored from the ledger after a restart.
+  const [interrupted, setInterrupted] = useState<AgentRun | null>(null)
   const [docPreview, setDocPreview] = useState<DocPreview | null>(null)
   const [online, setOnline] = useState(() => navigator.onLine)
   // Set after a network-looking failure; WebView's online flag is unreliable.
@@ -261,6 +268,7 @@ export default function ChatPage({ isActive }: Props) {
         setItems(snapshot.items)
         setStreaming(snapshot.status !== 'idle')
         setQueuedCount(snapshot.queued)
+        setInterrupted(snapshot.interrupted)
         if (snapshot.error) {
           setNetworkIssue(
             snapshot.error.code === 'network' ||
@@ -406,7 +414,7 @@ export default function ChatPage({ isActive }: Props) {
     const text = input.trim()
     if (!streaming || text === '') return
     if (queueMode === 'steer') runtime.steer(text)
-    else runtime.followUp(text)
+    else void runtime.followUp(text)
     setInput('')
     toast(queueMode === 'steer' ? '已追加，当前回复结束后生效' : '已排队，本轮结束后执行')
   }, [input, queueMode, runtime, streaming])
@@ -484,6 +492,12 @@ export default function ChatPage({ isActive }: Props) {
   const jumpToItem = useCallback((id: string) => {
     rowRefs.current.get(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }, [])
+
+  /** Continue an interrupted run: starts a `resume` ledger row, then asks. */
+  const resumeRun = useCallback(() => {
+    if (streaming) return
+    void runtime.resume().catch((error) => toast(friendlyError(error)))
+  }, [runtime, streaming])
 
   /** Fork the conversation up to the user turn that produced this reply. */
   const forkConversation = useCallback(
@@ -804,6 +818,13 @@ export default function ChatPage({ isActive }: Props) {
       )}
 
       <div className="chat-composer">
+        {interrupted && !streaming && (
+          <button type="button" className="chat-resume" onClick={resumeRun}>
+            上次回答中断
+            {interrupted.partial ? `（已保存 ${partialLength(interrupted.partial)} 字）` : ''}
+            ，点击继续
+          </button>
+        )}
         {attachments.length > 0 && (
           <div className="chat-attachments">
             {attachments.map((file) => (

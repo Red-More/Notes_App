@@ -1,6 +1,11 @@
 import { Channel, invoke } from '@tauri-apps/api/core'
 import type {
   AgentModelInfo,
+  AgentRun,
+  AgentRunStart,
+  AgentRunState,
+  AgentRunStatus,
+  AgentRunTrigger,
   AgentSettings,
   ChatConversation,
   ChatMessageRecord,
@@ -578,6 +583,34 @@ export const chatApi = {
   /** Remove messages newer than `messageId`; retry continues from the kept user turn. */
   truncate: (params: { conversationId: number; messageId: number }) =>
     invoke<number>('chat_truncate', params),
+  /** Write the run row and its user message in one transaction. */
+  runStart: (params: {
+    conversationId: number
+    trigger: AgentRunTrigger
+    modelEntry: string
+    message?: NewChatMessage | null
+  }) => invoke<AgentRunStart>('chat_run_start', params),
+  runTransition: (params: { runId: number; status: AgentRunStatus }) =>
+    invoke<AgentRun>('chat_run_transition', params),
+  runFinish: (params: {
+    runId: number
+    status: AgentRunStatus
+    partial?: string | null
+    errorCode?: string | null
+    stepCount?: number
+    writeCount?: number
+    lastSeq?: number
+  }) => invoke<AgentRun>('chat_run_finish', params),
+  runTouch: (params: {
+    runId: number
+    stepCount: number
+    writeCount: number
+    lastSeq: number
+  }) => invoke<void>('chat_run_touch', params),
+  runState: (conversationId: number) =>
+    invoke<AgentRunState>('chat_run_state', { conversationId }),
+  runResume: (params: { conversationId: number; modelEntry: string }) =>
+    invoke<AgentRunStart>('chat_run_resume', params),
   settings: () => invoke<AgentSettings>('agent_settings'),
   saveModel: (input: {
     id?: string

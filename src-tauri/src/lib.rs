@@ -60,6 +60,11 @@ pub fn run() {
             if let Err(e) = media::jobs::recover(vault.conn()) {
                 log::warn!("media job recovery failed: {e}");
             }
+            // Agent runs never auto-resume: rows left executing become
+            // `interrupted` and the UI offers an explicit "continue" action.
+            if let Err(e) = agent::runs::recover(vault.conn()) {
+                log::warn!("agent run recovery failed: {e}");
+            }
             if let Err(e) = skills::seed_builtins(&mut vault) {
                 eprintln!("life.db skill seed failed: {e}");
             }
@@ -145,6 +150,12 @@ pub fn run() {
             commands::agent::chat_messages,
             commands::agent::chat_append,
             commands::agent::chat_truncate,
+            commands::agent::chat_run_start,
+            commands::agent::chat_run_transition,
+            commands::agent::chat_run_finish,
+            commands::agent::chat_run_touch,
+            commands::agent::chat_run_state,
+            commands::agent::chat_run_resume,
             commands::agent::agent_settings,
             commands::agent::agent_model_save,
             commands::agent::agent_model_delete,

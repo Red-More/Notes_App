@@ -11,6 +11,7 @@ pub mod discovery;
 pub mod llm;
 pub mod model_store;
 pub mod params;
+pub mod runs;
 pub mod secrets;
 
 use std::collections::HashMap;

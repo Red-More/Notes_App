@@ -40,5 +40,14 @@ export function createRuntimeDeps(): AgentRuntimeDeps {
     loadSkills: () => skillApi.list(),
     loadMcpTools: () => mcpApi.tools(),
     createConversation: (title) => chatApi.create({ title }),
+    startRun: (conversationId, trigger, modelEntry, message) =>
+      chatApi.runStart({ conversationId, trigger, modelEntry, message: message ?? null }),
+    resumeRun: (conversationId, modelEntry) =>
+      chatApi.runResume({ conversationId, modelEntry }),
+    transitionRun: (runId, status) => chatApi.runTransition({ runId, status }),
+    finishRun: (runId, status, data) => chatApi.runFinish({ runId, status, ...data }),
+    touchRun: (runId, stepCount, writeCount, lastSeq) =>
+      chatApi.runTouch({ runId, stepCount, writeCount, lastSeq }),
+    loadRunState: (conversationId) => chatApi.runState(conversationId),
   }
 }

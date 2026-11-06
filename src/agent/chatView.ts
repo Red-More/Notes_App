@@ -75,8 +75,19 @@ export type ViewEffect =
       usage: MessageUsage | null
       thinking: string | null
       thinkingSignature: string | null
+      /** stop | aborted | error; persisted for the cancelled banner. */
+      stopReason: string | null
+      isPartial: boolean
     }
-  | { kind: 'persist-tool'; toolCallId: string; toolName: string; text: string; isError: boolean }
+  | {
+      kind: 'persist-tool'
+      toolCallId: string
+      toolName: string
+      text: string
+      isError: boolean
+      args: string
+      durationMs?: number
+    }
   | { kind: 'persist-user'; text: string }
 
 export interface ReduceResult {
@@ -216,15 +227,17 @@ export function projectHistory(
         usage: record.usage,
         thinking: record.thinking,
         thinkingSignature: record.thinkingSignature,
+        cancelled: record.stopReason === 'aborted' || record.isPartial,
       })
     } else {
       items.push({
         id: `m-${record.id}`,
         kind: 'tool',
         toolName: record.toolName ?? 'tool',
-        args: '',
+        args: record.toolArgs ?? '',
         status: record.isError ? 'error' : 'done',
         text: record.content,
+        durationMs: record.toolDurationMs ?? undefined,
       })
     }
   }
@@ -234,6 +247,17 @@ export function projectHistory(
     if (item.kind === 'assistant') item.changes = turnChanges(items, index)
   }
   return items
+}
+
+/** Character count of a run's JSON partial snapshot (`{text}`). */
+export function partialLength(partial: string | null): number {
+  if (!partial) return 0
+  try {
+    const value = JSON.parse(partial) as { text?: unknown }
+    return typeof value.text === 'string' ? value.text.length : 0
+  } catch {
+    return 0
+  }
 }
 
 /** Reference projection: records + events → items. Used by tests and tools. */
@@ -470,6 +494,8 @@ export function reduceEvent(
         usage,
         thinking: thinking ?? null,
         thinkingSignature: failed ? null : thinkingSignature,
+        stopReason: message.stopReason ?? null,
+        isPartial: message.stopReason === 'aborted',
       })
       return {
         view: {
@@ -502,6 +528,9 @@ export function reduceEvent(
 
     case 'tool_execution_end': {
       const text = toolResultText(event.result)
+      const card = view.items.find(
+        (item): item is ToolCard => item.id === event.toolCallId && item.kind === 'tool',
+      )
       const started = view.toolStartedAt.get(event.toolCallId)
       const startedAt = new Map(view.toolStartedAt)
       startedAt.delete(event.toolCallId)
@@ -512,6 +541,8 @@ export function reduceEvent(
         toolName: event.toolName,
         text,
         isError: event.isError,
+        args: card?.args ?? '',
+        durationMs,
       })
       return {
         view: {

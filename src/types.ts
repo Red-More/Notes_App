@@ -289,6 +289,17 @@ export interface ChatMessageRecord {
   thinkingSignature: string | null
   /** JSON array of media asset ids attached to this user message. */
   imageAssetIds: string | null
+  /** Agent run that owns/produced this row. */
+  runId: number | null
+  /** JSON arguments of a tool call, kept so history can restore the card. */
+  toolArgs: string | null
+  toolDurationMs: number | null
+  /** True when the answer was cut short by a cancel/interruption. */
+  isPartial: boolean
+  /** stop | aborted | error, when recorded. */
+  stopReason: string | null
+  /** Non-null marks a user row as steering guidance for that run. */
+  steerOfRun: number | null
   createdAt: string
 }
 
@@ -304,6 +315,62 @@ export interface NewChatMessage {
   thinking?: string | null
   thinkingSignature?: string | null
   imageAssetIds?: string | null
+  runId?: number | null
+  toolArgs?: string | null
+  toolDurationMs?: number | null
+  isPartial?: boolean
+  stopReason?: string | null
+  steerOfRun?: number | null
+}
+
+/** Terminal and non-terminal states of one agent run. */
+export type AgentRunStatus =
+  | 'queued'
+  | 'running'
+  | 'cancelling'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled'
+  | 'interrupted'
+
+export type AgentRunTrigger = 'prompt' | 'steer' | 'resume' | 'retry'
+
+/** One row of the run ledger. */
+export interface AgentRun {
+  runId: number
+  conversationId: number
+  status: AgentRunStatus
+  trigger: AgentRunTrigger
+  modelEntry: string
+  stepCount: number
+  writeCount: number
+  lastSeq: number
+  /** JSON `{ text }` snapshot for cancel/failure banners. */
+  partial: string | null
+  errorCode: string | null
+  resumeFromMessageId: number | null
+  createdAt: string
+  updatedAt: string
+  endedAt: string | null
+}
+
+/** Queued run plus the user message that will start it. */
+export interface QueuedRun {
+  run: AgentRun
+  userMessage: ChatMessageRecord | null
+}
+
+/** Run state restored when a conversation is (re)opened. */
+export interface AgentRunState {
+  active: AgentRun | null
+  latest: AgentRun | null
+  queued: QueuedRun[]
+}
+
+/** Result of starting a run and its persisted user message. */
+export interface AgentRunStart {
+  run: AgentRun
+  message: ChatMessageRecord | null
 }
 
 /** Wire protocol used by one user-defined model entry. */

@@ -3286,6 +3286,21 @@ body.split-resizing {
   border-top: 1px solid var(--border);
 }
 
+.chat-resume {
+  align-self: flex-start;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--warn, #b45309);
+  background: var(--warn-bg, #fffbeb);
+  border: 1px solid var(--warn-border, #fcd34d);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.chat-resume:hover {
+  text-decoration: underline;
+}
+
 .chat-composer-row {
   display: flex;
   align-items: flex-end;

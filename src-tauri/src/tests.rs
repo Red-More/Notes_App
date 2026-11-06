@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::agent::model_store::{self, ApiFormat, ModelEntry, ModelInput, ModelKind};
 use crate::agent::params::{self, LlmParams};
-use crate::agent::{conversations, discovery, llm, secrets};
+use crate::agent::{conversations, discovery, llm, runs, secrets};
 use crate::db;
 use crate::docs::{self, types::DocFields, versions};
 use crate::media::{assets, jobs};
@@ -1146,6 +1146,7 @@ fn schema_creates_agent_and_media_tables() {
     for table in [
         "conversations",
         "messages",
+        "agent_runs",
         "settings",
         "media_jobs",
         "media_assets",
@@ -1193,6 +1194,7 @@ fn conversation_lifecycle_persists_messages() {
                 thinking: None,
                 thinking_signature: None,
                 image_asset_ids: Some("[7]".into()),
+                ..Default::default()
             },
             conversations::NewMessage {
                 role: "assistant".into(),
@@ -1214,6 +1216,7 @@ fn conversation_lifecycle_persists_messages() {
                 thinking: Some("先确认日期再写入".into()),
                 thinking_signature: Some("sig-1".into()),
                 image_asset_ids: None,
+                ..Default::default()
             },
         ],
     )
@@ -1268,6 +1271,7 @@ fn truncate_after_keeps_the_user_turn_for_retry() {
                 thinking: None,
                 thinking_signature: None,
                 image_asset_ids: None,
+                ..Default::default()
             },
             conversations::NewMessage {
                 role: "assistant".into(),
@@ -1280,6 +1284,7 @@ fn truncate_after_keeps_the_user_turn_for_retry() {
                 thinking: None,
                 thinking_signature: None,
                 image_asset_ids: None,
+                ..Default::default()
             },
         ],
     )
@@ -1311,11 +1316,217 @@ fn conversation_rejects_unknown_roles_and_bad_titles() {
             thinking: None,
             thinking_signature: None,
             image_asset_ids: None,
+            ..Default::default()
         }],
     );
     assert!(bad_role.is_err(), "system role must not be accepted");
     assert!(conversations::rename(&vfs, conv.id, "长".repeat(81)).is_err());
     assert!(conversations::messages(&vfs, 9999).is_err());
+}
+
+fn run_conversation(vfs: &VirtualFs) -> conversations::Conversation {
+    let entry = add_model(vfs, "运行模型", "run-model");
+    conversations::create(vfs, Some("运行测试".into()), entry.id, entry.model_id).unwrap()
+}
+
+fn prompt_run(
+    vfs: &VirtualFs,
+    conv: &conversations::Conversation,
+    text: &str,
+) -> runs::RunStart {
+    runs::start(
+        vfs,
+        conv.id,
+        "prompt",
+        &conv.provider,
+        Some(conversations::NewMessage {
+            role: "user".into(),
+            content: text.into(),
+            ..Default::default()
+        }),
+    )
+    .unwrap()
+}
+
+#[test]
+fn agent_run_state_machine_rejects_illegal_transitions() {
+    let vfs = test_vfs();
+    let conv = run_conversation(&vfs);
+    let started = prompt_run(&vfs, &conv, "第一问");
+    assert_eq!(started.run.status, "running");
+    assert_eq!(
+        started.message.as_ref().unwrap().run_id,
+        Some(started.run.run_id),
+        "the user message must carry the run id in the same transaction"
+    );
+
+    let cancelling = runs::transition(&vfs, started.run.run_id, "cancelling").unwrap();
+    assert_eq!(cancelling.status, "cancelling");
+    let done = runs::finish(&vfs, started.run.run_id, "cancelled", None, None, 1, 0, 2).unwrap();
+    assert_eq!(done.status, "cancelled");
+    assert!(done.ended_at.is_some());
+
+    assert!(
+        runs::transition(&vfs, started.run.run_id, "running").is_err(),
+        "terminal runs must never move again"
+    );
+    assert!(runs::transition(&vfs, started.run.run_id, "queued").is_err());
+    assert!(
+        runs::finish(&vfs, started.run.run_id, "running", None, None, 0, 0, 0).is_err(),
+        "finish only accepts terminal states"
+    );
+}
+
+#[test]
+fn agent_run_unique_index_blocks_a_second_executor() {
+    let vfs = test_vfs();
+    let conv = run_conversation(&vfs);
+    let first = prompt_run(&vfs, &conv, "一");
+    let second = prompt_run(&vfs, &conv, "二");
+    assert_eq!(second.run.status, "queued", "a second prompt waits in the queue");
+
+    // The partial unique index only permits one executor per conversation.
+    assert!(runs::transition(&vfs, second.run.run_id, "running").is_err());
+
+    // Re-entering the conversation reads the queue back from the database.
+    let state = runs::state(&vfs, conv.id).unwrap();
+    assert_eq!(state.active.unwrap().run_id, first.run.run_id);
+    assert_eq!(state.queued.len(), 1);
+    assert_eq!(
+        state.queued[0].user_message.as_ref().unwrap().content,
+        "二"
+    );
+}
+
+#[test]
+fn agent_run_cancel_persists_partial_snapshot() {
+    let vfs = test_vfs();
+    let conv = run_conversation(&vfs);
+    let started = prompt_run(&vfs, &conv, "写一段");
+    runs::transition(&vfs, started.run.run_id, "cancelling").unwrap();
+    let partial = r#"{"text":"半句回答"}"#.to_string();
+    let done = runs::finish(
+        &vfs,
+        started.run.run_id,
+        "cancelled",
+        Some(partial.clone()),
+        Some("cancelled".into()),
+        3,
+        1,
+        5,
+    )
+    .unwrap();
+    assert_eq!(done.partial.as_deref(), Some(partial.as_str()));
+    assert_eq!(done.error_code.as_deref(), Some("cancelled"));
+    assert_eq!(done.step_count, 3);
+    assert_eq!(done.write_count, 1);
+    assert_eq!(done.last_seq, 5);
+}
+
+#[test]
+fn agent_run_recovery_marks_interrupted() {
+    let vfs = test_vfs();
+    let conv = run_conversation(&vfs);
+    let started = prompt_run(&vfs, &conv, "写一半");
+    conversations::append(
+        &vfs,
+        conv.id,
+        vec![conversations::NewMessage {
+            role: "assistant".into(),
+            content: "已经保存的半句".into(),
+            run_id: Some(started.run.run_id),
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+    let count = runs::recover(vfs.conn()).unwrap();
+    assert!(count >= 1);
+    let state = runs::state(&vfs, conv.id).unwrap();
+    assert!(state.active.is_none());
+    let latest = state.latest.unwrap();
+    assert_eq!(latest.status, "interrupted");
+    assert!(latest.ended_at.is_some());
+    // The interrupted row keeps a snapshot so the banner can show its length.
+    let partial: serde_json::Value =
+        serde_json::from_str(latest.partial.as_deref().expect("partial snapshot")).unwrap();
+    assert_eq!(partial["text"], "已经保存的半句");
+}
+
+#[test]
+fn agent_run_resume_starts_a_new_run_and_skips_partial_answers() {
+    let vfs = test_vfs();
+    let conv = run_conversation(&vfs);
+    let first = prompt_run(&vfs, &conv, "第一问");
+    runs::finish(&vfs, first.run.run_id, "interrupted", None, None, 2, 0, 3).unwrap();
+    conversations::append(
+        &vfs,
+        conv.id,
+        vec![conversations::NewMessage {
+            role: "assistant".into(),
+            content: "半句".into(),
+            is_partial: true,
+            stop_reason: Some("aborted".into()),
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+
+    let resumed = runs::start(&vfs, conv.id, "resume", &conv.provider, None).unwrap();
+    assert_eq!(resumed.run.trigger, "resume");
+    assert_eq!(resumed.run.status, "running");
+    let user_message_id = first.message.as_ref().unwrap().id;
+    assert_eq!(
+        resumed.run.resume_from_message_id,
+        Some(user_message_id),
+        "resume keeps the user turn and drops the partial answer"
+    );
+}
+
+#[test]
+fn tool_arguments_and_duration_round_trip() {
+    let vfs = test_vfs();
+    let conv = run_conversation(&vfs);
+    conversations::append(
+        &vfs,
+        conv.id,
+        vec![conversations::NewMessage {
+            role: "tool".into(),
+            content: "读取完成".into(),
+            tool_name: Some("fs_read".into()),
+            tool_args: Some(r#"{"path":"/life/a.md"}"#.into()),
+            tool_duration_ms: Some(1200),
+            run_id: Some(7),
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+    let read = conversations::messages(&vfs, conv.id).unwrap();
+    assert_eq!(read[0].tool_args.as_deref(), Some(r#"{"path":"/life/a.md"}"#));
+    assert_eq!(read[0].tool_duration_ms, Some(1200));
+    assert_eq!(read[0].run_id, Some(7));
+}
+
+#[test]
+fn steer_messages_persist_with_run_marker() {
+    let vfs = test_vfs();
+    let conv = run_conversation(&vfs);
+    let started = prompt_run(&vfs, &conv, "第一问");
+    conversations::append(
+        &vfs,
+        conv.id,
+        vec![conversations::NewMessage {
+            role: "user".into(),
+            content: "换个方向".into(),
+            run_id: Some(started.run.run_id),
+            steer_of_run: Some(started.run.run_id),
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+    let read = conversations::messages(&vfs, conv.id).unwrap();
+    let steer = read.last().unwrap();
+    assert_eq!(steer.role, "user");
+    assert_eq!(steer.steer_of_run, Some(started.run.run_id));
 }
 
 #[test]
@@ -1615,6 +1826,7 @@ fn asset_gc_keeps_chat_attachments_until_unreferenced() {
             thinking: None,
             thinking_signature: None,
             image_asset_ids: Some(format!("[{}]", asset.id)),
+            ..Default::default()
         }],
     )
     .unwrap();
