@@ -30,6 +30,9 @@ pub fn run() {
         .setup(|app| {
             // life.db 是唯一数据库；VirtualFs 独占连接并通过 Mutex 串行化。
             let conn = db::init(app.handle())?;
+            // 隐私分级默认值由业务层种入，基础设施层不再反向依赖 privacy。
+            // INSERT OR IGNORE 保证重复启动不会覆盖用户修改。
+            privacy::policy::seed_defaults(&conn)?;
             // 历史文件可能没有交叉索引行，启动时补建一次（幂等）。
             if let Err(e) = vfs::index::rebuild_missing(&conn) {
                 eprintln!("life.db index rebuild failed: {e}");

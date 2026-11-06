@@ -1,34 +1,33 @@
-//! 数据库生命周期入口。
+//! Database lifecycle.
 //!
-//! 本次重构后整个应用只保留一个 SQLite 文件 `life.db`：
-//! - `wal` 负责 WAL 模式、checkpoint 与完整性检查；
-//! - `schema` 负责 VirtualFs 表结构与默认目录种子；
-//! - 上层 `vfs::VirtualFs` 持有连接，是唯一写库的地方。
+//! The application keeps a single SQLite file, `life.db`:
+//! - `wal` owns WAL mode, checkpointing and the integrity check;
+//! - `schema` owns the final table set and the default directory seed;
+//! - `vfs::VirtualFs` holds the connection and is the only writer.
 //!
-//! 旧的 `notes.db` 关系型存储不再打开，也不做数据迁移。
+//! There is no incremental migration path. The project has never shipped, so an
+//! unexpected file (wrong `user_version` or missing tables) is deleted, together
+//! with its `-wal` / `-shm` sidecars, and rebuilt from the final schema.
 
 pub mod schema;
 pub mod wal;
 
+use std::path::Path;
+
 use rusqlite::Connection;
 use tauri::Manager;
 
-/// 唯一数据库文件名。真实文件系统对模型不可见，路径由 VirtualFs 管理。
+/// The one database file. Models never see it; VirtualFs owns the namespace.
 pub const DB_FILE_NAME: &str = "life.db";
 
-/// 打开 `life.db`，应用 WAL 配置并执行 schema 迁移。
+/// Open `life.db`, applying WAL settings and the final schema.
 ///
-/// 启动时执行一次 `integrity_check`，损坏只记录日志、不阻塞启动；
-/// 迁移完成后再做一次 TRUNCATE checkpoint，让新库尽早收敛为单文件状态。
+/// The startup integrity check only logs failures; it never blocks boot. A
+/// TRUNCATE checkpoint follows so a fresh database converges to a single file.
 pub fn init(app: &tauri::AppHandle) -> Result<Connection, Box<dyn std::error::Error>> {
     let dir = app.path().app_data_dir()?;
     std::fs::create_dir_all(&dir)?;
-    let mut conn = Connection::open(dir.join(DB_FILE_NAME))?;
-    wal::configure(&conn)?;
-    schema::migrate(&mut conn)?;
-    if schema::repair_search_index(&conn)? {
-        log::info!("fts_docs rebuilt with content_rowid=rowid (derived index)");
-    }
+    let conn = open_or_rebuild(&dir)?;
 
     match wal::integrity_check(&conn) {
         Ok(report) if !report.ok => {
@@ -52,4 +51,50 @@ pub fn init(app: &tauri::AppHandle) -> Result<Connection, Box<dyn std::error::Er
         schema::SCHEMA_VERSION
     );
     Ok(conn)
+}
+
+/// Open `life.db` inside `dir`, rebuilding it when the schema is not current.
+///
+/// An empty file is treated as a first launch and built in place. A file with
+/// application tables that fails `schema::is_current` is deleted (sidecars too)
+/// and rebuilt; there is no user data to preserve before the first release.
+pub fn open_or_rebuild(dir: &Path) -> Result<Connection, Box<dyn std::error::Error>> {
+    let db_path = dir.join(DB_FILE_NAME);
+    let mut conn = Connection::open(&db_path)?;
+    wal::configure(&conn)?;
+
+    if schema::is_current(&conn)? {
+        return Ok(conn);
+    }
+
+    if schema::has_user_tables(&conn)? {
+        drop(conn);
+        remove_database_files(&db_path)?;
+        log::warn!("life.db structure mismatch detected; deleted and rebuilt the database");
+        let mut fresh = Connection::open(&db_path)?;
+        wal::configure(&fresh)?;
+        schema::create(&mut fresh)?;
+        log::info!("life.db rebuilt (schema v{})", schema::SCHEMA_VERSION);
+        return Ok(fresh);
+    }
+
+    schema::create(&mut conn)?;
+    log::info!("life.db created (schema v{})", schema::SCHEMA_VERSION);
+    Ok(conn)
+}
+
+/// Delete the database file and the WAL sidecars a crashed build may leave.
+fn remove_database_files(db_path: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(db_path)?;
+    let name = db_path
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| DB_FILE_NAME.to_string());
+    for sidecar in ["-wal", "-shm"] {
+        let path = db_path.with_file_name(format!("{name}{sidecar}"));
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
 }

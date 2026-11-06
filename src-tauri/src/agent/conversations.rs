@@ -1,4 +1,4 @@
-//! 会话与消息持久化：`life.db` 的 `conversations` / `messages` 表（schema v3 起）。
+//! 会话与消息持久化：`life.db` 的 `conversations` / `messages` 表。
 //!
 //! 只被 Agent 与设置页使用，不参与 VirtualFs 的五个工具。
 

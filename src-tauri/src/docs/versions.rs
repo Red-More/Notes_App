@@ -1,6 +1,6 @@
 //! 文档版本：台账 + 基线全文 + 链式 unified diff。
 //!
-//! 存储模型（详见 `db::schema::V12_TABLES`）：
+//! 存储模型（详见 `db/schema.rs` 的最终 DDL）：
 //! - `version_meta` 只有台账信息（标题快照、kind、标签、时间），不含正文；
 //! - `version_bases` 保存每篇文档的基线全文，一篇仅一行；
 //! - `version_diffs` 保存后续版本的 unified diff，始终相对上一个已记录版本；

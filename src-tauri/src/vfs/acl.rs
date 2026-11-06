@@ -1,6 +1,6 @@
 //! 路径权限（ACL）预留入口。
 //!
-//! `path_acl` 表已在 schema v2 建好，字段为：
+//! `path_acl` 表已在最终 schema 中建好，字段为：
 //! `path_prefix / permission(allow-read|allow-write|deny) / principal`。
 //! 本期按“仅预留”落地：保留统一判定入口，但不读取规则、不改变行为。
 //!

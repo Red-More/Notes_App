@@ -12,7 +12,7 @@ use crate::agent::secrets::SecretStore;
 use crate::vfs::cap_gate;
 use crate::vfs::error::ToolError;
 
-/// Conservative defaults seeded once at schema v11.
+/// Conservative defaults seeded once at startup by the business layer.
 /// Contacts and diaries are S0; notes, todos and schedules are S1.
 pub const DEFAULT_LABELS: [(&str, i64); 5] = [
     ("/life/contacts", 0),

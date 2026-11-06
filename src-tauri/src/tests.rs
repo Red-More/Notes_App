@@ -24,7 +24,9 @@ use crate::vfs::VirtualFs;
 fn test_vfs() -> VirtualFs {
     let mut conn = rusqlite::Connection::open_in_memory().expect("open in-memory life.db");
     db::wal::configure(&conn).expect("apply wal pragmas");
-    db::schema::migrate(&mut conn).expect("run schema migrations");
+    db::schema::create(&mut conn).expect("create the final schema");
+    // Mirror the production startup order: seeds live in the business layer.
+    policy::seed_defaults(&conn).expect("seed privacy defaults");
     VirtualFs::new(conn)
 }
 
@@ -782,7 +784,7 @@ fn schema_creates_agent_and_media_tables() {
     assert_eq!(
         version,
         db::schema::SCHEMA_VERSION,
-        "schema migrations must reach the latest version"
+        "a fresh database must carry the current schema version"
     );
     for table in [
         "conversations",
@@ -2203,27 +2205,67 @@ fn fts_repair_drops_orphan_rows() {
 }
 
 #[test]
-fn legacy_fts_table_definition_is_repaired() {
-    let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-    db::wal::configure(&conn).unwrap();
-    db::schema::migrate(&mut conn).unwrap();
-    // Recreate the v1 definition that breaks FTS5 deletes.
-    conn.execute_batch(
-        "DROP TABLE fts_docs;
-         CREATE VIRTUAL TABLE fts_docs USING fts5(
-             title, content, content_rowid=inode,
-             tokenize='unicode61 remove_diacritics 2'
-         );",
-    )
-    .unwrap();
-    assert!(db::schema::repair_search_index(&conn).unwrap());
-    conn.execute(
-        "INSERT INTO fts_docs (rowid, title, content) VALUES (1, '', 'x')",
-        [],
-    )
-    .unwrap();
-    conn.execute("DELETE FROM fts_docs WHERE rowid = 1", [])
+fn outdated_database_is_deleted_and_rebuilt() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir =
+        std::env::temp_dir().join(format!("notes-app-schema-{}-{unique}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join(db::DB_FILE_NAME);
+
+    {
+        // Simulate an older build: a stamped version with a legacy table set.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE inodes (inode INTEGER PRIMARY KEY, path TEXT);
+             CREATE TABLE legacy_marker (id INTEGER PRIMARY KEY);
+             PRAGMA user_version = 12;",
+        )
         .unwrap();
+    }
+    // Sidecars a crashed older build may leave behind.
+    std::fs::write(dir.join("life.db-wal"), b"").unwrap();
+    std::fs::write(dir.join("life.db-shm"), b"").unwrap();
+
+    let conn = db::open_or_rebuild(&dir).expect("outdated database must be rebuilt");
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, db::schema::SCHEMA_VERSION);
+    let rebuilt: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table'
+               AND name IN ('version_bases', 'version_meta', 'legacy_marker')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rebuilt, 2, "legacy table dropped, version tables created");
+    drop(conn);
+
+    assert!(
+        !dir.join("life.db-wal").exists(),
+        "stale wal must be removed"
+    );
+    assert!(
+        !dir.join("life.db-shm").exists(),
+        "stale shm must be removed"
+    );
+    let backups = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("life.db.bak-")
+        })
+        .count();
+    assert_eq!(backups, 0, "no backup file is kept");
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 fn percentile(sorted: &[f64], ratio: f64) -> f64 {
