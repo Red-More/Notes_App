@@ -38,14 +38,12 @@ export default function DiffViewerModal({ paths, title, onClose }: Props) {
           const doc = docs.find((item) => item.path === path)
           if (!doc) continue
           const versions = await docApi.listVersions(doc.id, true)
-          const head = versions.find((version) => version.versionNumber === doc.rev)
           const previous = versions
             .filter((version) => version.versionNumber < doc.rev)
             .sort((a, b) => b.versionNumber - a.versionNumber)[0]
-          // Version bodies are fetched on demand, one revision at a time.
-          const current = head
-            ? await docApi.versionContent(head.id)
-            : (await docApi.get(doc.id)).content
+          // Autosave mutates the head in place, so the live body always comes
+          // from doc_get; version bodies are replayed on demand.
+          const current = (await docApi.get(doc.id)).content
           const rows = previous
             ? diffLines(await docApi.versionContent(previous.id), current)
             : diffLines('', current)

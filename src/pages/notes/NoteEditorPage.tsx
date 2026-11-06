@@ -1362,6 +1362,11 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
           }
         >
           {versions.length === 0 && <div className="empty-state">暂无版本</div>}
+          {versions.length > 0 && (
+            <div className="settings-note">
+              仅可删除最新版本；中间版本参与 diff 链，删除会破坏历史回放。
+            </div>
+          )}
           {versions.map((v) => (
             <div key={v.id} className="version-item">
               <div
@@ -1400,14 +1405,16 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
                 >
                   <IconCompare size={18} />
                 </button>
-                <button
-                  type="button"
-                  className="icon-btn"
-                  aria-label="删除版本"
-                  onClick={() => setDeleteVersionConfirm(v)}
-                >
-                  <IconTrash size={18} />
-                </button>
+                {v.id === versions[0]?.id && v.versionNumber > 1 && (
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    aria-label="删除版本"
+                    onClick={() => setDeleteVersionConfirm(v)}
+                  >
+                    <IconTrash size={18} />
+                  </button>
+                )}
               </div>
             </div>
           ))}
@@ -1448,7 +1455,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
       {deleteVersionConfirm && (
         <ConfirmDialog
           title="删除版本"
-          message={`确定要删除 ${fmtVersion(deleteVersionConfirm.versionNumber)} 这个版本吗？此操作不可撤销。`}
+          message={`确定要删除 ${fmtVersion(deleteVersionConfirm.versionNumber)} 这个版本吗？仅最新版本可删除，此操作不可撤销。`}
           confirmText="删除"
           danger
           onConfirm={() => void handleDeleteVersion(deleteVersionConfirm)}

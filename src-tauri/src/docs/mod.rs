@@ -7,8 +7,9 @@
 //! - 日程：`/life/schedule/<date>-<slug>.md`
 //! - 联系人：`/life/contacts/<slug>.md`
 //!
-//! id 使用 inode，移动文件不改变 id；每次保存追加 rev，前端通过 version_meta
-//! 回溯历史。文件夹本质是 `/life/notes` 下的目录，笔记移动即修改 inode.path。
+//! id 使用 inode，移动文件不改变 id；自动保存原地更新 head rev，不追加历史，
+//! 历史由 `versions` 的基线 + diff 链提供。文件夹本质是 `/life/notes` 下的目录，
+//! 笔记移动即修改 inode.path。
 
 pub mod export;
 pub mod folders;
@@ -221,7 +222,7 @@ pub fn create(
 }
 
 /// 保存文档：可选更新标题/正文/字段；笔记可同时移动到另一个文件夹。
-/// 每次保存追加一个新 rev，expect_rev 不一致时返回 Conflict。
+/// 自动保存原地更新当前 head，不产生新的历史版本；expect_rev 不一致时返回 Conflict。
 pub fn save(
     vfs: &mut VirtualFs,
     id: i64,
@@ -318,31 +319,27 @@ pub fn save(
         });
     }
 
-    let next = row.head_rev + 1;
+    // Autosave rewrites the head row in place: it creates no version and keeps
+    // the current rev, so history only grows on explicit snapshots/restores
+    // and Agent edits.
     tx.execute(
-        "INSERT INTO blobs (inode, rev, content, source, created_at)
-         VALUES (?1, ?2, ?3, 'user', ?4)",
-        params![id, next, markdown, now],
+        "UPDATE blobs SET content = ?1, source = 'user', created_at = ?2
+         WHERE inode = ?3 AND rev = ?4",
+        params![markdown, now, id, row.head_rev],
     )?;
     tx.execute(
-        "UPDATE inodes SET path = ?1, head_rev = ?2, size = ?3, mtime = ?4 WHERE inode = ?5",
-        params![new_path, next, markdown.len() as i64, now, id],
+        "UPDATE inodes SET path = ?1, size = ?2, mtime = ?3 WHERE inode = ?4",
+        params![new_path, markdown.len() as i64, now, id],
     )?;
     // Parse the rewritten document once and share it with both mirrors.
     let written = meta::parse_document(&markdown);
     meta::upsert_parts(&tx, id, &new_path, &written)?;
     crate::vfs::index::refresh_parts(&tx, id, &new_path, &written)?;
     crate::vfs::fts::index_document(&tx, id, &markdown)?;
-    tx.execute(
-        "INSERT OR IGNORE INTO version_meta
-             (inode, rev, label, label_description, is_manual, created_at)
-         VALUES (?1, ?2, NULL, NULL, 0, ?3)",
-        params![id, next, now],
-    )?;
     let receipt = DocSaveReceipt {
         id,
         path: new_path,
-        rev: next,
+        rev: row.head_rev,
         updated_at: now,
     };
     tx.commit()?;

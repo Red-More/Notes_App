@@ -15,12 +15,13 @@
 //! v9：用户消息记录附图资产 id（image_asset_ids）。
 //! v10：媒体作业记录用量与成本（units / cost_usd）。
 //! v11：隐私分级（sensitivity_labels / doc_classification / entity_vault / egress_audit）。
+//! v12：版本存储改为「基线全文 + 链式 unified diff」，head 内容原地更新。
 //! FTS5 索引在应用层与 blobs 同事务维护（无触发器），schema 版本保持不变。
 
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// 当前 life.db schema 版本。
-pub const SCHEMA_VERSION: i64 = 11;
+pub const SCHEMA_VERSION: i64 = 12;
 
 /// 虚拟文件系统的根路径，与 `vfs::cap_gate::ROOT` 保持一致。
 const ROOT: &str = "/life";
@@ -233,6 +234,66 @@ CREATE TABLE IF NOT EXISTS egress_audit (
 CREATE INDEX IF NOT EXISTS idx_egress_created ON egress_audit(created_at DESC);
 ";
 
+/// Version history v12.
+///
+/// `version_meta` is a pure ledger (title snapshot, kind, labels). The first
+/// revision of a document keeps its full Markdown in `version_bases`; every
+/// later recorded revision keeps only a unified diff in `version_diffs`, always
+/// relative to the previous recorded revision. Head content stays in `blobs`
+/// and is updated in place by autosave, so it is never a second history copy.
+const V12_TABLES: &str = "
+DROP TABLE IF EXISTS version_meta;
+DROP TABLE IF EXISTS version_bases;
+DROP TABLE IF EXISTS version_diffs;
+
+CREATE TABLE version_bases (
+    inode      INTEGER PRIMARY KEY,
+    content    TEXT NOT NULL,                 -- 基线全文，一篇文档仅此一份
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (inode) REFERENCES inodes(inode) ON DELETE CASCADE
+);
+
+CREATE TABLE version_diffs (
+    inode      INTEGER NOT NULL,
+    rev        INTEGER NOT NULL,
+    diff       TEXT NOT NULL,                 -- 相对上一版本的 unified diff
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (inode, rev),
+    FOREIGN KEY (inode) REFERENCES inodes(inode) ON DELETE CASCADE
+);
+
+CREATE TABLE version_meta (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    inode             INTEGER NOT NULL,
+    rev               INTEGER NOT NULL,
+    title             TEXT NOT NULL DEFAULT '',  -- 版本标题快照
+    kind              TEXT NOT NULL CHECK (kind IN ('baseline', 'snapshot', 'restore', 'agent')),
+    label             TEXT,
+    label_description TEXT,
+    is_manual         INTEGER NOT NULL DEFAULT 0,
+    created_at        TEXT NOT NULL,
+    UNIQUE (inode, rev),
+    FOREIGN KEY (inode) REFERENCES inodes(inode) ON DELETE CASCADE
+);
+CREATE INDEX idx_version_inode ON version_meta(inode, rev DESC);
+
+-- Discard the old per-rev blob history: keep only each document's head row and
+-- renumber it as rev 1, which becomes the new baseline snapshot.
+DELETE FROM blobs WHERE rev <> (
+    SELECT head_rev FROM inodes WHERE inode = blobs.inode
+);
+UPDATE blobs SET rev = 1;
+UPDATE inodes SET head_rev = 1 WHERE kind = 'file';
+
+INSERT INTO version_bases (inode, content, created_at)
+SELECT inode, content, created_at FROM blobs;
+
+INSERT INTO version_meta
+    (inode, rev, title, label, label_description, is_manual, kind, created_at)
+SELECT b.inode, 1, COALESCE(m.title, ''), NULL, NULL, 0, 'baseline', b.created_at
+FROM blobs b LEFT JOIN meta m ON m.inode = b.inode;
+";
+
 /// 迁移用的列探测：表/列名均为本模块常量，格式化进 SQL 安全。
 fn table_has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
     let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{column}'");
@@ -421,9 +482,19 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
         tx.execute_batch(V11_TABLES)?;
         // Seed conservative defaults on first upgrade; user labels can override later.
         crate::privacy::policy::seed_defaults(&tx)?;
-        tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        tx.pragma_update(None, "user_version", 11)?;
         tx.commit()?;
-        version = SCHEMA_VERSION;
+        version = 11;
+    }
+
+    if version < 12 {
+        let tx = conn.transaction()?;
+        // Version history is rebuilt from scratch: every document collapses to
+        // a single baseline equal to its current head body.
+        tx.execute_batch(V12_TABLES)?;
+        tx.pragma_update(None, "user_version", 12)?;
+        tx.commit()?;
+        version = 12;
     }
 
     if version > SCHEMA_VERSION {

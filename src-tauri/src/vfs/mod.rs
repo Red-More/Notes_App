@@ -16,7 +16,9 @@ pub mod error;
 pub mod fts;
 pub mod index;
 pub mod meta;
+pub mod patch;
 pub mod types;
+pub mod version_store;
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -103,10 +105,10 @@ impl VirtualFs {
                 |r| r.get(0),
             )
             .optional()?;
-        let Some(content) = content else {
-            return Err(ToolError::NotFound {
-                path: format!("{path}@rev{rev}"),
-            });
+        // Only the head row is materialized; older revs are replayed on demand.
+        let content = match content {
+            Some(content) => content,
+            None => version_store::replay(&self.conn, inode, rev)?,
         };
 
         let total_lines = content.lines().count();
@@ -210,10 +212,15 @@ impl VirtualFs {
              VALUES (?1, 1, ?2, ?3, ?4)",
             params![inode, content, req.source.as_str(), now_str],
         )?;
-        meta::upsert(&tx, inode, &path, &content)?;
-        index::refresh(&tx, inode, &path, &content)?;
+        let parts = meta::parse_document(&content);
+        meta::upsert_parts(&tx, inode, &path, &parts)?;
+        index::refresh_parts(&tx, inode, &path, &parts)?;
         fts::index_document(&tx, inode, &content)?;
-        record_version(&tx, inode, 1, &now_str)?;
+        let title = parts
+            .title
+            .clone()
+            .unwrap_or_else(|| file_stem_title(&path));
+        version_store::record_baseline(&tx, inode, &content, &title, &now_str)?;
         tx.commit()?;
 
         Ok(WriteReceipt {
@@ -299,21 +306,30 @@ impl VirtualFs {
             });
         }
 
-        let next = current + 1;
         let now_str = now(&tx)?;
-        tx.execute(
-            "INSERT INTO blobs (inode, rev, content, source, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![inode, next, replaced, req.source.as_str(), now_str],
+        let parts = meta::parse_document(&replaced);
+        let title = parts
+            .title
+            .clone()
+            .unwrap_or_else(|| file_stem_title(&path));
+        // Agent edits are recorded versions: the head row moves to the new rev
+        // and only a diff against the previous version is stored.
+        let next = version_store::append_version(
+            &tx,
+            inode,
+            &version_store::VersionRecord {
+                content: &replaced,
+                source: req.source.as_str(),
+                title: &title,
+                kind: version_store::KIND_AGENT,
+                is_manual: false,
+                label: None,
+                created_at: &now_str,
+            },
         )?;
-        tx.execute(
-            "UPDATE inodes SET head_rev = ?1, size = ?2, mtime = ?3 WHERE inode = ?4",
-            params![next, replaced.len() as i64, now_str, inode],
-        )?;
-        meta::upsert(&tx, inode, &path, &replaced)?;
-        index::refresh(&tx, inode, &path, &replaced)?;
+        meta::upsert_parts(&tx, inode, &path, &parts)?;
+        index::refresh_parts(&tx, inode, &path, &parts)?;
         fts::index_document(&tx, inode, &replaced)?;
-        record_version(&tx, inode, next, &now_str)?;
         tx.commit()?;
 
         Ok(EditReceipt {
@@ -657,22 +673,13 @@ fn scan_document(
     false
 }
 
-/// Track a revision in `version_meta` so the UI can address (inode, rev).
-/// Automatic writes are always `is_manual=0`; only an explicit
-/// `version_create` snapshot sets `is_manual=1`.
-fn record_version(
-    conn: &Connection,
-    inode: i64,
-    rev: i64,
-    created_at: &str,
-) -> rusqlite::Result<()> {
-    conn.execute(
-        "INSERT OR IGNORE INTO version_meta
-             (inode, rev, label, label_description, is_manual, created_at)
-         VALUES (?1, ?2, NULL, NULL, 0, ?3)",
-        params![inode, rev, created_at],
-    )?;
-    Ok(())
+/// Fallback display title when the document has no frontmatter title.
+fn file_stem_title(path: &str) -> String {
+    Path::new(path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("untitled")
+        .to_string()
 }
 
 /// SQLite 本地时间（`YYYY-MM-DD HH:MM:SS`），与现有导出格式一致。

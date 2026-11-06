@@ -153,14 +153,9 @@ pub fn infer_kind(path: &str) -> &'static str {
     }
 }
 
-/// 在同一事务里 upsert `meta` 镜像。
-pub fn upsert(conn: &Connection, inode: i64, path: &str, content: &str) -> rusqlite::Result<()> {
-    let parts = parse_document(content);
-    upsert_parts(conn, inode, path, &parts)
-}
-
-/// Same as [`upsert`] but reuses an already parsed document, so callers that
-/// also refresh other mirrors can parse the rewritten markdown only once.
+/// Same as the previous whole-document entry point but reuses an already
+/// parsed document, so callers that also refresh other mirrors can parse the
+/// rewritten markdown only once.
 pub fn upsert_parts(
     conn: &Connection,
     inode: i64,

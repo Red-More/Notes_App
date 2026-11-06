@@ -92,6 +92,27 @@ fn write_meta(vfs: &VirtualFs, inode: i64, rev: i64) -> (String, i64) {
         .expect("blob should exist")
 }
 
+/// Count the rows a version-related table holds for one inode.
+fn count_rows(vfs: &VirtualFs, table: &str, inode: i64) -> i64 {
+    vfs.conn()
+        .query_row(
+            &format!("SELECT COUNT(*) FROM {table} WHERE inode = ?1"),
+            params![inode],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// Resolve the ledger id of a recorded revision.
+fn version_id(vfs: &VirtualFs, doc_id: i64, rev: i64) -> i64 {
+    versions::list(vfs, doc_id, true)
+        .unwrap()
+        .into_iter()
+        .find(|version| version.version_number == rev)
+        .unwrap_or_else(|| panic!("rev {rev} should be recorded"))
+        .id
+}
+
 fn fields(pairs: &[(&str, Value)]) -> DocFields {
     pairs
         .iter()
@@ -335,6 +356,7 @@ fn soft_delete_restore_and_purge() {
 fn version_restore_appends_new_revision() {
     let mut vfs = test_vfs();
     let doc = docs::create(&mut vfs, "note", "版本测试", "第一版", None, None).unwrap();
+    // Autosave rewrites the head in place, so it keeps rev 1 and adds no history row.
     let saved = docs::save(
         &mut vfs,
         doc.id,
@@ -345,23 +367,24 @@ fn version_restore_appends_new_revision() {
         None,
     )
     .expect("save should succeed");
-    assert_eq!(saved.rev, 2);
+    assert_eq!(saved.rev, 1);
 
     let history = versions::list(&vfs, doc.id, true).unwrap();
+    assert_eq!(history.len(), 1, "autosave must not append a version");
     let first = history
         .iter()
         .find(|version| version.version_number == 1)
         .expect("rev 1 should be tracked");
 
     let restored = versions::restore(&mut vfs, first.id).expect("restore should succeed");
-    assert_eq!(restored.rev, 3);
+    assert_eq!(restored.rev, 2);
     assert!(restored.content.contains("第一版"));
 
     let history_after = versions::list(&vfs, doc.id, true).unwrap();
-    assert_eq!(history_after.len(), 3, "restore must append, not overwrite");
+    assert_eq!(history_after.len(), 2, "restore must append, not overwrite");
     let latest = history_after
         .iter()
-        .find(|version| version.version_number == 3)
+        .find(|version| version.version_number == 2)
         .expect("restored rev should be tracked");
     assert_eq!(latest.is_manual, 1);
 }
@@ -430,7 +453,8 @@ fn cross_index_refreshes_on_write_and_save() {
         None,
     )
     .expect("save should refresh index");
-    assert_eq!(saved.rev, 2);
+    // Autosave updates the head in place, so the revision does not bump.
+    assert_eq!(saved.rev, 1);
 
     assert!(
         docs::index::query(&vfs, "person", "zhang-san", None, None)
@@ -507,6 +531,214 @@ fn write_source_semantics() {
         ("user".to_string(), 1),
         "version_create must mark the snapshot as manual"
     );
+}
+
+#[test]
+fn autosave_updates_head_without_creating_versions() {
+    let mut vfs = test_vfs();
+    let doc = docs::create(&mut vfs, "note", "原地保存", "第一版", None, None).unwrap();
+
+    let first = docs::save(
+        &mut vfs,
+        doc.id,
+        None,
+        Some("第二版".into()),
+        None,
+        None,
+        None,
+    )
+    .expect("first autosave should succeed");
+    let second = docs::save(
+        &mut vfs,
+        doc.id,
+        None,
+        Some("第三版".into()),
+        None,
+        None,
+        None,
+    )
+    .expect("second autosave should succeed");
+    assert_eq!(
+        (first.rev, second.rev),
+        (1, 1),
+        "autosave must keep the current head revision"
+    );
+
+    let live = docs::get(&vfs, doc.id, false).unwrap();
+    assert_eq!(live.rev, 1);
+    assert!(live.content.contains("第三版"));
+
+    // One ledger row, one baseline, one mutable head blob; no diff yet.
+    assert_eq!(versions::list(&vfs, doc.id, true).unwrap().len(), 1);
+    assert_eq!(count_rows(&vfs, "blobs", doc.id), 1);
+    assert_eq!(count_rows(&vfs, "version_bases", doc.id), 1);
+    assert_eq!(count_rows(&vfs, "version_diffs", doc.id), 0);
+
+    let baseline = version_id(&vfs, doc.id, 1);
+    assert_eq!(
+        versions::content(&vfs, baseline).unwrap(),
+        "第一版",
+        "the baseline keeps the original body instead of following autosave"
+    );
+}
+
+#[test]
+fn version_chain_replays_from_baseline() {
+    let mut vfs = test_vfs();
+    let doc = docs::create(&mut vfs, "note", "版本链", "第一版", None, None).unwrap();
+
+    docs::save(
+        &mut vfs,
+        doc.id,
+        None,
+        Some("第二版".into()),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let snapshot2 = versions::create(&mut vfs, doc.id).unwrap();
+    assert_eq!(snapshot2.version_number, 2);
+
+    docs::save(
+        &mut vfs,
+        doc.id,
+        None,
+        Some("第三版".into()),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let snapshot3 = versions::create(&mut vfs, doc.id).unwrap();
+    assert_eq!(snapshot3.version_number, 3);
+
+    for (rev, expected) in [(1, "第一版"), (2, "第二版"), (3, "第三版")] {
+        let id = version_id(&vfs, doc.id, rev);
+        assert_eq!(
+            versions::content(&vfs, id).unwrap(),
+            expected,
+            "replaying rev {rev} must match the recorded body"
+        );
+    }
+    assert_eq!(count_rows(&vfs, "version_bases", doc.id), 1);
+    assert_eq!(count_rows(&vfs, "version_diffs", doc.id), 2);
+    assert_eq!(count_rows(&vfs, "blobs", doc.id), 1);
+}
+
+#[test]
+fn delete_only_allows_latest_and_keeps_chain() {
+    let mut vfs = test_vfs();
+    let doc = docs::create(&mut vfs, "note", "删除链", "第一版", None, None).unwrap();
+    docs::save(
+        &mut vfs,
+        doc.id,
+        None,
+        Some("第二版".into()),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    versions::create(&mut vfs, doc.id).unwrap();
+    docs::save(
+        &mut vfs,
+        doc.id,
+        None,
+        Some("第三版".into()),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    versions::create(&mut vfs, doc.id).unwrap();
+
+    let baseline = version_id(&vfs, doc.id, 1);
+    let middle = version_id(&vfs, doc.id, 2);
+    let head = version_id(&vfs, doc.id, 3);
+
+    assert!(
+        matches!(
+            versions::delete(&mut vfs, baseline),
+            Err(ToolError::InvalidArgument { .. })
+        ),
+        "the baseline anchors the chain"
+    );
+    assert!(
+        matches!(
+            versions::delete(&mut vfs, middle),
+            Err(ToolError::InvalidArgument { .. })
+        ),
+        "a middle node would break replay"
+    );
+
+    // Deleting the head ledger row leaves the head blob and the chain intact.
+    versions::delete(&mut vfs, head).unwrap();
+    assert_eq!(versions::list(&vfs, doc.id, true).unwrap().len(), 2);
+    let replayed = crate::vfs::version_store::replay(vfs.conn(), doc.id, 2).unwrap();
+    assert!(replayed.contains("第二版"));
+
+    // The former middle node is now the tail, so its ledger and diff go together.
+    versions::delete(&mut vfs, middle).unwrap();
+    assert_eq!(versions::list(&vfs, doc.id, true).unwrap().len(), 1);
+    // The deleted head ledger left its diff behind; replay joins the ledger, so
+    // the orphan row is ignored instead of corrupting the chain.
+    assert_eq!(count_rows(&vfs, "version_diffs", doc.id), 1);
+    let replayed = crate::vfs::version_store::replay(vfs.conn(), doc.id, 1).unwrap();
+    assert!(replayed.contains("第一版"));
+
+    // The head blob is still rev 3; a new snapshot appends rev 4 from the baseline.
+    docs::save(
+        &mut vfs,
+        doc.id,
+        None,
+        Some("第四版".into()),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let appended = versions::create(&mut vfs, doc.id).unwrap();
+    assert_eq!(appended.version_number, 4);
+    assert_eq!(versions::content(&vfs, appended.id).unwrap(), "第四版");
+}
+
+#[test]
+fn restore_writes_head_and_appends_replayed_version() {
+    let mut vfs = test_vfs();
+    let doc = docs::create(&mut vfs, "note", "恢复链", "第一版", None, None).unwrap();
+    docs::save(
+        &mut vfs,
+        doc.id,
+        None,
+        Some("第二版".into()),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    versions::create(&mut vfs, doc.id).unwrap();
+    docs::save(
+        &mut vfs,
+        doc.id,
+        None,
+        Some("第三版".into()),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let baseline = version_id(&vfs, doc.id, 1);
+    let restored = versions::restore(&mut vfs, baseline).unwrap();
+    assert_eq!(restored.rev, 3);
+    assert_eq!(restored.content, "第一版");
+
+    // The rebuild is itself a recorded version, so head and replay agree.
+    let restored_version = version_id(&vfs, doc.id, 3);
+    assert_eq!(versions::content(&vfs, restored_version).unwrap(), "第一版");
+    assert_eq!(versions::list(&vfs, doc.id, true).unwrap().len(), 3);
+    assert_eq!(count_rows(&vfs, "blobs", doc.id), 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -2156,12 +2388,12 @@ fn skill_crud_enable_and_delete() {
     let revs: i64 = vfs
         .conn()
         .query_row(
-            "SELECT COUNT(*) FROM blobs WHERE inode = ?1",
+            "SELECT COUNT(*) FROM version_meta WHERE inode = ?1",
             params![inode],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(revs, 2, "updating a skill appends a new rev");
+    assert_eq!(revs, 2, "updating a skill appends a new ledger row");
 
     skills::delete(&mut vfs, &created.id).unwrap();
     assert!(skills::list(&vfs).unwrap().is_empty());

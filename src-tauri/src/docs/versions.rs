@@ -1,269 +1,228 @@
-//! 文档版本：blobs 的每个 rev 都是一份完整内容，version_meta 提供全局 id。
+//! 文档版本：台账 + 基线全文 + 链式 unified diff。
 //!
-//! - 保存/编辑自动追加 rev；
-//! - `create` 生成一份手工快照（相同内容也允许，语义由用户决定）；
-//! - `restore` 用旧 rev 的内容追加上榜新 rev，历史不丢；
-//! - 删除仅允许删除非 head 版本，避免内容指针悬空。
+//! 存储模型（详见 `db::schema::V12_TABLES`）：
+//! - `version_meta` 只有台账信息（标题快照、kind、标签、时间），不含正文；
+//! - `version_bases` 保存每篇文档的基线全文，一篇仅一行；
+//! - `version_diffs` 保存后续版本的 unified diff，始终相对上一个已记录版本；
+//! - `blobs` 只保留当前 head，自动保存原地更新，不进入历史链。
+//!
+//! 因此历史链上的 `content(rev) = replay(baseline, diffs[2..=rev])`，除基线
+//! 与 head 外不再有任何整份正文副本。
 
-use rusqlite::{params, OptionalExtension};
+use std::path::Path;
+
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::vfs::error::ToolError;
-use crate::vfs::{index, meta, VirtualFs};
+use crate::vfs::meta;
+use crate::vfs::{fts, index, version_store, VirtualFs};
 
-use super::types::DocVersion;
-use super::util::{basename, fetch_row, now};
+use super::types::{Doc, DocVersion};
+use super::util;
 
 /// 列出一个文档的所有版本（新版本在前）。
-/// `include_auto=false` 时只返回手工快照（is_manual=1），保持旧版 UI 语义。
-/// 不返回正文：版本历史只需要标题与时间，正文由 `content` 按需单取。
+/// `include_auto=false` 时只返回手工版本（is_manual=1）。
+/// 标题读取台账快照，不依赖正文。
 pub fn list(
     vfs: &VirtualFs,
     doc_id: i64,
     include_auto: bool,
 ) -> Result<Vec<DocVersion>, ToolError> {
     let conn = vfs.conn();
-    let doc = fetch_row(conn, doc_id, false)?;
-    let fallback_title = doc
-        .meta_title
-        .clone()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| basename(&doc.path).to_string());
-
-    let mut stmt = conn.prepare(
-        "SELECT vm.id, vm.rev, vm.label, vm.label_description, vm.is_manual, vm.created_at, b.content
-         FROM version_meta vm
-         JOIN blobs b ON b.inode = vm.inode AND b.rev = vm.rev
-         WHERE vm.inode = ?1 AND (?2 = 1 OR vm.is_manual = 1)
-         ORDER BY vm.rev DESC",
+    let mut statement = conn.prepare(
+        "SELECT v.id, v.inode, v.rev,
+                CASE WHEN v.title <> '' THEN v.title ELSE COALESCE(m.title, '') END,
+                v.label, v.label_description, v.is_manual, v.created_at
+         FROM version_meta v
+         LEFT JOIN meta m ON m.inode = v.inode
+         WHERE v.inode = ?1 AND (?2 = 1 OR v.is_manual = 1 OR v.kind = 'baseline')
+         ORDER BY v.rev DESC",
     )?;
-    let rows = stmt.query_map(params![doc_id, include_auto as i64], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, i64>(1)?,
-            r.get::<_, Option<String>>(2)?,
-            r.get::<_, Option<String>>(3)?,
-            r.get::<_, i64>(4)?,
-            r.get::<_, String>(5)?,
-            r.get::<_, String>(6)?,
-        ))
+    let rows = statement.query_map(params![doc_id, i64::from(include_auto)], |row| {
+        Ok(DocVersion {
+            id: row.get(0)?,
+            doc_id: row.get(1)?,
+            version_number: row.get(2)?,
+            title: row.get(3)?,
+            content: String::new(),
+            label: row.get(4)?,
+            label_description: row.get(5)?,
+            is_manual: row.get(6)?,
+            created_at: row.get(7)?,
+        })
     })?;
-
     let mut versions = Vec::new();
     for row in rows {
-        let (id, rev, label, description, manual, created_at, content) = row?;
-        versions.push(build_version(
-            doc_id,
-            id,
-            rev,
-            label,
-            description,
-            manual,
-            created_at,
-            &content,
-            &fallback_title,
-        ));
+        versions.push(row?);
     }
     Ok(versions)
 }
 
-/// 手工创建版本：把当前 head 内容再追加一个 rev，并标记 is_manual。
-pub fn create(vfs: &mut VirtualFs, doc_id: i64) -> Result<DocVersion, ToolError> {
-    let tx = vfs.conn_mut().transaction()?;
-    let row = fetch_row(&tx, doc_id, false)?;
-    let now = now(&tx)?;
-    let next = row.head_rev + 1;
-    tx.execute(
-        "INSERT INTO blobs (inode, rev, content, source, created_at)
-         VALUES (?1, ?2, ?3, 'user', ?4)",
-        params![doc_id, next, row.content, now],
-    )?;
-    tx.execute(
-        "UPDATE inodes SET head_rev = ?1, size = ?2, mtime = ?3 WHERE inode = ?4",
-        params![next, row.content.len() as i64, now, doc_id],
-    )?;
-    tx.execute(
-        "INSERT INTO version_meta
-             (inode, rev, label, label_description, is_manual, created_at)
-         VALUES (?1, ?2, NULL, NULL, 1, ?3)",
-        params![doc_id, next, now],
-    )?;
-    tx.commit()?;
-
-    let fallback = row
-        .meta_title
-        .clone()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| basename(&row.path).to_string());
-    let parts = meta::parse_document(&row.content);
-    Ok(DocVersion {
-        id: latest_version_id(vfs, doc_id, next)?,
-        doc_id,
-        version_number: next,
-        title: parts.title.unwrap_or(fallback),
-        content: parts.body,
-        label: None,
-        label_description: None,
-        is_manual: 1,
-        created_at: now,
-    })
-}
-
-/// 恢复到指定版本：追加新 rev，不覆盖历史。
-pub fn restore(vfs: &mut VirtualFs, version_id: i64) -> Result<super::types::Doc, ToolError> {
-    let tx = vfs.conn_mut().transaction()?;
-    let version: Option<(i64, i64)> = tx
-        .query_row(
-            "SELECT inode, rev FROM version_meta WHERE id = ?1",
-            params![version_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    let Some((doc_id, rev)) = version else {
-        return Err(ToolError::NotFound {
-            path: format!("version#{version_id}"),
-        });
-    };
-    let content: Option<String> = tx
-        .query_row(
-            "SELECT content FROM blobs WHERE inode = ?1 AND rev = ?2",
-            params![doc_id, rev],
-            |r| r.get(0),
-        )
-        .optional()?;
-    let Some(content) = content else {
-        return Err(ToolError::NotFound {
-            path: format!("version#{version_id}"),
-        });
-    };
-    let doc = fetch_row(&tx, doc_id, false)?;
-    let now = now(&tx)?;
-    let next = doc.head_rev + 1;
-    tx.execute(
-        "INSERT INTO blobs (inode, rev, content, source, created_at)
-         VALUES (?1, ?2, ?3, 'user', ?4)",
-        params![doc_id, next, content, now],
-    )?;
-    tx.execute(
-        "UPDATE inodes SET head_rev = ?1, size = ?2, mtime = ?3 WHERE inode = ?4",
-        params![next, content.len() as i64, now, doc_id],
-    )?;
-    meta::upsert(&tx, doc_id, &doc.path, &content)?;
-    index::refresh(&tx, doc_id, &doc.path, &content)?;
-    crate::vfs::fts::index_document(&tx, doc_id, &content)?;
-    tx.execute(
-        "INSERT INTO version_meta
-             (inode, rev, label, label_description, is_manual, created_at)
-         VALUES (?1, ?2, ?3, NULL, 1, ?4)",
-        params![doc_id, next, format!("恢复自 rev {rev}"), now],
-    )?;
-    tx.commit()?;
-
-    super::get(vfs, doc_id, false)
-}
-
-/// Read the body of one version on demand (already stripped of frontmatter).
+/// 读取单个版本的正文：从基线开始回放 diff 链，返回去掉 frontmatter 的正文。
 pub fn content(vfs: &VirtualFs, version_id: i64) -> Result<String, ToolError> {
     let conn = vfs.conn();
-    let target: Option<(i64, i64)> = conn
-        .query_row(
-            "SELECT inode, rev FROM version_meta WHERE id = ?1",
-            params![version_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
+    let target = find_version(conn, version_id)?;
     let Some((doc_id, rev)) = target else {
         return Err(ToolError::NotFound {
             path: format!("version#{version_id}"),
         });
     };
-    let raw: Option<String> = conn
-        .query_row(
-            "SELECT content FROM blobs WHERE inode = ?1 AND rev = ?2",
-            params![doc_id, rev],
-            |r| r.get(0),
-        )
-        .optional()?;
-    let Some(raw) = raw else {
-        return Err(ToolError::NotFound {
-            path: format!("version#{version_id}"),
-        });
-    };
-    Ok(meta::parse_document(&raw).body)
+    let markdown = version_store::replay(conn, doc_id, rev)?;
+    Ok(meta::parse_document(&markdown).body)
 }
 
-/// 删除非当前版本；当前 head 不允许删除。
-pub fn delete(vfs: &mut VirtualFs, version_id: i64) -> Result<(), ToolError> {
+/// 显式创建快照：以当前 head 内容追加一个手工版本。
+pub fn create(vfs: &mut VirtualFs, doc_id: i64) -> Result<DocVersion, ToolError> {
     let tx = vfs.conn_mut().transaction()?;
-    let row: Option<(i64, i64)> = tx
-        .query_row(
-            "SELECT inode, rev FROM version_meta WHERE id = ?1",
-            params![version_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    let Some((doc_id, rev)) = row else {
+    let row = util::fetch_row(&tx, doc_id, false)?;
+    let now = util::now(&tx)?;
+    let parts = meta::parse_document(&row.content);
+    let title = title_of(&parts, &row.path);
+    let rev = version_store::append_version(
+        &tx,
+        doc_id,
+        &version_store::VersionRecord {
+            content: &row.content,
+            source: "user",
+            title: &title,
+            kind: version_store::KIND_SNAPSHOT,
+            is_manual: true,
+            label: None,
+            created_at: &now,
+        },
+    )?;
+    let version = fetch_version(&tx, doc_id, rev)?;
+    tx.commit()?;
+    Ok(version)
+}
+
+/// 恢复旧版本：从基线回放出旧正文，原地写入 head，并追加一个 restore 版本。
+pub fn restore(vfs: &mut VirtualFs, version_id: i64) -> Result<Doc, ToolError> {
+    let tx = vfs.conn_mut().transaction()?;
+    let target = find_version(&tx, version_id)?;
+    let Some((doc_id, rev)) = target else {
         return Err(ToolError::NotFound {
             path: format!("version#{version_id}"),
         });
     };
-    let head: i64 = tx.query_row(
+    let row = util::fetch_row(&tx, doc_id, false)?;
+    let content = version_store::replay(&tx, doc_id, rev)?;
+    let now = util::now(&tx)?;
+    let parts = meta::parse_document(&content);
+    let title = title_of(&parts, &row.path);
+    version_store::append_version(
+        &tx,
+        doc_id,
+        &version_store::VersionRecord {
+            content: &content,
+            source: "user",
+            title: &title,
+            kind: version_store::KIND_RESTORE,
+            is_manual: true,
+            label: Some(&format!("恢复自 rev {rev}")),
+            created_at: &now,
+        },
+    )?;
+    meta::upsert_parts(&tx, doc_id, &row.path, &parts)?;
+    index::refresh_parts(&tx, doc_id, &row.path, &parts)?;
+    fts::index_document(&tx, doc_id, &content)?;
+    tx.commit()?;
+
+    super::get(vfs, doc_id, false)
+}
+
+/// 删除版本。为保持 diff 链完整，只允许删除最新版本（含 head 台账）：
+/// - head 版本：只删台账，head blob 保留；
+/// - 非 head 的最新版本：台账与 diff 一起删除；
+/// - 基线或中间节点：拒绝，删除会切断回放链。
+pub fn delete(vfs: &mut VirtualFs, version_id: i64) -> Result<(), ToolError> {
+    let tx = vfs.conn_mut().transaction()?;
+    let target = find_version(&tx, version_id)?;
+    let Some((doc_id, rev)) = target else {
+        return Err(ToolError::NotFound {
+            path: format!("version#{version_id}"),
+        });
+    };
+    let head_rev: i64 = tx.query_row(
         "SELECT head_rev FROM inodes WHERE inode = ?1",
         params![doc_id],
-        |r| r.get(0),
+        |row| row.get(0),
     )?;
-    if rev == head {
-        // 当前 head 的 blob 必须保留（文档内容仍指向它），只移除版本台账行，
-        // 让 UI 不再展示这个手工快照。
+    let latest = version_store::latest_rev(&tx, doc_id)?;
+    if rev <= 1 {
+        return Err(ToolError::invalid("基线版本是历史链的起点，不能删除"));
+    }
+    if latest != Some(rev) {
+        return Err(ToolError::invalid(
+            "仅可删除最新版本；删除中间版本会切断 diff 链",
+        ));
+    }
+
+    if rev == head_rev {
         tx.execute(
             "DELETE FROM version_meta WHERE id = ?1",
             params![version_id],
         )?;
-        tx.commit()?;
-        return Ok(());
+    } else {
+        tx.execute(
+            "DELETE FROM version_meta WHERE id = ?1",
+            params![version_id],
+        )?;
+        tx.execute(
+            "DELETE FROM version_diffs WHERE inode = ?1 AND rev = ?2",
+            params![doc_id, rev],
+        )?;
     }
-    tx.execute(
-        "DELETE FROM version_meta WHERE id = ?1",
-        params![version_id],
-    )?;
-    tx.execute(
-        "DELETE FROM blobs WHERE inode = ?1 AND rev = ?2",
-        params![doc_id, rev],
-    )?;
     tx.commit()?;
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_version(
-    doc_id: i64,
-    id: i64,
-    rev: i64,
-    label: Option<String>,
-    label_description: Option<String>,
-    is_manual: i64,
-    created_at: String,
-    content: &str,
-    fallback_title: &str,
-) -> DocVersion {
-    let parts = meta::parse_document(content);
-    DocVersion {
-        id,
-        doc_id,
-        version_number: rev,
-        title: parts.title.unwrap_or_else(|| fallback_title.to_string()),
-        // Bodies stay in storage; callers fetch one version on demand.
-        content: String::new(),
-        label,
-        label_description,
-        is_manual,
-        created_at,
-    }
+fn find_version(conn: &Connection, version_id: i64) -> Result<Option<(i64, i64)>, ToolError> {
+    Ok(conn
+        .query_row(
+            "SELECT inode, rev FROM version_meta WHERE id = ?1",
+            params![version_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?)
 }
 
-fn latest_version_id(vfs: &VirtualFs, doc_id: i64, rev: i64) -> Result<i64, ToolError> {
-    Ok(vfs.conn().query_row(
-        "SELECT id FROM version_meta WHERE inode = ?1 AND rev = ?2",
+fn fetch_version(conn: &Connection, doc_id: i64, rev: i64) -> Result<DocVersion, ToolError> {
+    let version = conn.query_row(
+        "SELECT v.id, v.inode, v.rev,
+                CASE WHEN v.title <> '' THEN v.title ELSE COALESCE(m.title, '') END,
+                v.label, v.label_description, v.is_manual, v.created_at
+         FROM version_meta v
+         LEFT JOIN meta m ON m.inode = v.inode
+         WHERE v.inode = ?1 AND v.rev = ?2",
         params![doc_id, rev],
-        |r| r.get(0),
-    )?)
+        |row| {
+            Ok(DocVersion {
+                id: row.get(0)?,
+                doc_id: row.get(1)?,
+                version_number: row.get(2)?,
+                title: row.get(3)?,
+                content: String::new(),
+                label: row.get(4)?,
+                label_description: row.get(5)?,
+                is_manual: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        },
+    )?;
+    Ok(version)
+}
+
+fn title_of(parts: &meta::DocumentParts, path: &str) -> String {
+    parts
+        .title
+        .clone()
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| {
+            Path::new(path)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("untitled")
+                .to_string()
+        })
 }
