@@ -56,6 +56,8 @@
   /* Full nav bar height (auto-sized content: item ~57.5px + bar padding 12px + border ~1px). */
   --tabbar-height: 70px;
   --sans: system-ui, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', Roboto, sans-serif;
+  /* UI type scale (1 = standard). Rem-based styles follow the root font size. */
+  --font-scale: 1;
 
   color-scheme: light;
   font: 16px/1.5 var(--sans);
@@ -65,6 +67,10 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
+}
+
+html {
+  font-size: calc(16px * var(--font-scale));
 }
 
 * {
@@ -3685,4 +3691,432 @@ body.split-resizing {
   height: 100%;
   background: var(--accent);
   transition: width 0.3s ease;
+}
+
+/* ============ Settings redesign (Android 14+ / iOS safe area) ============ */
+/* Information architecture: group title -> card -> row -> current value.
+   Every interactive row keeps a >=44x44pt hit area; typography is rem-based
+   so the in-app type scale and OS font scaling both apply. */
+
+.settings-page {
+  --settings-radius: 20px;
+  --settings-icon-size: 2.5rem;
+  background: var(--bg);
+}
+
+.settings-topbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: calc(6px + var(--safe-top)) 10px 6px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-back {
+  width: 3rem;
+  height: 3rem;
+  border-radius: 0.875rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text);
+  flex: none;
+}
+
+.settings-back:active {
+  background: var(--surface-2);
+}
+
+.settings-title-block {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.settings-title {
+  margin: 0;
+  font-size: 1.375rem;
+  font-weight: 650;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.settings-subtitle {
+  font-size: 0.75rem;
+  line-height: 1.3;
+  color: var(--text-3);
+}
+
+.settings-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  /* Keep the last group clear of the fixed tab bar and gesture area. */
+  padding: 6px 16px calc(var(--tabbar-height) + 24px + var(--nav-clearance));
+}
+
+.settings-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+/* Small-screen jump bar: keeps eight task groups reachable without scrolling. */
+.settings-quicknav {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  margin: 0 -16px 2px;
+  padding: 8px 16px 10px;
+  background: var(--bg);
+  scrollbar-width: none;
+}
+
+.settings-quicknav::-webkit-scrollbar {
+  display: none;
+}
+
+.settings-quicknav-chip {
+  flex: none;
+  min-height: 2.75rem;
+  padding: 0 16px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 0.875rem;
+  touch-action: manipulation;
+}
+
+.settings-quicknav-chip:active {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.settings-group {
+  margin: 6px 0 18px;
+  scroll-margin-top: 4.5rem;
+}
+
+.settings-group-title {
+  margin: 0 4px 8px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-2);
+}
+
+.settings-group-hint {
+  margin: -4px 4px 8px;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+.settings-card {
+  background: var(--surface);
+  border-radius: var(--settings-radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+/* Dividers live on the card, not the row, so expanded panels stay attached. */
+.settings-card > * + * {
+  border-top: 1px solid var(--border);
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  min-height: 3.5rem;
+  padding: 10px 16px;
+  text-align: left;
+  color: var(--text);
+}
+
+.settings-row.static {
+  cursor: default;
+}
+
+.settings-row:not(.static):active {
+  background: var(--surface-2);
+}
+
+.settings-row:not(.static):disabled {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.settings-row-icon {
+  flex: none;
+  width: var(--settings-icon-size);
+  height: var(--settings-icon-size);
+  border-radius: 0.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent-weak);
+  color: var(--accent-deep);
+}
+
+.settings-avatar {
+  flex: none;
+  width: var(--settings-icon-size);
+  height: var(--settings-icon-size);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #ff9a3d, var(--accent));
+  color: #fff;
+  font-size: 1rem;
+  font-weight: 600;
+  box-shadow: 0 4px 10px rgba(255, 122, 26, 0.28);
+}
+
+.settings-row-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-row-title {
+  font-size: 0.9375rem;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.settings-row-subtitle {
+  font-size: 0.75rem;
+  line-height: 1.45;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.settings-row-end {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 52%;
+  min-width: 0;
+}
+
+.settings-row-value {
+  font-size: 0.8125rem;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.settings-chevron {
+  display: flex;
+  flex: none;
+  color: var(--text-3);
+  transition: transform 0.18s ease;
+}
+
+.settings-chevron.expanded {
+  transform: rotate(90deg);
+}
+
+.settings-save {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.settings-save.saving {
+  color: var(--text-2);
+}
+
+.settings-save.saved {
+  color: var(--success);
+}
+
+.settings-save.error {
+  color: var(--danger);
+}
+
+.settings-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: settings-spin 0.7s linear infinite;
+}
+
+@keyframes settings-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Inline controls revealed by an expandable row. */
+.settings-row-detail {
+  padding: 2px 16px 14px;
+  background: var(--surface);
+}
+
+/* Hint bubbles used to be absolutely positioned; inside a clipped card they
+   reflow inline so long copy never gets cut off on small screens. */
+.settings-row-detail .hint-bubble,
+.settings-row-detail .hint-bubble.tooltip {
+  position: static;
+  width: auto;
+  margin: 6px 0 4px;
+  padding: 8px 10px;
+  box-shadow: none;
+}
+
+.settings-row-detail .save-info {
+  width: 2.75rem;
+  height: 2.75rem;
+  border-radius: 12px;
+  margin: -8px 0;
+}
+
+.settings-row-detail .layout-slider {
+  height: 2.75rem;
+}
+
+.settings-profile-input {
+  min-height: 3rem;
+  font-size: 1rem;
+}
+
+.settings-detail-field {
+  margin: 2px 0 6px;
+}
+
+.settings-detail-label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 0.8125rem;
+  color: var(--text-2);
+}
+
+.settings-detail-note {
+  margin: 8px 0 4px;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+/* Chips and inputs share the 44pt minimum touch target. */
+.settings-page .chips {
+  padding: 4px 0 10px;
+}
+
+.settings-page .chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  padding: 0 16px;
+  font-size: 0.875rem;
+  touch-action: manipulation;
+}
+
+.settings-page .form-input,
+.settings-page .form-select {
+  min-height: 3rem;
+  font-size: 1rem;
+}
+
+.settings-row-detail .restore-default {
+  min-height: 2.75rem;
+  padding: 10px 2px;
+}
+
+/* Embedded legacy sections: drop their duplicate titles and keep card padding. */
+.settings-embed {
+  padding: 0 16px 10px;
+}
+
+/* Embeds already sit inside .settings-row-detail, which owns the side padding. */
+.settings-row-detail .settings-embed {
+  padding: 0 0 6px;
+}
+
+.settings-embed > .settings-section-title {
+  display: none;
+}
+
+.settings-embed .form-field {
+  margin-bottom: 12px;
+}
+
+.settings-embed .settings-note {
+  margin-top: 6px;
+}
+
+.settings-embed .model-row {
+  background: var(--surface-2);
+  border-color: var(--border);
+  box-shadow: none;
+}
+
+.settings-embed .restore-default {
+  min-height: 2.75rem;
+  padding: 10px 2px;
+}
+
+.settings-legal {
+  font-size: 0.9375rem;
+  line-height: 1.7;
+  color: var(--text);
+}
+
+.settings-legal p {
+  margin: 0 0 12px;
+}
+
+.settings-legal code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--surface-2);
+  font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace;
+  font-size: 0.875em;
+}
+
+.settings-footer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 0 2px;
+  font-size: 0.75rem;
+  color: var(--text-3);
+}
+
+.settings-row:focus-visible,
+.settings-back:focus-visible,
+.settings-quicknav-chip:focus-visible,
+.settings-page .chip:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
+/* The old settings page scrolled with .page-scroll; keep legacy sections
+   that still render inside the new scroll container aligned. */
+.settings-scroll .settings-note {
+  margin-left: 0;
+  margin-right: 0;
 }

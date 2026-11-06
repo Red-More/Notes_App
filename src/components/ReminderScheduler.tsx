@@ -1,11 +1,9 @@
 import { useEffect } from 'react'
 import { api } from '../api'
+import { getAppPrefs } from '../appPrefs'
+import { ensureNotificationPermission } from '../notifications'
 import { toast } from '../toast'
-import {
-  isPermissionGranted,
-  requestPermission,
-  sendNotification,
-} from '@tauri-apps/plugin-notification'
+import { sendNotification } from '@tauri-apps/plugin-notification'
 import { dateStr, monthStr, parseDbTime } from '../utils'
 
 const CHECK_INTERVAL_MS = 30_000
@@ -16,19 +14,6 @@ const REMINDED_KEY_TTL_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
 
 const notified = (key: string) => localStorage.getItem(`reminded:${key}`) === '1'
 const markNotified = (key: string) => localStorage.setItem(`reminded:${key}`, '1')
-
-// Memoize the notification permission so it is only requested once per app run.
-let permissionPromise: Promise<boolean> | null = null
-
-function ensurePermission(): Promise<boolean> {
-  if (!permissionPromise) {
-    permissionPromise = (async () => {
-      if (await isPermissionGranted()) return true
-      return (await requestPermission()) === 'granted'
-    })()
-  }
-  return permissionPromise
-}
 
 /** Remove reminded dedupe keys older than 7 days, plus any malformed ones. */
 function cleanupRemindedKeys() {
@@ -44,7 +29,7 @@ function cleanupRemindedKeys() {
 
 /** Send a system notification when permitted, otherwise fall back to the in-app toast. */
 async function notify(text: string) {
-  if (await ensurePermission()) {
+  if (await ensureNotificationPermission()) {
     sendNotification({ title: 'Notes 提醒', body: text })
   } else {
     toast(text)
@@ -52,6 +37,8 @@ async function notify(text: string) {
 }
 
 async function checkReminders() {
+  // Master switch in Settings; read every cycle so toggling takes effect at once.
+  if (!getAppPrefs().remindersEnabled) return
   const now = Date.now()
   try {
     // Remind on todos whose due time has just passed (within 30 min window).

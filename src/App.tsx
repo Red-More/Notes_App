@@ -3,6 +3,7 @@ import { ToastHost } from './components/ui'
 import ReminderScheduler from './components/ReminderScheduler'
 import { IconCalendar, IconChat, IconNote, IconTodo, IconUsers } from './components/Icons'
 import { applyTheme, getStoredTheme } from './theme'
+import { applyFontScale } from './appPrefs'
 import NoteListPage from './pages/notes/NoteListPage'
 import FolderManagePage from './pages/notes/FolderManagePage'
 import TodoPage from './pages/todos/TodoPage'
@@ -65,9 +66,10 @@ function App() {
     locked: null,
   })
 
-  // Apply the persisted theme once on mount.
+  // Apply the persisted theme and type scale once on mount.
   useEffect(() => {
     applyTheme(getStoredTheme())
+    applyFontScale()
   }, [])
 
   const closeOverlay = () => {
