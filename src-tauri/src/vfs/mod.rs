@@ -73,16 +73,18 @@ impl VirtualFs {
         let path = cap_gate::normalize_path(&req.path)?;
         cap_gate::ensure_model_readable(&path)?;
         acl::ensure_allowed(&path, acl::AclPermission::Read)?;
-        let row: Option<(i64, String, i64)> = self
+        let row: Option<(i64, String, i64, Option<String>)> = self
             .conn
             .query_row(
-                "SELECT inode, kind, head_rev FROM inodes
-                 WHERE path = ?1 AND deleted = 0",
+                "SELECT i.inode, i.kind, i.head_rev, m.kind
+                 FROM inodes i
+                 LEFT JOIN meta m ON m.inode = i.inode
+                 WHERE i.path = ?1 AND i.deleted = 0",
                 params![path],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
-        let Some((inode, kind, head_rev)) = row else {
+        let Some((inode, kind, head_rev, doc_kind)) = row else {
             return Err(ToolError::NotFound { path });
         };
 
@@ -96,6 +98,17 @@ impl VirtualFs {
             return Err(ToolError::NotFound {
                 path: format!("{path}@rev{rev}"),
             });
+        }
+        // Non-versioned documents only keep the head blob, so old revs are gone.
+        if rev != head_rev {
+            let doc_kind = doc_kind
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| meta::infer_kind(&path).to_string());
+            if !meta::is_versioned(&doc_kind) {
+                return Err(ToolError::NotFound {
+                    path: format!("{path}@rev{rev}"),
+                });
+            }
         }
         let content: Option<String> = self
             .conn
@@ -220,7 +233,16 @@ impl VirtualFs {
             .title
             .clone()
             .unwrap_or_else(|| file_stem_title(&path));
-        version_store::record_baseline(&tx, inode, &content, &title, &now_str)?;
+        // Only notes (diary included) keep a version history; other kinds
+        // store nothing in the version tables.
+        let doc_kind = parts
+            .kind
+            .clone()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| meta::infer_kind(&path).to_string());
+        if meta::is_versioned(&doc_kind) {
+            version_store::record_baseline(&tx, inode, &content, &title, &now_str)?;
+        }
         tx.commit()?;
 
         Ok(WriteReceipt {
@@ -256,18 +278,20 @@ impl VirtualFs {
         let new_string = req.new_string;
 
         let tx = self.conn.transaction()?;
-        let row: Option<(i64, String, i64)> = tx
+        let row: Option<(i64, String, i64, Option<String>)> = tx
             .query_row(
-                "SELECT inode, kind, head_rev FROM inodes
-                 WHERE path = ?1 AND deleted = 0",
+                "SELECT i.inode, i.kind, i.head_rev, m.kind
+                 FROM inodes i
+                 LEFT JOIN meta m ON m.inode = i.inode
+                 WHERE i.path = ?1 AND i.deleted = 0",
                 params![path],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
-        let Some((inode, kind, current)) = row else {
+        let Some((inode, file_kind, current, doc_kind)) = row else {
             return Err(ToolError::NotFound { path });
         };
-        if kind != "file" {
+        if file_kind != "file" {
             return Err(ToolError::IsDirectory { path });
         }
         if let Some(expect) = req.expect_rev {
@@ -312,21 +336,50 @@ impl VirtualFs {
             .title
             .clone()
             .unwrap_or_else(|| file_stem_title(&path));
-        // Agent edits are recorded versions: the head row moves to the new rev
-        // and only a diff against the previous version is stored.
-        let next = version_store::append_version(
-            &tx,
-            inode,
-            &version_store::VersionRecord {
-                content: &replaced,
-                source: req.source.as_str(),
-                title: &title,
-                kind: version_store::KIND_AGENT,
-                is_manual: false,
-                label: None,
-                created_at: &now_str,
-            },
-        )?;
+        let doc_kind = doc_kind
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| meta::infer_kind(&path));
+        let next = if meta::is_versioned(doc_kind) {
+            // A kind switch can leave a document without a baseline; capture the
+            // pre-edit body once so the diff chain stays replayable.
+            if version_store::latest_rev(&tx, inode)?.is_none() {
+                let before = meta::parse_document(&content);
+                let before_title = before
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| file_stem_title(&path));
+                version_store::record_baseline(&tx, inode, &content, &before_title, &now_str)?;
+            }
+            // Agent edits are recorded versions: the head row moves to the new rev
+            // and only a diff against the previous version is stored.
+            version_store::append_version(
+                &tx,
+                inode,
+                &version_store::VersionRecord {
+                    content: &replaced,
+                    source: req.source.as_str(),
+                    title: &title,
+                    kind: version_store::KIND_AGENT,
+                    is_manual: false,
+                    label: None,
+                    created_at: &now_str,
+                },
+            )?
+        } else {
+            // Non-versioned documents only keep the head blob; advance it in place.
+            let next = current + 1;
+            tx.execute(
+                "UPDATE blobs SET rev = ?1, content = ?2, source = ?3, created_at = ?4
+                 WHERE inode = ?5 AND rev = ?6",
+                params![next, replaced, req.source.as_str(), now_str, inode, current],
+            )?;
+            tx.execute(
+                "UPDATE inodes SET head_rev = ?1, size = ?2, mtime = ?3 WHERE inode = ?4",
+                params![next, replaced.len() as i64, now_str, inode],
+            )?;
+            next
+        };
         meta::upsert_parts(&tx, inode, &path, &parts)?;
         index::refresh_parts(&tx, inode, &path, &parts)?;
         fts::index_document(&tx, inode, &replaced)?;

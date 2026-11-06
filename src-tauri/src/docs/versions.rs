@@ -29,6 +29,11 @@ pub fn list(
     include_auto: bool,
 ) -> Result<Vec<DocVersion>, ToolError> {
     let conn = vfs.conn();
+    // Non-versioned kinds have no history; report an empty list instead of
+    // leaking an error to list UIs.
+    if !meta::is_versioned(&doc_kind_of(conn, doc_id)?) {
+        return Ok(Vec::new());
+    }
     let mut statement = conn.prepare(
         "SELECT v.id, v.inode, v.rev,
                 CASE WHEN v.title <> '' THEN v.title ELSE COALESCE(m.title, '') END,
@@ -75,6 +80,14 @@ pub fn content(vfs: &VirtualFs, version_id: i64) -> Result<String, ToolError> {
 pub fn create(vfs: &mut VirtualFs, doc_id: i64) -> Result<DocVersion, ToolError> {
     let tx = vfs.conn_mut().transaction()?;
     let row = util::fetch_row(&tx, doc_id, false)?;
+    let kind = row
+        .meta_kind
+        .clone()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| meta::infer_kind(&row.path).to_string());
+    if !meta::is_versioned(&kind) {
+        return Err(ToolError::invalid("该类型不支持版本"));
+    }
     let now = util::now(&tx)?;
     let parts = meta::parse_document(&row.content);
     let title = title_of(&parts, &row.path);
@@ -106,6 +119,9 @@ pub fn restore(vfs: &mut VirtualFs, version_id: i64) -> Result<Doc, ToolError> {
         });
     };
     let row = util::fetch_row(&tx, doc_id, false)?;
+    if !meta::is_versioned(&doc_kind_of(&tx, doc_id)?) {
+        return Err(ToolError::invalid("该类型不支持版本"));
+    }
     let content = version_store::replay(&tx, doc_id, rev)?;
     let now = util::now(&tx)?;
     let parts = meta::parse_document(&content);
@@ -148,6 +164,9 @@ pub fn delete(vfs: &mut VirtualFs, version_id: i64) -> Result<(), ToolError> {
         params![doc_id],
         |row| row.get(0),
     )?;
+    if !meta::is_versioned(&doc_kind_of(&tx, doc_id)?) {
+        return Err(ToolError::invalid("该类型不支持版本"));
+    }
     let latest = version_store::latest_rev(&tx, doc_id)?;
     if rev <= 1 {
         return Err(ToolError::invalid("基线版本是历史链的起点，不能删除"));
@@ -175,6 +194,28 @@ pub fn delete(vfs: &mut VirtualFs, version_id: i64) -> Result<(), ToolError> {
     }
     tx.commit()?;
     Ok(())
+}
+
+/// Resolve the document kind that decides whether versioning applies.
+fn doc_kind_of(conn: &Connection, doc_id: i64) -> Result<String, ToolError> {
+    let row: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT i.path, m.kind
+             FROM inodes i
+             LEFT JOIN meta m ON m.inode = i.inode
+             WHERE i.inode = ?1 AND i.kind = 'file'",
+            params![doc_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((path, kind)) = row else {
+        return Err(ToolError::NotFound {
+            path: format!("doc#{doc_id}"),
+        });
+    };
+    Ok(kind
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| meta::infer_kind(&path).to_string()))
 }
 
 fn find_version(conn: &Connection, version_id: i64) -> Result<Option<(i64, i64)>, ToolError> {

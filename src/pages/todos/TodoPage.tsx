@@ -4,7 +4,6 @@ import { useCollapsibleHeader, useDebouncedSearch, useElasticOverscroll } from '
 import { parseDbTime, friendlyError } from '../../utils'
 import type { Todo } from '../../types'
 import { ConfirmDialog, Modal } from '../../components/ui'
-import VersionHistoryModal from '../../components/VersionHistoryModal'
 import { toast } from '../../toast'
 import { IconBell, IconCheck, IconTodo, IconTrash } from '../../components/Icons'
 import PageHeader from '../../components/PageHeader'
@@ -49,7 +48,6 @@ export default function TodoPage({ isActive }: Props) {
   const [editing, setEditing] = useState<Todo | null>(null)
   const [form, setForm] = useState<TodoForm>(EMPTY_FORM)
   const [deleteConfirm, setDeleteConfirm] = useState<Todo | null>(null)
-  const [versionsDoc, setVersionsDoc] = useState<Todo | null>(null)
   const [loading, setLoading] = useState(true)
   const [visible, setVisible] = useState(PAGE)
 
@@ -321,18 +319,6 @@ export default function TodoPage({ isActive }: Props) {
           onClose={() => setEditOpen(false)}
           footer={
             <>
-              {editing && (
-                <button
-                  type="button"
-                  className="btn btn-plain"
-                  onClick={() => {
-                    setVersionsDoc(editing)
-                    setEditOpen(false)
-                  }}
-                >
-                  历史版本
-                </button>
-              )}
               <button type="button" className="btn btn-primary" onClick={() => void handleSave()}>
                 {editing ? '保存' : '创建'}
               </button>
@@ -392,15 +378,6 @@ export default function TodoPage({ isActive }: Props) {
             </label>
           </div>
         </Modal>
-      )}
-
-      {versionsDoc && (
-        <VersionHistoryModal
-          docId={versionsDoc.id}
-          title={versionsDoc.title}
-          onClose={() => setVersionsDoc(null)}
-          onRestored={() => void load()}
-        />
       )}
     </div>
   )

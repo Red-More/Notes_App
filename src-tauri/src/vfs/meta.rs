@@ -153,6 +153,12 @@ pub fn infer_kind(path: &str) -> &'static str {
     }
 }
 
+/// The single source of truth for "which documents keep a version history".
+/// Notes and diary entries are versioned; todos, contacts and events are not.
+pub fn is_versioned(kind: &str) -> bool {
+    matches!(kind, "note" | "diary")
+}
+
 /// Same as the previous whole-document entry point but reuses an already
 /// parsed document, so callers that also refresh other mirrors can parse the
 /// rewritten markdown only once.

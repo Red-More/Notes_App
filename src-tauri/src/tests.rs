@@ -743,6 +743,152 @@ fn restore_writes_head_and_appends_replayed_version() {
     assert_eq!(count_rows(&vfs, "blobs", doc.id), 1);
 }
 
+#[test]
+fn note_agent_edit_appends_version() {
+    let mut vfs = test_vfs();
+    let doc = docs::create(&mut vfs, "note", "笔记版本", "第一版", None, None).unwrap();
+    assert_eq!(count_rows(&vfs, "version_bases", doc.id), 1);
+
+    let receipt = edit_file(
+        &mut vfs,
+        &doc.path,
+        "第一版",
+        "第二版",
+        Some(1),
+        WriteSource::Agent,
+    )
+    .expect("agent edit should succeed");
+    assert_eq!(receipt.rev, 2);
+
+    let history = versions::list(&vfs, doc.id, true).unwrap();
+    assert_eq!(history.len(), 2, "agent edits are recorded versions");
+    assert_eq!(count_rows(&vfs, "blobs", doc.id), 1);
+    assert_eq!(count_rows(&vfs, "version_diffs", doc.id), 1);
+
+    // Both revisions still replay correctly from the baseline.
+    assert_eq!(
+        versions::content(&vfs, version_id(&vfs, doc.id, 1)).unwrap(),
+        "第一版"
+    );
+    assert_eq!(
+        versions::content(&vfs, version_id(&vfs, doc.id, 2)).unwrap(),
+        "第二版"
+    );
+    assert_eq!(write_meta(&vfs, doc.id, 2).0, "agent");
+    assert_eq!(
+        write_meta(&vfs, doc.id, 2).1,
+        0,
+        "agent edits are not manual"
+    );
+}
+
+#[test]
+fn non_note_documents_keep_no_version_rows() {
+    let mut vfs = test_vfs();
+    let doc = docs::create(&mut vfs, "todo", "待办", "- [ ] 买牛奶", None, None).unwrap();
+    assert_eq!(count_rows(&vfs, "version_bases", doc.id), 0);
+    assert_eq!(count_rows(&vfs, "version_meta", doc.id), 0);
+    assert!(versions::list(&vfs, doc.id, true).unwrap().is_empty());
+
+    // Autosave must not write version rows either.
+    let saved = docs::save(
+        &mut vfs,
+        doc.id,
+        None,
+        Some("- [ ] 买牛奶\n- [ ] 写代码".into()),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(saved.rev, 1);
+    assert_eq!(count_rows(&vfs, "version_bases", doc.id), 0);
+    assert_eq!(count_rows(&vfs, "version_meta", doc.id), 0);
+
+    let receipt = edit_file(
+        &mut vfs,
+        &doc.path,
+        "写代码",
+        "写文档",
+        Some(1),
+        WriteSource::Agent,
+    )
+    .expect("editing a todo should succeed");
+    assert_eq!(receipt.rev, 2, "the head rev still advances in place");
+    assert!(docs::get(&vfs, doc.id, false)
+        .unwrap()
+        .content
+        .contains("写文档"));
+    assert_eq!(count_rows(&vfs, "blobs", doc.id), 1);
+    assert_eq!(count_rows(&vfs, "version_bases", doc.id), 0);
+    assert_eq!(count_rows(&vfs, "version_diffs", doc.id), 0);
+    assert_eq!(count_rows(&vfs, "version_meta", doc.id), 0);
+    assert!(versions::list(&vfs, doc.id, true).unwrap().is_empty());
+
+    // Non-versioned docs only keep the head, so old revisions read as NotFound.
+    assert!(matches!(
+        vfs.read(ReadRequest {
+            path: doc.path.clone(),
+            rev: Some(1),
+            start_line: None,
+            end_line: None,
+            include_meta: None,
+        }),
+        Err(ToolError::NotFound { .. })
+    ));
+
+    // The generic agent write path follows the same rule.
+    let receipt = write_file(
+        &mut vfs,
+        "todos/agent-todo",
+        "- [ ] 浇水",
+        WriteSource::Agent,
+    );
+    let inode = inode_of(&vfs, &receipt.path);
+    assert_eq!(count_rows(&vfs, "version_bases", inode), 0);
+    assert_eq!(count_rows(&vfs, "version_meta", inode), 0);
+}
+
+#[test]
+fn version_apis_reject_non_note_documents() {
+    let mut vfs = test_vfs();
+    let todo = docs::create(&mut vfs, "todo", "待办", "- [ ] 买牛奶", None, None).unwrap();
+    assert!(versions::list(&vfs, todo.id, true).unwrap().is_empty());
+    match versions::create(&mut vfs, todo.id) {
+        Err(ToolError::InvalidArgument { message }) => {
+            assert!(message.contains("该类型不支持版本"))
+        }
+        other => panic!("version_create must reject todos, got {other:?}"),
+    }
+
+    // A note that later becomes a todo keeps its old rows but accepts no writes.
+    let note = docs::create(&mut vfs, "note", "会转类型", "正文", None, None).unwrap();
+    let snapshot = versions::create(&mut vfs, note.id).unwrap();
+    edit_file(
+        &mut vfs,
+        &note.path,
+        "kind: \"note\"",
+        "kind: todo",
+        None,
+        WriteSource::Agent,
+    )
+    .expect("kind switch edit should succeed");
+    assert_eq!(docs::get(&vfs, note.id, false).unwrap().kind, "todo");
+
+    match versions::restore(&mut vfs, snapshot.id) {
+        Err(ToolError::InvalidArgument { message }) => {
+            assert!(message.contains("该类型不支持版本"))
+        }
+        other => panic!("version_restore must reject non-notes, got {other:?}"),
+    }
+    match versions::delete(&mut vfs, snapshot.id) {
+        Err(ToolError::InvalidArgument { message }) => {
+            assert!(message.contains("该类型不支持版本"))
+        }
+        other => panic!("version_delete must reject non-notes, got {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Agent 自定义模型：注册表、激活、URL 校验、参数、代理请求
 // ---------------------------------------------------------------------------

@@ -4,7 +4,6 @@ import { useCollapsibleHeader, useDebouncedSearch, useElasticOverscroll } from '
 import { dateStr, monthStr, shortTime, friendlyError } from '../../utils'
 import type { Schedule } from '../../types'
 import { ConfirmDialog, Modal } from '../../components/ui'
-import VersionHistoryModal from '../../components/VersionHistoryModal'
 import { toast } from '../../toast'
 import { IconBell, IconCalendar, IconChevronLeft, IconChevronRight } from '../../components/Icons'
 import PageHeader from '../../components/PageHeader'
@@ -31,7 +30,6 @@ export default function SchedulePage({ isActive }: { isActive: boolean }) {
   const [editing, setEditing] = useState<Schedule | null>(null)
   const [form, setForm] = useState<ScheduleForm | null>(null)
   const [deleteConfirm, setDeleteConfirm] = useState<Schedule | null>(null)
-  const [versionsDoc, setVersionsDoc] = useState<Schedule | null>(null)
   const [loading, setLoading] = useState(true)
 
   // Scroll-linked collapsing header (large title + search bar).
@@ -322,19 +320,6 @@ export default function SchedulePage({ isActive }: { isActive: boolean }) {
                   删除
                 </button>
               )}
-              {editing && (
-                <button
-                  type="button"
-                  className="btn btn-plain"
-                  style={{ flex: '0 0 96px' }}
-                  onClick={() => {
-                    setVersionsDoc(editing)
-                    setEditOpen(false)
-                  }}
-                >
-                  历史版本
-                </button>
-              )}
               <button type="button" className="btn btn-primary" onClick={() => void handleSave()}>
                 {editing ? '保存' : '创建'}
               </button>
@@ -420,15 +405,6 @@ export default function SchedulePage({ isActive }: { isActive: boolean }) {
             </label>
           </div>
         </Modal>
-      )}
-
-      {versionsDoc && (
-        <VersionHistoryModal
-          docId={versionsDoc.id}
-          title={versionsDoc.title}
-          onClose={() => setVersionsDoc(null)}
-          onRestored={() => void load()}
-        />
       )}
     </div>
   )
