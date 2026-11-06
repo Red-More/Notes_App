@@ -253,6 +253,8 @@ export const api = {
     startLine?: number
     endLine?: number
     includeMeta?: boolean
+    /** UI reads bypass the Agent folder ACL. */
+    principal?: 'user' | 'agent'
   }) => invoke<VfsReadResult>('fs_read', params),
   fsWrite: (params: {
     path: string
@@ -267,14 +269,19 @@ export const api = {
     replaceAll?: boolean
     expectRev?: number
   }) => invoke<VfsEditReceipt>('fs_edit', params),
-  fsGlob: (params: { pattern: string; root?: string; caseSensitive?: boolean }) =>
-    invoke<VfsGlobEntry[]>('fs_glob', params),
+  fsGlob: (params: {
+    pattern: string
+    root?: string
+    caseSensitive?: boolean
+    principal?: 'user' | 'agent'
+  }) => invoke<VfsGlobEntry[]>('fs_glob', params),
   fsGrep: (params: {
     pattern: string
     path?: string
     type?: string
     maxResults?: number
     contextLines?: number
+    principal?: 'user' | 'agent'
   }) => invoke<VfsGrepResponse>('fs_grep', params),
 
   // ---- Notes (doc kind = note) ----
@@ -292,7 +299,12 @@ export const api = {
    * grep 的命中路径直接作为 doc_list 的过滤条件，避免拉取全量列表再按 path 筛选。
    */
   searchNotes: async (params: { search: string; folderId?: number; unclassified?: boolean }) => {
-    const hits = await api.fsGrep({ pattern: params.search, type: 'note', maxResults: 200 })
+    const hits = await api.fsGrep({
+      pattern: params.search,
+      type: 'note',
+      maxResults: 200,
+      principal: 'user',
+    })
     const paths = hits.hits.map((hit) => hit.path)
     const docs = paths.length
       ? await docApi.list({

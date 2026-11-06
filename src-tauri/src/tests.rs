@@ -16,6 +16,7 @@ use crate::privacy::policy::Level;
 use crate::privacy::recognizers::DetectedKind;
 use crate::privacy::{egress, entity, policy, recognizers};
 use crate::skills::{self, SkillInput};
+use crate::vfs::acl::Principal;
 use crate::vfs::cap_gate;
 use crate::vfs::error::ToolError;
 use crate::vfs::types::*;
@@ -25,9 +26,211 @@ fn test_vfs() -> VirtualFs {
     let mut conn = rusqlite::Connection::open_in_memory().expect("open in-memory life.db");
     db::wal::configure(&conn).expect("apply wal pragmas");
     db::schema::create(&mut conn).expect("create the final schema");
+    // Fixtures exercise the legacy permissive layout, so grant the whole VFS to
+    // the Agent here. ACL-specific tests revoke this row first.
+    conn.execute_batch(
+        "INSERT INTO path_acl (path_prefix, permission, principal, created_at) VALUES
+         ('/life', 'allow-read', NULL, datetime('now','localtime')),
+         ('/life', 'allow-write', NULL, datetime('now','localtime'));",
+    )
+    .expect("seed permissive test acl");
     // Mirror the production startup order: seeds live in the business layer.
     policy::seed_defaults(&conn).expect("seed privacy defaults");
     VirtualFs::new(conn)
+}
+
+/// Restore default-deny for Agent-facing assertions.
+fn revoke_agent_acl(vfs: &VirtualFs) {
+    vfs.conn()
+        .execute("DELETE FROM path_acl WHERE path_prefix = '/life'", [])
+        .expect("revoke permissive acl");
+}
+
+#[test]
+fn acl_default_denies_and_allows_agent_workspace() {
+    let mut vfs = test_vfs();
+    revoke_agent_acl(&vfs);
+
+    // The seeded allow rule on /life/agent grants read and write to the Agent.
+    write_file(&mut vfs, "/life/agent/scratch", "工作草稿", WriteSource::Agent);
+    match read_file(&vfs, "/life/agent/scratch.md") {
+        ReadResult::File { content, .. } => assert!(content.contains("工作草稿")),
+        ReadResult::Dir { .. } => panic!("expected a file"),
+    }
+
+    // No matching rule means deny by default.
+    let denied = vfs
+        .read(ReadRequest {
+            path: "/life/notes/secret.md".into(),
+            rev: None,
+            start_line: None,
+            end_line: None,
+            include_meta: None,
+            principal: Principal::Agent,
+        })
+        .unwrap_err();
+    assert!(matches!(denied, ToolError::PermissionDenied { .. }));
+}
+
+#[test]
+fn acl_user_principal_bypasses_rules() {
+    let vfs = test_vfs();
+    revoke_agent_acl(&vfs);
+    assert!(vfs
+        .read(ReadRequest {
+            path: "/life/notes".into(),
+            rev: None,
+            start_line: None,
+            end_line: None,
+            include_meta: None,
+            principal: Principal::User,
+        })
+        .is_ok());
+}
+
+#[test]
+fn acl_longest_prefix_wins_and_deny_has_priority() {
+    let mut vfs = test_vfs();
+    revoke_agent_acl(&vfs);
+    write_file(&mut vfs, "/life/notes/public", "ok", WriteSource::User);
+    write_file(
+        &mut vfs,
+        "/life/notes/private/secret",
+        "hidden",
+        WriteSource::User,
+    );
+    vfs.conn()
+        .execute_batch(
+            "INSERT INTO path_acl (path_prefix, permission, principal, created_at) VALUES
+             ('/life/notes', 'allow-read', NULL, datetime('now','localtime')),
+             ('/life/notes/private', 'deny', NULL, datetime('now','localtime'));",
+        )
+        .unwrap();
+
+    assert!(vfs
+        .read(ReadRequest {
+            path: "/life/notes/public.md".into(),
+            rev: None,
+            start_line: None,
+            end_line: None,
+            include_meta: None,
+            principal: Principal::Agent,
+        })
+        .is_ok());
+    let denied = vfs
+        .read(ReadRequest {
+            path: "/life/notes/private/secret.md".into(),
+            rev: None,
+            start_line: None,
+            end_line: None,
+            include_meta: None,
+            principal: Principal::Agent,
+        })
+        .unwrap_err();
+    assert!(matches!(denied, ToolError::PermissionDenied { .. }));
+
+    // At the same prefix length, deny overrides allow.
+    vfs.conn()
+        .execute(
+            "INSERT INTO path_acl (path_prefix, permission, principal, created_at)
+             VALUES ('/life/notes', 'deny', NULL, datetime('now','localtime'))",
+            [],
+        )
+        .unwrap();
+    assert!(vfs
+        .read(ReadRequest {
+            path: "/life/notes/public.md".into(),
+            rev: None,
+            start_line: None,
+            end_line: None,
+            include_meta: None,
+            principal: Principal::Agent,
+        })
+        .is_err());
+}
+
+#[test]
+fn acl_filters_glob_and_grep_results() {
+    let mut vfs = test_vfs();
+    write_file(&mut vfs, "/life/notes/public", "needle", WriteSource::User);
+    write_file(&mut vfs, "/life/agent/private", "needle", WriteSource::User);
+    revoke_agent_acl(&vfs);
+
+    let hits = vfs
+        .grep(GrepRequest {
+            pattern: "needle".into(),
+            path: None,
+            max_results: Some(50),
+            context_lines: None,
+            doc_type: None,
+            principal: Principal::Agent,
+        })
+        .unwrap();
+    assert!(hits.hits.iter().all(|hit| hit.path.starts_with("/life/agent/")));
+    assert!(hits.hits.iter().any(|hit| hit.path == "/life/agent/private.md"));
+
+    let entries = vfs
+        .glob(GlobRequest {
+            pattern: "/life/*/*.md".into(),
+            root: None,
+            case_sensitive: None,
+            principal: Principal::Agent,
+        })
+        .unwrap();
+    assert!(entries.iter().all(|entry| entry.path.starts_with("/life/agent/")));
+    assert!(entries.iter().any(|entry| entry.path == "/life/agent/private.md"));
+
+    // The user principal still sees the full result set (UI search keeps working).
+    let user_hits = vfs
+        .grep(GrepRequest {
+            pattern: "needle".into(),
+            path: None,
+            max_results: Some(50),
+            context_lines: None,
+            doc_type: None,
+            principal: Principal::User,
+        })
+        .unwrap();
+    assert!(user_hits
+        .hits
+        .iter()
+        .any(|hit| hit.path == "/life/notes/public.md"));
+}
+
+#[test]
+fn folders_list_covers_all_system_dirs_and_skips_agents() {
+    let vfs = test_vfs();
+    let stats = docs::folders::list(&vfs).unwrap();
+    let names: Vec<&str> = stats.folders.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(stats.default_folder_name, "默认");
+    assert_eq!(names.len(), 6, "notes/diary/todos/contacts/schedule/agent");
+    for expected in ["默认", "日记", "待办", "联系人", "日程", "AI 工作区"] {
+        assert!(names.contains(&expected), "missing folder {expected}");
+    }
+}
+
+#[test]
+fn doc_list_inside_a_folder_ignores_kind_filter() {
+    let mut vfs = test_vfs();
+    let todo = docs::create(&mut vfs, "todo", "买菜", "- [ ] 买菜", None, None).unwrap();
+    let todos_id: i64 = vfs
+        .conn()
+        .query_row(
+            "SELECT inode FROM inodes WHERE path = '/life/todos'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let listed = docs::list(
+        &vfs,
+        docs::types::ListQuery {
+            folder_id: Some(todos_id),
+            kind: Some("note".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(listed.iter().any(|doc| doc.id == todo.id));
 }
 
 fn write_file(vfs: &mut VirtualFs, path: &str, content: &str, source: WriteSource) -> WriteReceipt {
@@ -66,6 +269,7 @@ fn read_file(vfs: &VirtualFs, path: &str) -> ReadResult {
         start_line: None,
         end_line: None,
         include_meta: Some(true),
+        principal: Principal::Agent,
     })
     .expect("read should succeed")
 }
@@ -212,6 +416,7 @@ fn write_edit_read_grep_roundtrip() {
             max_results: None,
             context_lines: None,
             doc_type: None,
+            principal: Principal::Agent,
         })
         .expect("grep should succeed");
     assert_eq!(grep.total, 1);
@@ -235,6 +440,7 @@ fn glob_accepts_absolute_and_relative_patterns() {
             pattern: "/life/todos/*.md".into(),
             root: None,
             case_sensitive: None,
+            principal: Principal::Agent,
         })
         .expect("absolute patterns used by the model must work");
     assert_eq!(absolute.len(), 1);
@@ -245,6 +451,7 @@ fn glob_accepts_absolute_and_relative_patterns() {
             pattern: "*.md".into(),
             root: Some("/life/todos".into()),
             case_sensitive: None,
+            principal: Principal::Agent,
         })
         .expect("relative patterns with root must keep working");
     assert_eq!(relative.len(), 1);
@@ -254,6 +461,7 @@ fn glob_accepts_absolute_and_relative_patterns() {
             pattern: "/etc/*".into(),
             root: None,
             case_sensitive: None,
+            principal: Principal::Agent,
         })
         .is_err(),
         "absolute patterns outside /life must be rejected"
@@ -263,6 +471,7 @@ fn glob_accepts_absolute_and_relative_patterns() {
             pattern: "../*.md".into(),
             root: None,
             case_sensitive: None,
+            principal: Principal::Agent,
         })
         .is_err());
 }
@@ -314,6 +523,7 @@ fn soft_delete_restore_and_purge() {
             start_line: None,
             end_line: None,
             include_meta: None,
+            principal: Principal::Agent,
         })
         .is_err());
 
@@ -833,6 +1043,7 @@ fn non_note_documents_keep_no_version_rows() {
             start_line: None,
             end_line: None,
             include_meta: None,
+            principal: Principal::Agent,
         }),
         Err(ToolError::NotFound { .. })
     ));
@@ -2102,6 +2313,7 @@ fn grep_vfs(
         max_results: Some(200),
         context_lines: None,
         doc_type: doc_type.map(str::to_string),
+        principal: Principal::Agent,
     })
     .expect("grep should succeed")
 }
@@ -2627,6 +2839,7 @@ fn malicious_skill_is_only_text_and_agents_stay_read_only() {
             start_line: None,
             end_line: None,
             include_meta: None,
+            principal: Principal::Agent,
         }),
         Err(ToolError::ReadOnlyArea { .. })
     ));
@@ -2806,6 +3019,7 @@ fn thousand_document_search_performance() {
             start_line: None,
             end_line: None,
             include_meta: None,
+            principal: Principal::Agent,
         })
         .unwrap();
     });

@@ -13,6 +13,21 @@ use super::types::{Folder, FolderStats};
 use super::util::{basename, now, safe_segment, unique_dir_path, unique_file_path};
 
 const MAX_FOLDER_NAME_CHARS: usize = 50;
+/// 技能配置区不在笔记页展示。
+const AGENTS_ROOT: &str = "/life/.agents";
+
+/// Chinese fallback for system folders whose `meta.title` is missing.
+fn default_display_name(path: &str) -> Option<&'static str> {
+    match path {
+        "/life/notes" => Some("默认"),
+        "/life/diary" => Some("日记"),
+        "/life/todos" => Some("待办"),
+        "/life/contacts" => Some("联系人"),
+        "/life/schedule" => Some("日程"),
+        "/life/agent" => Some("AI 工作区"),
+        _ => None,
+    }
+}
 
 /// 列出文件夹统计。默认文件夹 = `/life/notes` 本身，folderId 为 null。
 pub fn list(vfs: &VirtualFs) -> Result<FolderStats, ToolError> {
@@ -23,7 +38,7 @@ pub fn list(vfs: &VirtualFs) -> Result<FolderStats, ToolError> {
     let total = count_files_under(conn, NOTES_ROOT)?;
     let unclassified = count_direct_files(conn, NOTES_ROOT)?;
 
-    let prefix = format!("{NOTES_ROOT}/");
+    let prefix = format!("{}/", cap_gate::ROOT);
     let like = format!("{}%", cap_gate::escape_like(&prefix));
     let mut stmt = conn.prepare(
         "SELECT i.inode, i.path, i.pinned, i.ctime, COALESCE(m.title, '')
@@ -31,10 +46,11 @@ pub fn list(vfs: &VirtualFs) -> Result<FolderStats, ToolError> {
          LEFT JOIN meta m ON m.inode = i.inode
          WHERE i.kind = 'directory' AND i.deleted = 0
            AND i.path LIKE ?1 ESCAPE '\\'
+           AND i.path != ?3
            AND instr(substr(i.path, length(?2) + 1), '/') = 0
-         ORDER BY i.pinned DESC, i.ctime ASC",
+         ORDER BY i.pinned DESC, i.ctime ASC, i.inode ASC",
     )?;
-    let rows = stmt.query_map(params![like, prefix], |r| {
+    let rows = stmt.query_map(params![like, prefix, AGENTS_ROOT], |r| {
         Ok((
             r.get::<_, i64>(0)?,
             r.get::<_, String>(1)?,
@@ -48,7 +64,9 @@ pub fn list(vfs: &VirtualFs) -> Result<FolderStats, ToolError> {
     for row in rows {
         let (id, path, pinned, created_at, title) = row?;
         let name = if title.is_empty() {
-            basename(&path).to_string()
+            default_display_name(&path)
+                .map(str::to_string)
+                .unwrap_or_else(|| basename(&path).to_string())
         } else {
             title
         };

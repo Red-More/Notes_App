@@ -53,6 +53,7 @@ function toolErrorText(error: unknown): string {
     path?: string
     hint?: string
     root?: string
+    permission?: string
     got?: string
     current?: number
     expect?: number
@@ -74,6 +75,8 @@ function toolErrorText(error: unknown): string {
       return `父目录不存在：${err.path}`
     case 'readOnlyArea':
       return `该路径属于只读区，禁止写入：${err.path}`
+    case 'permissionDenied':
+      return `该路径未授权给 AI（需要 ${err.permission ?? 'read'} 权限）：${err.path}；默认只能访问 /life/agent，请让用户在设置中授权该文件夹`
     case 'conflict':
       return `版本冲突：当前 rev=${err.current}，期望 rev=${err.expect}；请重新 read 后再编辑`
     case 'noMatch':
@@ -143,9 +146,9 @@ export function createTools(
     name: 'fs_read',
     label: '读取文档',
     description:
-      '读取 /life 下的一个文件，或列出目录。文件返回正文、行数与 rev。修改前先 read 拿到最新 rev。',
+      '读取一个文件，或列出目录。文件返回正文、行数与 rev。默认只能访问自己的工作目录 /life/agent；其它目录需用户授权。修改前先 read 拿到最新 rev。',
     parameters: Type.Object({
-      path: Type.String({ description: '虚拟路径，如 /life/diary/2026-10-30.md' }),
+      path: Type.String({ description: '虚拟路径，如 /life/agent/2026-10-30.md' }),
       rev: Type.Optional(Type.Number({ description: '指定历史版本；省略读当前版本' })),
       startLine: Type.Optional(Type.Number({ description: '起始行（1 起）' })),
       endLine: Type.Optional(Type.Number({ description: '结束行（含）' })),
@@ -190,7 +193,7 @@ export function createTools(
     name: 'fs_write',
     label: '新建文档',
     description:
-      '新建一个 Markdown 文档。只能新建，不能覆盖：目标已存在会返回 alreadyExists。追加内容请先 read 文件尾部，再用 fs_edit 锚定追加。',
+      '新建一个 Markdown 文档。只能新建，不能覆盖：目标已存在会返回 alreadyExists。默认只能写自己的工作目录 /life/agent；其它目录需用户授权。追加内容请先 read 文件尾部，再用 fs_edit 锚定追加。',
     parameters: Type.Object({
       path: Type.String({ description: '虚拟路径；省略 .md 会自动补' }),
       content: Type.String({ description: 'Markdown 正文（可含 frontmatter）' }),
@@ -234,7 +237,7 @@ export function createTools(
     name: 'fs_edit',
     label: '编辑文档',
     description:
-      '按字符串替换修改已有文档，追加新 rev。old_string 必须唯一命中；追加内容时把它设为文件末尾附近的一段原文。带上 expectRev 可在版本冲突时被拒绝。',
+      '按字符串替换修改已有文档，追加新 rev。old_string 必须唯一命中；追加内容时把它设为文件末尾附近的一段原文。带上 expectRev 可在版本冲突时被拒绝。默认只能改自己的工作目录 /life/agent；其它目录需用户授权。',
     parameters: Type.Object({
       path: Type.String({ description: '虚拟路径' }),
       oldString: Type.String({ description: '要被替换的原文，必须唯一命中' }),
@@ -287,12 +290,12 @@ export function createTools(
   const glob: AgentTool = {
     name: 'fs_glob',
     label: '查找路径',
-    description: '按路径模式查找文件或目录，最多 200 条。用于确认某类文档是否存在。',
+    description: '按路径模式查找文件或目录，最多 200 条。默认只能看到自己的工作目录 /life/agent；其它目录需用户授权。',
     parameters: Type.Object({
       pattern: Type.String({
-        description: 'GLOB 模式：绝对路径（如 /life/diary/*.md）或相对模式（配合 root）',
+        description: 'GLOB 模式：绝对路径（如 /life/agent/*.md）或相对模式（配合 root）',
       }),
-      root: Type.Optional(Type.String({ description: '相对模式的根目录，默认 /life' })),
+      root: Type.Optional(Type.String({ description: '相对模式的根目录，默认 /life（结果按授权过滤）' })),
       caseSensitive: Type.Optional(Type.Boolean({ description: '是否区分大小写' })),
     }),
     prepareArguments: (raw) => {
@@ -316,10 +319,10 @@ export function createTools(
   const grep: AgentTool = {
     name: 'fs_grep',
     label: '内容搜索',
-    description: '在 /life 下按内容搜索，返回 path:line 与上下文片段。默认最多 50 条。',
+    description: '按内容搜索，返回 path:line 与上下文片段。默认最多 50 条；默认只能搜到已授权目录（/life/agent），其它目录需用户授权。',
     parameters: Type.Object({
       pattern: Type.String({ description: '要搜索的文字' }),
-      path: Type.Optional(Type.String({ description: '限定路径或目录，默认 /life' })),
+      path: Type.Optional(Type.String({ description: '限定路径或目录，默认全库（结果按授权过滤）' })),
       type: Type.Optional(
         StringEnum(GREP_TYPES, {
           description: '限定文档类型：note/todo/event/contact/diary',

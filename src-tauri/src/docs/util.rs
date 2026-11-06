@@ -154,6 +154,31 @@ fn path_is_notes_dir(path: &str) -> bool {
     path == NOTES_ROOT || path.starts_with("/life/notes/")
 }
 
+/// 列表视图可浏览 `/life` 下任意可见目录（笔记页现在展示全部文件夹）。
+/// 写路径（保存/移动/创建）仍使用严格的 `folder_path`。
+pub(super) fn folder_path_any(conn: &Connection, folder_id: i64) -> Result<String, ToolError> {
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT kind, path FROM inodes WHERE inode = ?1 AND deleted = 0",
+            params![folder_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    match row {
+        Some((kind, path))
+            if kind == "directory"
+                && path.starts_with("/life/")
+                && !path.starts_with("/life/.agents") =>
+        {
+            Ok(path)
+        }
+        Some(_) => Err(ToolError::invalid("目标不是可浏览的文件夹")),
+        None => Err(ToolError::NotFound {
+            path: format!("folder#{folder_id}"),
+        }),
+    }
+}
+
 /// 一次性加载 /life/notes 下所有目录的 (id, 显示名)，避免列表 N+1 查询。
 pub(super) fn folder_map(conn: &Connection) -> Result<HashMap<String, (i64, String)>, ToolError> {
     let mut stmt = conn.prepare(

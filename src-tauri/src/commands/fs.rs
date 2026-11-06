@@ -3,6 +3,7 @@
 //! 这一层只做三件事：接收前端参数、加锁取 VirtualFs、把结果/错误原样返回。
 //! 路径白名单、配额、版本冲突等规则全部在 `vfs` 内部执行，command 不复制逻辑。
 
+use crate::vfs::acl::Principal;
 use crate::vfs::error::ToolError;
 use crate::vfs::types::*;
 use crate::vfs::VfsState;
@@ -19,6 +20,7 @@ pub fn fs_read(
     start_line: Option<usize>,
     end_line: Option<usize>,
     include_meta: Option<bool>,
+    principal: Option<String>,
 ) -> Result<ReadResult, ToolError> {
     let vfs = crate::lock(&state.0);
     vfs.read(ReadRequest {
@@ -27,6 +29,7 @@ pub fn fs_read(
         start_line,
         end_line,
         include_meta,
+        principal: Principal::parse(principal.as_deref()),
     })
 }
 
@@ -77,12 +80,14 @@ pub fn fs_glob(
     pattern: String,
     root: Option<String>,
     case_sensitive: Option<bool>,
+    principal: Option<String>,
 ) -> Result<Vec<GlobEntry>, ToolError> {
     let vfs = crate::lock(&state.0);
     vfs.glob(GlobRequest {
         pattern,
         root,
         case_sensitive,
+        principal: Principal::parse(principal.as_deref()),
     })
 }
 
@@ -96,6 +101,7 @@ pub fn fs_grep(
     r#type: Option<String>,
     max_results: Option<usize>,
     context_lines: Option<usize>,
+    principal: Option<String>,
 ) -> Result<GrepResponse, ToolError> {
     let vfs = crate::lock(&state.0);
     vfs.grep(GrepRequest {
@@ -104,5 +110,6 @@ pub fn fs_grep(
         max_results,
         context_lines,
         doc_type: r#type,
+        principal: Principal::parse(principal.as_deref()),
     })
 }

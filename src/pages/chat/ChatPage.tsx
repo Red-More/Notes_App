@@ -1161,7 +1161,7 @@ export default function ChatPage({ isActive }: Props) {
   const openDocPreview = useCallback(async (path: string) => {
     setDocPreview({ path, html: '' })
     try {
-      const result = await api.fsRead({ path, includeMeta: true })
+      const result = await api.fsRead({ path, includeMeta: true, principal: 'user' })
       if (result.kind !== 'file') throw new Error('该路径不是文件')
       const { renderMarkdownPreview } = await import('../../editor/markdown')
       setDocPreview({

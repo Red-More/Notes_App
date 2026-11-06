@@ -30,6 +30,8 @@ pub fn run() {
         .setup(|app| {
             // life.db 是唯一数据库；VirtualFs 独占连接并通过 Mutex 串行化。
             let conn = db::init(app.handle())?;
+            // 系统目录、中文标题与 Agent 默认 ACL：幂等补齐，不覆盖用户修改。
+            db::schema::ensure_default_dirs(&conn)?;
             // 隐私分级默认值由业务层种入，基础设施层不再反向依赖 privacy。
             // INSERT OR IGNORE 保证重复启动不会覆盖用户修改。
             privacy::policy::seed_defaults(&conn)?;

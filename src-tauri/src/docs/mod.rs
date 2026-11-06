@@ -33,8 +33,8 @@ use crate::vfs::{
 
 use types::{Doc, DocFields, DocSaveReceipt, ListQuery};
 use util::{
-    basename, doc_date, doc_from_row, fetch_row, folder_map, folder_path, head_content, parent_dir,
-    root_for, safe_segment, unique_file_path,
+    basename, doc_date, doc_from_row, fetch_row, folder_map, folder_path, folder_path_any,
+    head_content, parent_dir, root_for, safe_segment, unique_file_path,
 };
 
 /// 读取单个文档。
@@ -61,13 +61,17 @@ pub fn list(vfs: &VirtualFs, query: ListQuery) -> Result<Vec<Doc>, ToolError> {
     );
     let mut args: Vec<SqlValue> = vec![SqlValue::Integer(deleted)];
 
-    if let Some(kind) = kind_filter.as_deref() {
-        sql.push_str(" AND m.kind = ?");
-        args.push(SqlValue::Text(kind.to_string()));
+    // A folder tab shows whatever lives inside it, so kind is ignored when a
+    // folder id is given (folder list now spans notes, todos, diary, agent...).
+    if query.folder_id.is_none() {
+        if let Some(kind) = kind_filter.as_deref() {
+            sql.push_str(" AND m.kind = ?");
+            args.push(SqlValue::Text(kind.to_string()));
+        }
     }
 
     if let Some(folder_id) = query.folder_id {
-        let dir = folder_path(conn, folder_id)?;
+        let dir = folder_path_any(conn, folder_id)?;
         push_direct_child_filter(&mut sql, &mut args, &dir);
     } else if query.unclassified.unwrap_or(false) {
         push_direct_child_filter(&mut sql, &mut args, NOTES_ROOT);

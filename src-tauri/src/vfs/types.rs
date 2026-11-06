@@ -6,6 +6,8 @@
 
 use serde::Serialize;
 
+use super::acl::Principal;
+
 /// read 的入参。
 #[derive(Debug, Clone)]
 pub struct ReadRequest {
@@ -14,6 +16,8 @@ pub struct ReadRequest {
     pub start_line: Option<usize>,
     pub end_line: Option<usize>,
     pub include_meta: Option<bool>,
+    /// Caller identity; Agent is subject to `path_acl`, User bypasses it.
+    pub principal: Principal,
 }
 
 /// 目录项；`read` 指向目录时返回。
@@ -121,6 +125,7 @@ pub struct GlobRequest {
     pub pattern: String,
     pub root: Option<String>,
     pub case_sensitive: Option<bool>,
+    pub principal: Principal,
 }
 
 /// glob 的命中项。
@@ -142,6 +147,7 @@ pub struct GrepRequest {
     pub context_lines: Option<usize>,
     /// 文档类型过滤（`type` 参数），复用 `meta.kind`：note/todo/event/contact/diary。
     pub doc_type: Option<String>,
+    pub principal: Principal,
 }
 
 /// grep 的单条命中。

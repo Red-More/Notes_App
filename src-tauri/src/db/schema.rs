@@ -27,8 +27,27 @@ const DEFAULT_DIRS: &[&str] = &[
     "/life/todos",
     "/life/contacts",
     "/life/schedule",
+    "/life/agent",
     "/life/.agents",
     "/life/.agents/skills",
+];
+
+/// Chinese display titles seeded into `meta` for the system folders.
+const DEFAULT_DIR_TITLES: &[(&str, &str)] = &[
+    ("/life/notes", "默认"),
+    ("/life/diary", "日记"),
+    ("/life/todos", "待办"),
+    ("/life/contacts", "联系人"),
+    ("/life/schedule", "日程"),
+    ("/life/agent", "AI 工作区"),
+];
+
+/// Default ACL for the Agent principal. Everything else stays default-deny.
+const ACL_SEEDS: &[(&str, &str)] = &[
+    ("/life/agent", "allow-read"),
+    ("/life/agent", "allow-write"),
+    ("/life/.agents", "allow-read"),
+    ("/life/.agents", "allow-write"),
 ];
 
 /// Tables that must exist when `user_version` already matches.
@@ -307,15 +326,54 @@ pub fn create(conn: &mut Connection) -> rusqlite::Result<()> {
             params![*path],
         )?;
     }
-    // The default notes folder carries a display title in meta.
-    tx.execute(
-        "INSERT OR IGNORE INTO meta (inode, kind, title, status, due, tags, extra)
-         SELECT inode, 'folder', '默认', NULL, NULL, NULL, '{}'
-         FROM inodes WHERE path = '/life/notes'",
-        [],
-    )?;
+    for (path, title) in DEFAULT_DIR_TITLES {
+        tx.execute(
+            "INSERT OR IGNORE INTO meta (inode, kind, title, status, due, tags, extra)
+             SELECT inode, 'folder', ?2, NULL, NULL, NULL, '{}'
+             FROM inodes WHERE path = ?1",
+            params![*path, *title],
+        )?;
+    }
+    seed_acl(&tx)?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()
+}
+
+/// Idempotently ensure the system folders, display titles and default ACL rows.
+/// Called on startup so databases created before `/life/agent` existed are healed
+/// without any destructive migration.
+pub fn ensure_default_dirs(conn: &Connection) -> rusqlite::Result<()> {
+    for path in DEFAULT_DIRS {
+        conn.execute(
+            "INSERT OR IGNORE INTO inodes (path, kind, head_rev, size, ctime, mtime)
+             VALUES (?1, 'directory', 0, 0, datetime('now','localtime'), datetime('now','localtime'))",
+            params![*path],
+        )?;
+    }
+    for (path, title) in DEFAULT_DIR_TITLES {
+        conn.execute(
+            "INSERT OR IGNORE INTO meta (inode, kind, title, status, due, tags, extra)
+             SELECT inode, 'folder', ?2, NULL, NULL, NULL, '{}'
+             FROM inodes WHERE path = ?1",
+            params![*path, *title],
+        )?;
+    }
+    seed_acl(conn)
+}
+
+/// Insert the default allow rules without duplicating existing ones.
+fn seed_acl(conn: &Connection) -> rusqlite::Result<()> {
+    for (prefix, permission) in ACL_SEEDS {
+        conn.execute(
+            "INSERT INTO path_acl (path_prefix, permission, principal, created_at)
+             SELECT ?1, ?2, NULL, datetime('now','localtime')
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM path_acl WHERE path_prefix = ?1 AND permission = ?2
+             )",
+            params![*prefix, *permission],
+        )?;
+    }
+    Ok(())
 }
 
 /// Ensure the notes root exists with its display title.

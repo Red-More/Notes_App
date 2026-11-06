@@ -46,6 +46,24 @@ const MAX_PREVIEW_CHARS: usize = 240;
 /// `.agents` 只读技能区：模型工具一律不得列出/检索其中的内容（M3 才按需注入）。
 const AGENTS_DIR: &str = "/.agents";
 
+/// Writes carry their origin; only Agent writes are constrained by ACL.
+fn principal_from_source(source: WriteSource) -> acl::Principal {
+    match source {
+        WriteSource::User => acl::Principal::User,
+        WriteSource::Agent => acl::Principal::Agent,
+    }
+}
+
+/// Bundled grep inputs so both search helpers keep a small signature.
+struct GrepOptions<'a> {
+    scope: &'a GrepScope,
+    doc_type: Option<&'a str>,
+    needle: &'a str,
+    max_results: usize,
+    context: usize,
+    principal: acl::Principal,
+}
+
 /// VirtualFs 持有唯一数据库连接；所有方法都在这条连接上执行。
 pub struct VirtualFs {
     conn: Connection,
@@ -72,7 +90,12 @@ impl VirtualFs {
     pub fn read(&self, req: ReadRequest) -> Result<ReadResult, ToolError> {
         let path = cap_gate::normalize_path(&req.path)?;
         cap_gate::ensure_model_readable(&path)?;
-        acl::ensure_allowed(&path, acl::AclPermission::Read)?;
+        acl::ensure_allowed(
+            &self.conn,
+            &path,
+            acl::AclPermission::Read,
+            req.principal,
+        )?;
         let row: Option<(i64, String, i64, Option<String>)> = self
             .conn
             .query_row(
@@ -162,7 +185,12 @@ impl VirtualFs {
         if enforce_agents {
             cap_gate::ensure_writable(&path)?;
         }
-        acl::ensure_allowed(&path, acl::AclPermission::Write)?;
+        acl::ensure_allowed(
+            &self.conn,
+            &path,
+            acl::AclPermission::Write,
+            principal_from_source(req.source),
+        )?;
 
         let raw = req.content;
         if raw.len() > MAX_FILE_BYTES {
@@ -271,7 +299,12 @@ impl VirtualFs {
         if enforce_agents {
             cap_gate::ensure_writable(&path)?;
         }
-        acl::ensure_allowed(&path, acl::AclPermission::Write)?;
+        acl::ensure_allowed(
+            &self.conn,
+            &path,
+            acl::AclPermission::Write,
+            principal_from_source(req.source),
+        )?;
         if req.old_string.is_empty() {
             return Err(ToolError::invalid("old_string 不能为空"));
         }
@@ -398,6 +431,11 @@ impl VirtualFs {
     /// 或相对模式 + `root`（默认 `/life`）。两者最终都会落到同一个 GLOB 查询。
     pub fn glob(&self, req: GlobRequest) -> Result<Vec<GlobEntry>, ToolError> {
         let root = cap_gate::normalize_path(req.root.as_deref().unwrap_or(ROOT))?;
+        let principal = req.principal;
+        // 显式指定的根目录必须整体可见；省略 root 时按全库扫描，由结果逐条过滤。
+        if req.root.is_some() {
+            acl::ensure_allowed(&self.conn, &root, acl::AclPermission::Read, principal)?;
+        }
         let raw_pattern = req.pattern.trim();
         let full_pattern = if raw_pattern.starts_with('/') {
             cap_gate::normalize_path(raw_pattern)?
@@ -437,6 +475,11 @@ impl VirtualFs {
         for row in rows {
             entries.push(row?);
         }
+        // 逐条过滤：结果可能跨目录，不能只在入口判一次。
+        entries.retain(|entry| {
+            acl::ensure_allowed(&self.conn, &entry.path, acl::AclPermission::Read, principal)
+                .is_ok()
+        });
         Ok(entries)
     }
 
@@ -444,6 +487,11 @@ impl VirtualFs {
     /// 或不可用时回退到 LIKE 全表扫描，并在响应里如实标记 `fallback`。
     pub fn grep(&self, req: GrepRequest) -> Result<GrepResponse, ToolError> {
         let target = cap_gate::normalize_path(req.path.as_deref().unwrap_or(ROOT))?;
+        let principal = req.principal;
+        // 显式指定的检索范围必须整体可见；省略 path 时按全库扫描，由命中逐条过滤。
+        if req.path.is_some() {
+            acl::ensure_allowed(&self.conn, &target, acl::AclPermission::Read, principal)?;
+        }
         let pattern = req.pattern.trim().to_string();
         if pattern.is_empty() {
             return Err(ToolError::invalid("grep pattern 不能为空"));
@@ -461,11 +509,17 @@ impl VirtualFs {
             .map(str::trim)
             .filter(|value| !value.is_empty());
 
+        let options = GrepOptions {
+            scope: &scope,
+            doc_type,
+            needle: &needle,
+            max_results,
+            context,
+            principal,
+        };
         if let Some(match_expr) = fts::match_query(&pattern) {
             // 索引缺失/损坏时静默回退，不让一次检索因为 FTS 状态而失败。
-            if let Ok(hits) =
-                self.grep_index(&match_expr, &scope, doc_type, &needle, max_results, context)
-            {
+            if let Ok(hits) = self.grep_index(&match_expr, &options) {
                 if !hits.is_empty() {
                     return Ok(GrepResponse {
                         total: hits.len(),
@@ -476,7 +530,7 @@ impl VirtualFs {
             }
         }
 
-        let hits = self.grep_like(&scope, doc_type, &needle, max_results, context)?;
+        let hits = self.grep_like(&options)?;
         Ok(GrepResponse {
             total: hits.len(),
             hits,
@@ -510,11 +564,7 @@ impl VirtualFs {
     fn grep_index(
         &self,
         match_expr: &str,
-        scope: &GrepScope,
-        doc_type: Option<&str>,
-        needle: &str,
-        max_results: usize,
-        context: usize,
+        options: &GrepOptions<'_>,
     ) -> Result<Vec<GrepHit>, ToolError> {
         // `.agents` 只读区排除：即便调用方省略 path（默认全库检索）也到不了这里。
         let agents_pattern = format!("{ROOT}{AGENTS_DIR}/*");
@@ -534,8 +584,8 @@ impl VirtualFs {
             SqlValue::Text(agents_pattern),
             SqlValue::Text(agents_exact),
         ];
-        push_grep_scope(&mut sql, &mut args, scope);
-        if let Some(kind) = doc_type {
+        push_grep_scope(&mut sql, &mut args, options.scope);
+        if let Some(kind) = options.doc_type {
             sql.push_str(" AND COALESCE(m.kind, '') = ?");
             args.push(SqlValue::Text(kind.to_string()));
         }
@@ -553,13 +603,24 @@ impl VirtualFs {
         let mut hits = Vec::new();
         for row in rows {
             let (path, rev, content) = row?;
+            // 逐条按 ACL 过滤，避免命中数被未授权文档占满。
+            if acl::ensure_allowed(
+                &self.conn,
+                &path,
+                acl::AclPermission::Read,
+                options.principal,
+            )
+            .is_err()
+            {
+                continue;
+            }
             if scan_document(
                 &content,
                 &path,
                 rev,
-                needle,
-                context,
-                max_results,
+                options.needle,
+                options.context,
+                options.max_results,
                 &mut hits,
             ) {
                 break;
@@ -569,14 +630,7 @@ impl VirtualFs {
     }
 
     /// LIKE 回退检索：索引不可用或未命中时仍保证可搜到。
-    fn grep_like(
-        &self,
-        scope: &GrepScope,
-        doc_type: Option<&str>,
-        needle: &str,
-        max_results: usize,
-        context: usize,
-    ) -> Result<Vec<GrepHit>, ToolError> {
+    fn grep_like(&self, options: &GrepOptions<'_>) -> Result<Vec<GrepHit>, ToolError> {
         let agents_pattern = format!("{ROOT}{AGENTS_DIR}/*");
         let agents_exact = format!("{ROOT}{AGENTS_DIR}");
         let mut sql = String::from(
@@ -589,12 +643,12 @@ impl VirtualFs {
                AND i.path NOT GLOB ? AND i.path != ?",
         );
         let mut args: Vec<SqlValue> = vec![
-            SqlValue::Text(needle.to_string()),
+            SqlValue::Text(options.needle.to_string()),
             SqlValue::Text(agents_pattern),
             SqlValue::Text(agents_exact),
         ];
-        push_grep_scope(&mut sql, &mut args, scope);
-        if let Some(kind) = doc_type {
+        push_grep_scope(&mut sql, &mut args, options.scope);
+        if let Some(kind) = options.doc_type {
             sql.push_str(" AND COALESCE(m.kind, '') = ?");
             args.push(SqlValue::Text(kind.to_string()));
         }
@@ -612,13 +666,24 @@ impl VirtualFs {
         let mut hits = Vec::new();
         for row in rows {
             let (path, rev, content) = row?;
+            // 逐条按 ACL 过滤，避免命中数被未授权文档占满。
+            if acl::ensure_allowed(
+                &self.conn,
+                &path,
+                acl::AclPermission::Read,
+                options.principal,
+            )
+            .is_err()
+            {
+                continue;
+            }
             if scan_document(
                 &content,
                 &path,
                 rev,
-                needle,
-                context,
-                max_results,
+                options.needle,
+                options.context,
+                options.max_results,
                 &mut hits,
             ) {
                 break;

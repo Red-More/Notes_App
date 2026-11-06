@@ -25,6 +25,8 @@ pub enum ToolError {
     ParentMissing { path: String },
     /// `/life/.agents/` 为只读区，禁止 write/edit。
     ReadOnlyArea { path: String },
+    /// Agent 访问未授权路径（默认拒绝，需用户显式放行）。
+    PermissionDenied { path: String, permission: String },
     /// edit 的 expect_rev 与当前 head_rev 不一致。
     Conflict { current: i64, expect: i64 },
     /// edit 的 old_string 未命中任何内容。
@@ -61,6 +63,10 @@ impl std::fmt::Display for ToolError {
             }
             Self::ParentMissing { path } => write!(f, "父目录不存在：{path}"),
             Self::ReadOnlyArea { path } => write!(f, "{path} 属于只读区，禁止写入"),
+            Self::PermissionDenied { path, permission } => write!(
+                f,
+                "路径未授权：{path}（需要 {permission} 权限）；请让用户在设置中授权该文件夹"
+            ),
             Self::Conflict { current, expect } => write!(
                 f,
                 "版本冲突：当前 rev={current}，期望 rev={expect}；请先 read 最新内容再重试"
