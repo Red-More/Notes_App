@@ -4,7 +4,7 @@
 //! 还原成 pi 的 `AgentMessage[]`，新消息在事件回调里落库。
 
 import { Agent } from '@earendil-works/pi-agent-core'
-import type { AgentMessage } from '@earendil-works/pi-agent-core'
+import type { AgentMessage, StreamFn } from '@earendil-works/pi-agent-core'
 import type { AssistantMessage, ImageContent, Model, ToolCall, Usage } from '@earendil-works/pi-ai'
 import { buildSystemPrompt } from './prompt'
 import { trimContext } from './context'
@@ -207,6 +207,7 @@ export function createAgent(
   skills: SkillSummary[] = [],
   mcpTools: McpToolInfo[] = [],
   sessionId?: string,
+  streamFn: StreamFn = nativeStreamFn,
 ): Agent {
   return new Agent({
     initialState: {
@@ -216,7 +217,7 @@ export function createAgent(
       tools: createTools(skills, mcpTools),
       messages: history,
     },
-    streamFn: nativeStreamFn,
+    streamFn,
     // Stable per-conversation id so cache-aware providers can reuse prefixes.
     sessionId,
     // 按 token 预算裁剪：Rust 的 200 条上限只作兜底，避免长会话撑爆上下文。

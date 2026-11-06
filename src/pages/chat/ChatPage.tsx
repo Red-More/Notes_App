@@ -3,16 +3,15 @@
 //! 渲染策略（D9）：流式阶段纯文本；`message_end` 后也只展示纯文本，
 //! 不使用 `dangerouslySetInnerHTML`，模型输出不经过任何 HTML 解析。
 
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, chatApi, mcpApi, mediaApi, skillApi } from '../../api'
-import { createAgent, extractAssistant, parseImageAssetIds, profileFromSettings, toAgentMessages } from '../../agent/runtime'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { api, chatApi, mediaApi } from '../../api'
 import type { AgentProfile } from '../../agent/runtime'
-import { buildSkillsIndex } from '../../agent/skills'
-import type { AgentEvent } from '@earendil-works/pi-agent-core'
-import type { AgentMessage } from '@earendil-works/pi-agent-core'
-import type { AgentSettings, ChatConversation, ChatMessageRecord, MessageUsage, SkillSummary } from '../../types'
+import { profileFromSettings } from '../../agent/runtime'
+import { AgentRuntime, type Attachment } from '../../agent/AgentRuntime'
+import { createRuntimeDeps } from '../../agent/runtimeDeps'
+import { documentPath, type Item, type ToolCard } from '../../agent/chatView'
+import type { AgentSettings, ChatConversation, MessageUsage } from '../../types'
 import { friendlyError, normalizeImage } from '../../utils'
-import type { ImageContent } from '@earendil-works/pi-ai'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { readFile } from '@tauri-apps/plugin-fs'
 import { toast } from '../../toast'
@@ -39,52 +38,9 @@ interface Props {
   isActive: boolean
 }
 
-interface Bubble {
-  id: string
-  kind: 'user' | 'assistant'
-  text: string
-  isError?: boolean
-  streaming?: boolean
-  /** Token usage of a settled assistant reply. */
-  usage?: MessageUsage | null
-  /** Reasoning text streamed before the visible answer. */
-  thinking?: string | null
-  thinkingSignature?: string | null
-  /** Data URLs of images attached to a user turn. */
-  images?: string[]
-  imageAssetIds?: number[]
-  /** Paths touched by this reply, cached when the reply settles. */
-  changes?: string[]
-}
-
-/** One image staged in the composer. */
-interface Attachment {
-  assetId: number
-  mime: string
-  data: string
-  dataUrl: string
-}
-
-interface ToolCard {
-  id: string
-  kind: 'tool'
-  toolName: string
-  args: string
-  status: 'running' | 'done' | 'error'
-  text: string
-  /** Wall-clock duration, only available for calls made in this session. */
-  durationMs?: number
-}
-
-type Item = Bubble | ToolCard
-
 interface DocPreview {
   path: string
   html: string
-}
-
-function messageKey(prefix: string): string {
-  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`
 }
 
 /** Best-effort MIME for a picked file; normalizeImage re-encodes to JPEG anyway. */
@@ -99,105 +55,6 @@ function imageMime(path: string): string {
 const MAX_ATTACHMENTS = 4
 const MAX_INPUT_IMAGE_BYTES = 20 * 1024 * 1024
 
-type ImageData = { mime: string; data: string }
-
-/** Load attached image bytes for one conversation; failures drop that image. */
-async function loadImageData(records: ChatMessageRecord[]): Promise<Map<number, ImageData>> {
-  const ids = new Set<number>()
-  for (const record of records) {
-    if (record.role !== 'user') continue
-    for (const id of parseImageAssetIds(record.imageAssetIds)) ids.add(id)
-  }
-  const pairs = await Promise.all(
-    [...ids].slice(0, 16).map(async (id) => {
-      try {
-        return [id, await mediaApi.assetData(id)] as const
-      } catch {
-        return null
-      }
-    }),
-  )
-  return new Map(pairs.filter((pair): pair is readonly [number, ImageData] => pair !== null))
-}
-
-function recordsToItems(
-  records: ChatMessageRecord[],
-  images: Map<number, ImageData>,
-): Item[] {
-  const items: Item[] = []
-  for (const record of records) {
-    if (record.role === 'user') {
-      const ids = parseImageAssetIds(record.imageAssetIds)
-      const dataUrls = ids
-        .map((id) => images.get(id))
-        .filter((image): image is ImageData => image !== undefined)
-        .map((image) => `data:${image.mime};base64,${image.data}`)
-      items.push({
-        id: `m-${record.id}`,
-        kind: 'user',
-        text: record.content,
-        images: dataUrls.length > 0 ? dataUrls : undefined,
-        imageAssetIds: ids.length > 0 ? ids : undefined,
-      })
-    } else if (record.role === 'assistant') {
-      if (record.content.trim() === '') continue
-      items.push({
-        id: `m-${record.id}`,
-        kind: 'assistant',
-        text: record.content,
-        isError: record.isError,
-        usage: record.usage,
-        thinking: record.thinking,
-        thinkingSignature: record.thinkingSignature,
-      })
-    } else {
-      items.push({
-        id: `m-${record.id}`,
-        kind: 'tool',
-        toolName: record.toolName ?? 'tool',
-        args: '',
-        status: record.isError ? 'error' : 'done',
-        text: record.content,
-      })
-    }
-  }
-  // Cache touched paths once per load; streaming renders only read them.
-  for (let index = 0; index < items.length; index += 1) {
-    const item = items[index]
-    if (item.kind === 'assistant') item.changes = turnChanges(items, index)
-  }
-  return items
-}
-
-/** Insert or update a tool card without touching the rest of the transcript. */
-function upsertToolCard(items: Item[], id: string, toolName: string, args: string): Item[] {
-  if (!items.some((item) => item.id === id && item.kind === 'tool')) {
-    return [...items, { id, kind: 'tool', toolName, args, status: 'running', text: '' }]
-  }
-  return items.map((item) =>
-    item.id === id && item.kind === 'tool' ? { ...item, toolName, args } : item,
-  )
-}
-
-function toolResultText(result: unknown): string {
-  const value = result as { content?: Array<{ text?: string }> } | null
-  if (!value?.content) return ''
-  return value.content.map((block) => block.text ?? '').join('\n')
-}
-
-/** Plain text of a user message (string or content blocks). */
-function userText(message: AgentMessage): string {
-  const content = (message as { content?: unknown }).content
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    return content
-      .filter((block): block is { type: 'text'; text: string } => block?.type === 'text')
-      .map((block) => block.text)
-      .join('\n')
-  }
-  return ''
-}
-
 /** Remove the YAML frontmatter so previews match what the editor renders. */
 function stripFrontmatter(text: string): string {
   const normalized = text.replace(/\r\n/g, '\n')
@@ -206,56 +63,6 @@ function stripFrontmatter(text: string): string {
   if (close < 0) return text
   const start = normalized.indexOf('\n', close + 4)
   return start < 0 ? '' : normalized.slice(start + 1)
-}
-
-/** Find the document path touched by a tool card (args first, then result text). */
-function documentPath(card: ToolCard): string | null {
-  try {
-    const args = JSON.parse(card.args || '{}') as { path?: unknown }
-    if (
-      typeof args.path === 'string' &&
-      args.path.startsWith('/life/') &&
-      args.path.endsWith('.md')
-    ) {
-      return args.path
-    }
-  } catch {
-    // Persisted cards have no args; fall back to the result text.
-  }
-  const match = card.text.match(/\/life\/[^\s，。；、"'<>（(）)]+\.md/)
-  return match ? match[0] : null
-}
-
-const NETWORK_ERROR = /timeout|超时|timed out|network|网络|fetch|conn/i
-
-/** True when the error text looks like connectivity loss rather than a server reply. */
-function networkFailure(detail: string): boolean {
-  return NETWORK_ERROR.test(detail)
-}
-
-/** Paths changed by the tools between the previous user turn and this reply. */
-function turnChanges(items: Item[], assistantIndex: number): string[] {
-  const paths: string[] = []
-  for (let i = assistantIndex - 1; i >= 0; i -= 1) {
-    const item = items[i]
-    if (item.kind === 'user') break
-    if (item.kind !== 'tool') continue
-    if (item.status !== 'done') continue
-    if (!['fs_write', 'fs_edit'].includes(item.toolName)) continue
-    const path = documentPath(item)
-    if (path && !paths.includes(path)) paths.unshift(path)
-  }
-  return paths
-}
-
-/** Human-readable failure text that distinguishes offline from other errors. */
-function failureText(error: unknown, online: boolean): string {
-  if (!online) return '当前处于离线模式，消息未发送；联网后点「重试」。'
-  const detail = friendlyError(error)
-  if (networkFailure(detail)) {
-    return `网络异常：${detail}`
-  }
-  return `发送失败：${detail}`
 }
 
 const TOOL_META: Record<
@@ -274,21 +81,6 @@ const TOOL_META: Record<
 
 function formatDuration(ms: number): string {
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`
-}
-
-/** Read the token usage of a settled assistant message (zeros mean "unreported"). */
-function usageFromMessage(message: {
-  usage: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number }
-}): MessageUsage | null {
-  const usage = message.usage
-  if (usage.totalTokens <= 0) return null
-  return {
-    input: usage.input,
-    output: usage.output,
-    totalTokens: usage.totalTokens,
-    cacheRead: usage.cacheRead,
-    cacheWrite: usage.cacheWrite,
-  }
 }
 
 function formatTokens(tokens: number): string {
@@ -424,110 +216,17 @@ export default function ChatPage({ isActive }: Props) {
   // Maps an item id to its row so a timeline dot can scroll it into view.
   const rowRefs = useRef(new Map<string, HTMLDivElement>())
 
-  const agentRef = useRef<ReturnType<typeof createAgent> | null>(null)
-  const unsubscribeRef = useRef<(() => void) | null>(null)
+  // The runtime owns the Agent, the run status, the queue and write ordering.
+  const runtime = useMemo(() => new AgentRuntime({ deps: createRuntimeDeps() }), [])
   const conversationRef = useRef<ChatConversation | null>(null)
-  const skillsRef = useRef<SkillSummary[]>([])
-  // Mirror of `online` for event handlers that must not rebuild the agent.
+  // Mirror of `online` for the snapshot listener (avoids re-subscribing).
   const onlineRef = useRef(navigator.onLine)
-  // True once `message_end` rendered this turn, so `send` must not duplicate it.
-  const settledRef = useRef(true)
-  const streamingIdRef = useRef<string | null>(null)
-  // True until the first user event pair of a freshly submitted prompt is consumed,
-  // so its already-persisted bubble is not duplicated.
-  const pendingInitialUserRef = useRef(false)
-  // Tool start timestamps for the trace duration badge.
-  const toolStartRef = useRef(new Map<string, number>())
   const scrollRef = useRef<HTMLDivElement>(null)
   const bootRef = useRef(false)
-  // 落库串行化：assistant 消息必须先于其 toolResult 写入，否则历史无法还原。
-  const persistQueueRef = useRef<Promise<unknown>>(Promise.resolve())
-  // Coalesced streaming state: text, reasoning, and tool-argument deltas
-  // accumulate here and are applied once per animation frame instead of
-  // re-rendering the list for every token. Tool arguments stay raw in the
-  // buffer and are stringified a single time when the frame is flushed.
-  const streamDeltaRef = useRef<{
-    id: string
-    text: string
-    thinking: string
-    tools: Map<string, { name: string; args: unknown }>
-  } | null>(null)
-  const streamFrameRef = useRef<number | null>(null)
-  // Scroll writes from deltas ride along with the same frame's list update.
-  const streamScrollRef = useRef(false)
 
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [])
-
-  /** Buffer for the given assistant message, reset when another message starts. */
-  const streamBufferFor = useCallback((id: string) => {
-    const pending = streamDeltaRef.current
-    if (pending && pending.id === id) return pending
-    const fresh = {
-      id,
-      text: '',
-      thinking: '',
-      tools: new Map<string, { name: string; args: unknown }>(),
-    }
-    streamDeltaRef.current = fresh
-    return fresh
-  }, [])
-
-  /** Apply all pending deltas and the scroll position in a single batched update. */
-  const flushStreamFrame = useCallback(() => {
-    streamFrameRef.current = null
-    const pending = streamDeltaRef.current
-    streamDeltaRef.current = null
-    if (pending) {
-      // Stringify each tool's final argument snapshot once per frame, not per delta.
-      const toolArgs = new Map<string, { toolName: string; args: string }>()
-      for (const [id, tool] of pending.tools) {
-        toolArgs.set(id, { toolName: tool.name, args: JSON.stringify(tool.args ?? {}) })
-      }
-      setItems((prev) => {
-        let next = prev
-        if (pending.text || pending.thinking) {
-          next = next.map((item) =>
-            item.id === pending.id && item.kind === 'assistant'
-              ? {
-                  ...item,
-                  text: pending.text ? item.text + pending.text : item.text,
-                  thinking: pending.thinking
-                    ? (item.thinking ?? '') + pending.thinking
-                    : item.thinking,
-                }
-              : item,
-          )
-        }
-        for (const [id, patch] of toolArgs) {
-          next = upsertToolCard(next, id, patch.toolName, patch.args)
-        }
-        return next
-      })
-    }
-    if (streamScrollRef.current) {
-      streamScrollRef.current = false
-      const el = scrollRef.current
-      if (el) el.scrollTop = el.scrollHeight
-    }
-  }, [])
-
-  /** Schedule one flush; further deltas in the same frame only extend the buffer. */
-  const scheduleStreamFlush = useCallback(() => {
-    if (streamFrameRef.current !== null) return
-    streamFrameRef.current = requestAnimationFrame(flushStreamFrame)
-  }, [flushStreamFrame])
-
-  /** Drop buffered deltas; a queued frame must not touch state after teardown. */
-  const cancelStreamFrame = useCallback(() => {
-    if (streamFrameRef.current !== null) {
-      cancelAnimationFrame(streamFrameRef.current)
-      streamFrameRef.current = null
-    }
-    streamDeltaRef.current = null
-    streamScrollRef.current = false
   }, [])
 
   const handleScroll = useCallback(() => {
@@ -555,340 +254,42 @@ export default function ChatPage({ isActive }: Props) {
     }
   }, [])
 
-  const enqueuePersist = useCallback(<T,>(task: () => Promise<T>): Promise<T> => {
-    const next = persistQueueRef.current.then(task)
-    persistQueueRef.current = next.catch((e) => {
-      console.error('保存 Agent 消息失败', e)
-    })
-    return next
-  }, [])
-
-  const persistAssistant = useCallback(
-    (
-      text: string,
-      toolCalls: string | null,
-      isError = false,
-      usage: MessageUsage | null = null,
-      thinking: string | null = null,
-      thinkingSignature: string | null = null,
-    ) => {
-      const convId = conversationRef.current?.id
-      if (!convId) return
-      if (text.trim() === '' && toolCalls === null) return
-      void enqueuePersist(() =>
-        chatApi.append({
-          conversationId: convId,
-          messages: [
-            { role: 'assistant', content: text, toolCalls, isError, usage, thinking, thinkingSignature },
-          ],
-        }),
-      )
-    },
-    [enqueuePersist],
-  )
-
-  const persistTool = useCallback(
-    (toolCallId: string, toolName: string, text: string, isError: boolean) => {
-      const convId = conversationRef.current?.id
-      if (!convId) return
-      void enqueuePersist(() =>
-        chatApi.append({
-          conversationId: convId,
-          messages: [{ role: 'tool', content: text, toolCallId, toolName, isError }],
-        }),
-      )
-    },
-    [enqueuePersist],
-  )
-
-  const handleEvent = useCallback(
-    (event: AgentEvent) => {
-      switch (event.type) {
-        case 'message_start': {
-          if (event.message.role === 'user') {
-            // The initial prompt already has a bubble; queued messages appear here.
-            if (pendingInitialUserRef.current) return
-            const text = userText(event.message)
-            if (text.trim() === '') return
-            setItems((prev) => [...prev, { id: messageKey('u'), kind: 'user', text }])
-            scrollToBottom()
-            return
-          }
-          if (event.message.role !== 'assistant') return
-          const id = messageKey('a')
-          streamingIdRef.current = id
-          setItems((prev) => [...prev, { id, kind: 'assistant', text: '', streaming: true }])
-          scrollToBottom()
-          break
-        }
-        case 'message_update': {
-          const update = event.assistantMessageEvent
-          if (update.type === 'text_delta') {
-            const id = streamingIdRef.current
-            if (!id) return
-            streamBufferFor(id).text += update.delta
-            streamScrollRef.current = true
-            scheduleStreamFlush()
-            return
-          }
-          // Reasoning streams before the visible answer; keep it collapsible.
-          if (
-            update.type === 'thinking_start' ||
-            update.type === 'thinking_delta' ||
-            update.type === 'thinking_end'
-          ) {
-            const id = streamingIdRef.current
-            if (!id) return
-            if (update.type === 'thinking_delta') {
-              // Reasoning deltas share the text frame buffer to avoid one
-              // re-render per token.
-              streamBufferFor(id).thinking += update.delta
-              streamScrollRef.current = true
-              scheduleStreamFlush()
-            } else if (update.type === 'thinking_end') {
-              const block = update.partial.content[update.contentIndex]
-              const signature = block?.type === 'thinking' ? (block.thinkingSignature ?? null) : null
-              // Apply buffered reasoning first: a single-frame reasoning block
-              // would otherwise miss the `item.thinking` check below.
-              flushStreamFrame()
-              setItems((prev) =>
-                prev.map((item) =>
-                  item.id === id && item.kind === 'assistant' && item.thinking
-                    ? { ...item, thinkingSignature: signature }
-                    : item,
-                ),
-              )
-            }
-            scrollToBottom()
-            return
-          }
-          // Stream tool arguments ahead of execution so the card shows real params.
-          if (
-            update.type === 'toolcall_start' ||
-            update.type === 'toolcall_delta' ||
-            update.type === 'toolcall_end'
-          ) {
-            const block = update.partial.content[update.contentIndex]
-            if (block?.type !== 'toolCall') return
-            const id = streamingIdRef.current
-            if (!id || update.type === 'toolcall_end') {
-              // `toolcall_end` carries the authoritative arguments: apply it
-              // now and drop any buffered arguments for this call.
-              const pending = streamDeltaRef.current
-              if (pending && pending.id === id) pending.tools.delete(block.id)
-              const args = JSON.stringify(block.arguments ?? {})
-              setItems((prev) => upsertToolCard(prev, block.id, block.name, args))
-              scrollToBottom()
-              return
-            }
-            // Keep raw arguments in the buffer; stringify once per frame.
-            streamBufferFor(id).tools.set(block.id, { name: block.name, args: block.arguments ?? {} })
-            streamScrollRef.current = true
-            scheduleStreamFlush()
-          }
-          break
-        }
-        case 'message_end': {
-          if (event.message.role === 'user') {
-            if (pendingInitialUserRef.current) {
-              // This pair belongs to the prompt persisted in submitPrompt.
-              pendingInitialUserRef.current = false
-              return
-            }
-            // Queued steer/follow-up messages are persisted when injected.
-            const text = userText(event.message)
-            const convId = conversationRef.current?.id
-            if (text.trim() === '' || !convId) return
-            void enqueuePersist(() =>
-              chatApi.append({
-                conversationId: convId,
-                messages: [{ role: 'user', content: text }],
-              }),
-            )
-            return
-          }
-          if (event.message.role !== 'assistant') return
-          const message = event.message
-          const id = streamingIdRef.current
-          const { text, toolCalls, thinking, thinkingSignature } = extractAssistant(message)
-          const failed = message.stopReason === 'error' || message.stopReason === 'aborted'
-          const usage = failed ? null : usageFromMessage(message)
-          const shown = failed
-            ? message.stopReason === 'aborted'
-              ? '已取消'
-              : `${onlineRef.current ? '' : '当前处于离线模式，'}回答失败：${message.errorMessage ?? '未知错误'}`
-            : text
-          // The final message is authoritative: drop queued deltas so a late
-          // frame cannot append already-settled text to this bubble.
-          cancelStreamFrame()
-          setItems((prev) => {
-            if (shown.trim() === '') return prev.filter((item) => item.id !== id)
-            const next = prev.map((item) =>
-              item.id === id && item.kind === 'assistant'
-                ? {
-                    ...item,
-                    text: shown,
-                    streaming: false,
-                    isError: failed,
-                    usage,
-                    thinking: thinking ?? item.thinking ?? null,
-                    thinkingSignature: thinkingSignature ?? item.thinkingSignature ?? null,
-                  }
-                : item,
-            )
-            // Settled replies never change again: cache touched paths once here
-            // instead of rescanning the transcript on every streaming frame.
-            const index = next.findIndex((item) => item.id === id && item.kind === 'assistant')
-            const settled = index >= 0 ? next[index] : null
-            if (!settled || settled.kind !== 'assistant') return next
-            const changes = turnChanges(next, index)
-            return next.map((item, i) => (i === index ? { ...settled, changes } : item))
-          })
-          streamingIdRef.current = null
-          settledRef.current = true
-          if (failed) setNetworkIssue(networkFailure(message.errorMessage ?? ''))
-          else setNetworkIssue(false)
-          // Failure/cancel bubbles are persisted too, so reloads keep the last state.
-          persistAssistant(
-            failed ? shown : text,
-            failed ? null : toolCalls,
-            failed,
-            usage,
-            thinking,
-            failed ? null : thinkingSignature,
+  // The runtime owns every transcript mutation; the page renders its snapshot.
+  useEffect(
+    () =>
+      runtime.subscribe((snapshot) => {
+        setItems(snapshot.items)
+        setStreaming(snapshot.status !== 'idle')
+        setQueuedCount(snapshot.queued)
+        if (snapshot.error) {
+          setNetworkIssue(
+            snapshot.error.code === 'network' ||
+              snapshot.error.code === 'timeout' ||
+              snapshot.error.code === 'rate_limited',
           )
-          scrollToBottom()
-          break
         }
-        case 'tool_execution_start': {
-          toolStartRef.current.set(event.toolCallId, performance.now())
-          const args = JSON.stringify(event.args ?? {})
-          setItems((prev) => {
-            // The streaming `toolcall_*` events already inserted this card.
-            const exists = prev.some((item) => item.id === event.toolCallId && item.kind === 'tool')
-            if (exists) {
-              return prev.map((item) =>
-                item.id === event.toolCallId && item.kind === 'tool'
-                  ? { ...item, toolName: event.toolName, args, status: 'running' }
-                  : item,
-              )
-            }
-            return [
-              ...prev,
-              {
-                id: event.toolCallId,
-                kind: 'tool',
-                toolName: event.toolName,
-                args,
-                status: 'running',
-                text: '',
-              },
-            ]
-          })
-          scrollToBottom()
-          break
-        }
-        case 'tool_execution_end': {
-          const text = toolResultText(event.result)
-          const started = toolStartRef.current.get(event.toolCallId)
-          toolStartRef.current.delete(event.toolCallId)
-          const durationMs = started === undefined ? undefined : performance.now() - started
-          setItems((prev) =>
-            prev.map((item) =>
-              item.id === event.toolCallId && item.kind === 'tool'
-                ? { ...item, status: event.isError ? 'error' : 'done', text, durationMs }
-                : item,
-            ),
-          )
-          persistTool(event.toolCallId, event.toolName, text, event.isError)
-          scrollToBottom()
-          break
-        }
-        case 'agent_end': {
-          cancelStreamFrame()
-          setStreaming(false)
-          setQueuedCount(0)
-          pendingInitialUserRef.current = false
-          break
-        }
-        default:
-          break
-      }
-    },
-    [
-      enqueuePersist,
-      persistAssistant,
-      persistTool,
-      scrollToBottom,
-      cancelStreamFrame,
-      scheduleStreamFlush,
-      streamBufferFor,
-      flushStreamFrame,
-    ],
-  )
-
-  const disposeAgent = useCallback(() => {
-    agentRef.current?.abort()
-    unsubscribeRef.current?.()
-    unsubscribeRef.current = null
-    agentRef.current = null
-    // 中断旧流后立即复位发送状态：abort 产生的 agent_end 会因退订而丢失，不能再依赖它。
-    streamingIdRef.current = null
-    pendingInitialUserRef.current = false
-    // Pending frames must not call setState after the transcript was replaced.
-    cancelStreamFrame()
-    setStreaming(false)
-  }, [cancelStreamFrame])
-
-  /** Build an Agent for the given transcript; returns null when no model is usable. */
-  const buildAgent = useCallback(
-    async (
-      conv: ChatConversation,
-      records: ChatMessageRecord[],
-      imageData: Map<number, ImageData>,
-    ) => {
-      const current = settingsRef.current
-      const baseProfile = current
-        ? profileFromSettings(current, conv.provider, conv.model)
-        : null
-      if (!baseProfile) return null
-      const activeProfile = await withCapabilities(baseProfile)
-      // MCP discovery is optional; a failure must not block chat.
-      const mcpTools = await mcpApi.tools().catch(() => [])
-      const agent = createAgent(
-        activeProfile,
-        await toAgentMessages(records, activeProfile, imageData),
-        buildSkillsIndex(skillsRef.current),
-        skillsRef.current,
-        mcpTools,
-        `conv_${conv.id}`,
-      )
-      return { agent, profile: activeProfile }
-    },
-    [],
+        scrollToBottom()
+      }),
+    [runtime, scrollToBottom],
   )
 
   const openConversation = useCallback(
     async (conv: ChatConversation) => {
-      disposeAgent()
       conversationRef.current = conv
       setConversation(conv)
       setLoading(true)
       try {
-        const records = await chatApi.messages(conv.id)
-        const imageData = await loadImageData(records)
-        setItems(recordsToItems(records, imageData))
         // 优先使用会话记录里的模型条目；该条目被删除后回退到当前激活模型。
-        const built = await buildAgent(conv, records, imageData)
-        if (!built) {
-          // 没有可用模型时仍可查看历史，只是不能发送。
-          return
-        }
-        setContextWindow(built.profile.contextWindow ?? 128000)
-        unsubscribeRef.current = built.agent.subscribe((event) => {
-          handleEvent(event)
-        })
-        agentRef.current = built.agent
+        const current = settingsRef.current
+        const baseProfile = current
+          ? profileFromSettings(current, conv.provider, conv.model)
+          : null
+        const profile = baseProfile ? await withCapabilities(baseProfile) : null
+        if (profile) setContextWindow(profile.contextWindow ?? 128000)
+        // Loading the transcript, building the Agent and closing out a previous
+        // run all happen inside the runtime.
+        await runtime.open(conv, profile)
+        setItems(runtime.snapshot().items)
       } catch (e) {
         toast(friendlyError(e))
       } finally {
@@ -897,19 +298,14 @@ export default function ChatPage({ isActive }: Props) {
         setScrollBottomVisible(false)
       }
     },
-    [buildAgent, disposeAgent, handleEvent, scrollToBottom],
+    [runtime, scrollToBottom],
   )
 
   const bootstrap = useCallback(async () => {
     try {
-      const [nextSettings, list, skills] = await Promise.all([
-        chatApi.settings(),
-        chatApi.list(),
-        skillApi.list(),
-      ])
+      const [nextSettings, list] = await Promise.all([chatApi.settings(), chatApi.list()])
       setSettings(nextSettings)
       settingsRef.current = nextSettings
-      skillsRef.current = skills
       setConversations(list)
       let target = list[0]
       if (!target) {
@@ -933,27 +329,25 @@ export default function ChatPage({ isActive }: Props) {
     void bootstrap()
   }, [bootstrap])
 
-  // 页面被编辑器/文件夹浮层替换时会卸载：中断当前流并退订。
-  useEffect(() => () => disposeAgent(), [disposeAgent])
+  // 页面被编辑器/文件夹浮层替换时会卸载：runtime 会先等取消收尾落库再退订。
+  useEffect(() => () => void runtime.dispose(), [runtime])
 
   // 页面激活时刷新配置；模型变化则重建 Agent（历史保持）。
   // 只依赖 isActive：effect 内写回 settings 的新对象不会再触发自身，避免无限 IPC 循环。
-  // openConversation 内部读 settingsRef，本身不随 settings 对象变化，可安全加入依赖。
   useEffect(() => {
     if (!isActive || !bootRef.current) return
     let disposed = false
     void (async () => {
       try {
-        const [next, skills] = await Promise.all([chatApi.settings(), skillApi.list()])
+        const next = await chatApi.settings()
         if (disposed) return
         setSettings(next)
         settingsRef.current = next
-        skillsRef.current = skills
         // Rebuild on every activation so per-model capability edits are applied.
         const conv = conversationRef.current
         if (!conv) return
         if (!next.activeId && next.models.length === 0) {
-          disposeAgent()
+          await runtime.dispose()
           return
         }
         await openConversation(conv)
@@ -964,7 +358,7 @@ export default function ChatPage({ isActive }: Props) {
     return () => {
       disposed = true
     }
-  }, [disposeAgent, isActive, openConversation])
+  }, [isActive, openConversation, runtime])
 
   const ensureTitle = useCallback(async (text: string) => {
     const conv = conversationRef.current
@@ -984,72 +378,23 @@ export default function ChatPage({ isActive }: Props) {
   const submitPrompt = useCallback(
     async (text: string, files: Attachment[] = []) => {
       if ((!text && files.length === 0) || streaming) return
-      const agent = agentRef.current
-      const conv = conversationRef.current
-      if (!agent || !conv) {
+      if (!conversationRef.current) {
         toast('会话尚未就绪')
         return
       }
-      settledRef.current = false
       setInput('')
-      setItems((prev) => [
-        ...prev,
-        {
-          id: messageKey('u'),
-          kind: 'user',
-          text,
-          images: files.length > 0 ? files.map((file) => file.dataUrl) : undefined,
-          imageAssetIds: files.length > 0 ? files.map((file) => file.assetId) : undefined,
-        },
-      ])
       setAttachments([])
-      setStreaming(true)
-      scrollToBottom()
       void ensureTitle(text || '图片')
       try {
-        await enqueuePersist(() =>
-          chatApi.append({
-            conversationId: conv.id,
-            messages: [
-              {
-                role: 'user',
-                content: text,
-                imageAssetIds:
-                  files.length > 0 ? JSON.stringify(files.map((file) => file.assetId)) : null,
-              },
-            ],
-          }),
-        )
-        // 技能正文由模型通过 load_skill 主动加载；用户消息不携带技能内容。
-        const promptText = text || '请描述这些图片。'
-        const images: ImageContent[] = files.map((file) => ({
-          type: 'image',
-          data: file.data,
-          mimeType: file.mime,
-        }))
-        // The prompt's own user events must not duplicate this bubble.
-        pendingInitialUserRef.current = true
-        if (images.length > 0) await agent.prompt(promptText, images)
-        else await agent.prompt(text)
+        // The runtime persists the user turn, runs the loop and writes results.
+        await runtime.prompt({ text, attachments: files })
       } catch (e) {
-        pendingInitialUserRef.current = false
-        const shown = failureText(e, onlineRef.current)
-        if (!onlineRef.current || networkFailure(friendlyError(e))) setNetworkIssue(true)
-        // Only add a bubble when the stream never reached `message_end`,
-        // which already renders and persists its own failure state.
-        if (!settledRef.current) {
-          const id = messageKey('e')
-          streamingIdRef.current = null
-          settledRef.current = true
-          setItems((prev) => [...prev, { id, kind: 'assistant', text: shown, isError: true }])
-          persistAssistant(shown, null, true)
-        }
-        // Keep the typed draft so the user can retry without retyping.
+        // Rejected before anything was written: keep the draft for a retry.
         setInput((prev) => prev || text)
-        setStreaming(false)
+        toast(friendlyError(e))
       }
     },
-    [enqueuePersist, ensureTitle, persistAssistant, scrollToBottom, streaming],
+    [ensureTitle, runtime, streaming],
   )
 
   const send = useCallback(() => {
@@ -1059,15 +404,12 @@ export default function ChatPage({ isActive }: Props) {
   /** Enqueue guidance while a run is active; the agent injects it at the next boundary. */
   const queueMessage = useCallback(() => {
     const text = input.trim()
-    const agent = agentRef.current
-    if (!streaming || text === '' || !agent) return
-    const message = { role: 'user', content: text, timestamp: Date.now() } as AgentMessage
-    if (queueMode === 'steer') agent.steer(message)
-    else agent.followUp(message)
+    if (!streaming || text === '') return
+    if (queueMode === 'steer') runtime.steer(text)
+    else runtime.followUp(text)
     setInput('')
-    setQueuedCount(agent.peekQueuedMessages().length)
     toast(queueMode === 'steer' ? '已追加，当前回复结束后生效' : '已排队，本轮结束后执行')
-  }, [input, queueMode, streaming])
+  }, [input, queueMode, runtime, streaming])
 
   /**
    * Regenerate the reply to the user turn that produced `messageId`:
@@ -1076,68 +418,15 @@ export default function ChatPage({ isActive }: Props) {
    */
   const retry = useCallback(
     async (messageId: string) => {
-      const conv = conversationRef.current
-      if (!conv || streaming) return
+      if (!conversationRef.current || streaming) return
       try {
-        const records = await chatApi.messages(conv.id)
-        const match = /^m-(\d+)$/.exec(messageId)
-        let targetIndex = match
-          ? records.findIndex((record) => record.id === Number(match[1]))
-          : -1
-        if (targetIndex < 0) {
-          // The bubble came from a failed in-session run; target the last reply.
-          targetIndex = records.map((record) => record.role).lastIndexOf('assistant')
-        }
-        if (targetIndex < 0) {
-          toast('没有可重试的回答')
-          return
-        }
-        let userIndex = -1
-        for (let i = targetIndex - 1; i >= 0; i -= 1) {
-          if (records[i].role === 'user') {
-            userIndex = i
-            break
-          }
-        }
-        if (userIndex < 0) {
-          toast('找不到上一条用户消息，无法重试')
-          return
-        }
-        const kept = records.slice(0, userIndex + 1)
-        await chatApi.truncate({ conversationId: conv.id, messageId: kept[userIndex].id })
-        const imageData = await loadImageData(kept)
-        setItems((prev) => {
-          const clicked = prev.findIndex((item) => item.id === messageId)
-          const end = clicked >= 0 ? clicked : prev.length
-          for (let i = end - 1; i >= 0; i -= 1) {
-            if (prev[i].kind === 'user') return prev.slice(0, i + 1)
-          }
-          return prev
-        })
-        disposeAgent()
-        const built = await buildAgent(conv, kept, imageData)
-        if (!built) {
-          toast('请先在设置中启用对话模型')
-          return
-        }
-        setContextWindow(built.profile.contextWindow ?? 128000)
-        unsubscribeRef.current = built.agent.subscribe((event) => handleEvent(event))
-        agentRef.current = built.agent
-        settledRef.current = false
-        pendingInitialUserRef.current = false
-        setStreaming(true)
-        scrollToBottom()
-        try {
-          await built.agent.continue()
-        } finally {
-          setStreaming(false)
-        }
+        await runtime.retry(messageId)
+        setItems(runtime.snapshot().items)
       } catch (e) {
-        setStreaming(false)
         toast(friendlyError(e))
       }
     },
-    [buildAgent, disposeAgent, handleEvent, scrollToBottom, streaming],
+    [runtime, streaming],
   )
 
   const toggleTool = useCallback((id: string) => {
@@ -1199,43 +488,8 @@ export default function ChatPage({ isActive }: Props) {
   /** Fork the conversation up to the user turn that produced this reply. */
   const forkConversation = useCallback(
     async (assistantText: string) => {
-      const conv = conversationRef.current
-      if (!conv) return
       try {
-        const records = await chatApi.messages(conv.id)
-        let index = -1
-        for (let i = records.length - 1; i >= 0; i -= 1) {
-          if (records[i].role === 'assistant' && records[i].content === assistantText) {
-            index = i
-            break
-          }
-        }
-        let cutoff = records.length
-        if (index >= 0) {
-          let userIndex = index - 1
-          while (userIndex >= 0 && records[userIndex].role !== 'user') userIndex -= 1
-          cutoff = userIndex >= 0 ? userIndex + 1 : index + 1
-        }
-        const created = await chatApi.create({
-          title: `${conv.title} · 分支`.slice(0, 80),
-        })
-        if (cutoff > 0) {
-          await chatApi.append({
-            conversationId: created.id,
-            messages: records.slice(0, cutoff).map((record) => ({
-              role: record.role,
-              content: record.content,
-              toolCalls: record.toolCalls,
-              toolCallId: record.toolCallId,
-              toolName: record.toolName,
-              isError: record.isError,
-              usage: record.usage,
-              thinking: record.thinking,
-              thinkingSignature: record.thinkingSignature,
-              imageAssetIds: record.imageAssetIds,
-            })),
-          })
-        }
+        const created = await runtime.fork(assistantText)
         setConversations((prev) => [created, ...prev])
         await openConversation(created)
         toast('已创建对话分支')
@@ -1243,18 +497,13 @@ export default function ChatPage({ isActive }: Props) {
         toast(friendlyError(error))
       }
     },
-    [openConversation],
+    [openConversation, runtime],
   )
 
   const stop = useCallback(() => {
-    const agent = agentRef.current
-    if (!agent) return
-    // Drop queued guidance so stopping really stops the run.
-    agent.clearAllQueues()
-    setQueuedCount(0)
-    agent.abort()
-    void agent.waitForIdle().then(() => setStreaming(false))
-  }, [])
+    // The runtime closes out the partial answer and persists it before idle.
+    void runtime.cancel()
+  }, [runtime])
 
   const newConversation = useCallback(async () => {
     if (!settings?.activeId) {
@@ -1280,7 +529,7 @@ export default function ChatPage({ isActive }: Props) {
         if (conversationRef.current?.id === id) {
           if (rest[0]) await openConversation(rest[0])
           else {
-            disposeAgent()
+            await runtime.dispose()
             setItems([])
             setConversation(null)
             await newConversation()
@@ -1290,7 +539,7 @@ export default function ChatPage({ isActive }: Props) {
         toast(friendlyError(e))
       }
     },
-    [conversations, disposeAgent, newConversation, openConversation],
+    [conversations, newConversation, openConversation, runtime],
   )
 
   const saveRename = useCallback(async () => {
