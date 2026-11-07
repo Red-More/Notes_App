@@ -49,5 +49,11 @@ export function createRuntimeDeps(): AgentRuntimeDeps {
     touchRun: (runId, stepCount, writeCount, lastSeq) =>
       chatApi.runTouch({ runId, stepCount, writeCount, lastSeq }),
     loadRunState: (conversationId) => chatApi.runState(conversationId),
+    startRustRun: (conversationId, trigger, modelEntry, message) =>
+      chatApi.runRustStart({ conversationId, trigger, modelEntry, message: message ?? null }),
+    attachRustRun: (runId, afterSeq, onEvent) =>
+      chatApi.runRustAttach({ runId, afterSeq }, onEvent),
+    cancelRustRun: (runId) => chatApi.runRustCancel(runId),
+    snapshotRustRun: (runId, afterSeq) => chatApi.runRustSnapshot(runId, afterSeq),
   }
 }

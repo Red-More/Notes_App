@@ -373,6 +373,30 @@ export interface AgentRunStart {
   message: ChatMessageRecord | null
 }
 
+/**
+ * Boundary event from the Rust orchestrator. `seq` is monotonic per run; a
+ * reconnecting client replays everything after its cursor.
+ */
+export type RustRunEvent = {
+  runId: number
+  seq: number
+} & (
+  | { kind: 'state'; payload: { status: AgentRunStatus } }
+  | { kind: 'delta'; payload: { delta: string } }
+  | { kind: 'assistant'; payload: { message: ChatMessageRecord; errorCode: string | null } }
+  | { kind: 'error'; payload: { errorCode: string; message: string } }
+  | {
+      kind: 'end'
+      payload: { status: AgentRunStatus; errorCode: string | null; partial: string | null }
+    }
+)
+
+/** Cold reconnect payload: run row plus every boundary event after a cursor. */
+export interface RustRunSnapshot {
+  run: AgentRun
+  events: RustRunEvent[]
+}
+
 /** Wire protocol used by one user-defined model entry. */
 export type ModelApiFormat =
   | 'openai-chat'

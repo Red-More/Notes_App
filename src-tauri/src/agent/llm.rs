@@ -16,13 +16,12 @@
 //! - 禁用重定向、仅 HTTPS。
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
+use super::cancel::CancellationToken;
 use super::model_store::{self, ApiFormat, ModelEntry};
 use super::params::{CacheRetention, LlmParams, ThinkingMode};
 use super::{AgentState, TOOL_ALLOWLIST};
@@ -640,7 +639,7 @@ pub async fn run(
     req: ProxyRequest,
     entry: &ModelEntry,
     params: &LlmParams,
-    cancel: Arc<AtomicBool>,
+    cancel: CancellationToken,
     emit: Emit<'_>,
 ) -> Result<(), ToolError> {
     // 长会话先裁剪再校验：宁可丢弃最旧的对话轮次，也不能让整次请求失败。
@@ -716,7 +715,7 @@ pub async fn run(
         emit_error(
             emit,
             message,
-            if cancel.load(Ordering::SeqCst) {
+            if cancel.is_cancelled() {
                 "aborted"
             } else {
                 "error"
@@ -737,6 +736,19 @@ pub(crate) async fn send_json(
     body: &Value,
     timeout: Option<std::time::Duration>,
 ) -> Result<reqwest::Response, String> {
+    send_json_until(state, url, headers, body, timeout, None).await
+}
+
+/// Cancellation-aware variant. Both the request and the error-body read race
+/// against the token, so a cancel never waits for the read timeout (P0-5).
+pub(crate) async fn send_json_until(
+    state: &AgentState,
+    url: &str,
+    headers: &[(&str, String)],
+    body: &Value,
+    timeout: Option<std::time::Duration>,
+    cancel: Option<&CancellationToken>,
+) -> Result<reqwest::Response, String> {
     // 客户端初始化失败时以错误形式回给 UI，绝不降级到裸 Client。
     let Some(client) = &state.client else {
         return Err("HTTP 客户端初始化失败，请重启应用".to_string());
@@ -748,18 +760,32 @@ pub(crate) async fn send_json(
     for (name, value) in headers {
         builder = builder.header(*name, value.clone());
     }
-    let resp = builder
-        .send()
-        .await
-        .map_err(|e| format!("网络请求失败：{e}"))?;
+    let send = builder.send();
+    let resp = match cancel {
+        Some(token) => tokio::select! {
+            biased;
+            _ = token.cancelled() => return Err(CANCELLED_MESSAGE.to_string()),
+            resp = send => resp.map_err(|e| format!("网络请求失败：{e}"))?,
+        },
+        None => send.await.map_err(|e| format!("网络请求失败：{e}"))?,
+    };
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let text = match cancel {
+            Some(token) => tokio::select! {
+                biased;
+                _ = token.cancelled() => return Err(CANCELLED_MESSAGE.to_string()),
+                text = resp.text() => text.unwrap_or_default(),
+            },
+            None => resp.text().await.unwrap_or_default(),
+        };
         let snippet: String = text.chars().take(300).collect();
         return Err(format!("厂商返回 HTTP {status}：{snippet}"));
     }
     Ok(resp)
 }
+
+pub(crate) const CANCELLED_MESSAGE: &str = "请求已取消";
 
 enum SseOutcome {
     Completed,
@@ -767,9 +793,10 @@ enum SseOutcome {
 }
 
 /// 逐行读取 SSE；跨 chunk 的 UTF-8 与换行都在字节层处理，避免中文被截断。
+/// Every chunk wait races the cancel token so cancellation is immediate.
 async fn read_sse<F>(
     resp: reqwest::Response,
-    cancel: &AtomicBool,
+    cancel: &CancellationToken,
     mut on_data: F,
 ) -> Result<SseOutcome, String>
 where
@@ -777,10 +804,13 @@ where
 {
     let mut stream = Box::pin(resp.bytes_stream());
     let mut buffer: Vec<u8> = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        if cancel.load(Ordering::SeqCst) {
-            return Ok(SseOutcome::Cancelled);
-        }
+    loop {
+        let chunk = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(SseOutcome::Cancelled),
+            chunk = stream.next() => chunk,
+        };
+        let Some(chunk) = chunk else { break };
         let chunk = chunk.map_err(|e| format!("流式读取失败：{e}"))?;
         buffer.extend_from_slice(&chunk);
         while let Some(pos) = buffer.iter().position(|b| *b == b'\n') {
@@ -794,9 +824,6 @@ where
                 }
             }
         }
-    }
-    if cancel.load(Ordering::SeqCst) {
-        return Ok(SseOutcome::Cancelled);
     }
     Ok(SseOutcome::Completed)
 }
@@ -1037,7 +1064,7 @@ async fn openai_stream(
     state: &AgentState,
     key: &str,
     req: &Prepared<'_>,
-    cancel: &AtomicBool,
+    cancel: &CancellationToken,
     emit: Emit<'_>,
 ) -> Result<(), String> {
     let body = prepare_openai_body(req).map_err(|e| e.to_string())?;
@@ -1045,7 +1072,15 @@ async fn openai_stream(
         ("authorization", format!("Bearer {key}")),
         ("content-type", "application/json".to_string()),
     ];
-    let resp = send_json(state, req.endpoint, &headers, &body, req.params.timeout()).await?;
+    let resp = send_json_until(
+        state,
+        req.endpoint,
+        &headers,
+        &body,
+        req.params.timeout(),
+        Some(cancel),
+    )
+    .await?;
 
     let mut next_index = 0usize;
     let mut thinking_index: Option<usize> = None;
@@ -1383,7 +1418,7 @@ async fn responses_stream(
     state: &AgentState,
     key: &str,
     req: &Prepared<'_>,
-    cancel: &AtomicBool,
+    cancel: &CancellationToken,
     emit: Emit<'_>,
 ) -> Result<(), String> {
     let body = prepare_responses_body(req).map_err(|e| e.to_string())?;
@@ -1391,7 +1426,15 @@ async fn responses_stream(
         ("authorization", format!("Bearer {key}")),
         ("content-type", "application/json".to_string()),
     ];
-    let resp = send_json(state, req.endpoint, &headers, &body, req.params.timeout()).await?;
+    let resp = send_json_until(
+        state,
+        req.endpoint,
+        &headers,
+        &body,
+        req.params.timeout(),
+        Some(cancel),
+    )
+    .await?;
 
     let mut next_index = 0usize;
     let mut thinking_index: Option<usize> = None;
@@ -1658,7 +1701,7 @@ async fn responses_json(
     state: &AgentState,
     key: &str,
     req: &Prepared<'_>,
-    cancel: &AtomicBool,
+    cancel: &CancellationToken,
     emit: Emit<'_>,
 ) -> Result<(), String> {
     let body = prepare_responses_body(req).map_err(|e| e.to_string())?;
@@ -1666,9 +1709,17 @@ async fn responses_json(
         ("authorization", format!("Bearer {key}")),
         ("content-type", "application/json".to_string()),
     ];
-    let resp = send_json(state, req.endpoint, &headers, &body, req.params.timeout()).await?;
-    let payload = read_json_response(resp).await?;
-    if cancel.load(Ordering::SeqCst) {
+    let resp = send_json_until(
+        state,
+        req.endpoint,
+        &headers,
+        &body,
+        req.params.timeout(),
+        Some(cancel),
+    )
+    .await?;
+    let payload = read_json_response_until(resp, cancel).await?;
+    if cancel.is_cancelled() {
         emit(StreamEvent::Error {
             reason: "aborted".to_string(),
             error_message: "已取消".to_string(),
@@ -1906,7 +1957,7 @@ async fn anthropic_stream(
     state: &AgentState,
     key: &str,
     req: &Prepared<'_>,
-    cancel: &AtomicBool,
+    cancel: &CancellationToken,
     emit: Emit<'_>,
 ) -> Result<(), String> {
     let body = prepare_anthropic_body(req).map_err(|e| e.to_string())?;
@@ -1915,7 +1966,15 @@ async fn anthropic_stream(
         ("anthropic-version", "2023-06-01".to_string()),
         ("content-type", "application/json".to_string()),
     ];
-    let resp = send_json(state, req.endpoint, &headers, &body, req.params.timeout()).await?;
+    let resp = send_json_until(
+        state,
+        req.endpoint,
+        &headers,
+        &body,
+        req.params.timeout(),
+        Some(cancel),
+    )
+    .await?;
 
     let mut usage = Usage::default();
     let mut text_blocks: Vec<usize> = Vec::new();
@@ -2162,11 +2221,23 @@ pub(crate) async fn read_json_response(resp: reqwest::Response) -> Result<Value,
         .map_err(|e| format!("响应不是合法 JSON：{e}"))
 }
 
+/// Cancellation-aware JSON body read; the body wait races the token.
+pub(crate) async fn read_json_response_until(
+    resp: reqwest::Response,
+    cancel: &CancellationToken,
+) -> Result<Value, String> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(CANCELLED_MESSAGE.to_string()),
+        value = resp.json::<Value>() => value.map_err(|e| format!("响应不是合法 JSON：{e}")),
+    }
+}
+
 async fn openai_json(
     state: &AgentState,
     key: &str,
     req: &Prepared<'_>,
-    cancel: &AtomicBool,
+    cancel: &CancellationToken,
     emit: Emit<'_>,
 ) -> Result<(), String> {
     let body = prepare_openai_body(req).map_err(|e| e.to_string())?;
@@ -2174,9 +2245,17 @@ async fn openai_json(
         ("authorization", format!("Bearer {key}")),
         ("content-type", "application/json".to_string()),
     ];
-    let resp = send_json(state, req.endpoint, &headers, &body, req.params.timeout()).await?;
-    let payload = read_json_response(resp).await?;
-    if cancel.load(Ordering::SeqCst) {
+    let resp = send_json_until(
+        state,
+        req.endpoint,
+        &headers,
+        &body,
+        req.params.timeout(),
+        Some(cancel),
+    )
+    .await?;
+    let payload = read_json_response_until(resp, cancel).await?;
+    if cancel.is_cancelled() {
         emit(StreamEvent::Error {
             reason: "aborted".to_string(),
             error_message: "已取消".to_string(),
@@ -2259,7 +2338,7 @@ async fn anthropic_json(
     state: &AgentState,
     key: &str,
     req: &Prepared<'_>,
-    cancel: &AtomicBool,
+    cancel: &CancellationToken,
     emit: Emit<'_>,
 ) -> Result<(), String> {
     let body = prepare_anthropic_body(req).map_err(|e| e.to_string())?;
@@ -2268,9 +2347,17 @@ async fn anthropic_json(
         ("anthropic-version", "2023-06-01".to_string()),
         ("content-type", "application/json".to_string()),
     ];
-    let resp = send_json(state, req.endpoint, &headers, &body, req.params.timeout()).await?;
-    let payload = read_json_response(resp).await?;
-    if cancel.load(Ordering::SeqCst) {
+    let resp = send_json_until(
+        state,
+        req.endpoint,
+        &headers,
+        &body,
+        req.params.timeout(),
+        Some(cancel),
+    )
+    .await?;
+    let payload = read_json_response_until(resp, cancel).await?;
+    if cancel.is_cancelled() {
         emit(StreamEvent::Error {
             reason: "aborted".to_string(),
             error_message: "已取消".to_string(),

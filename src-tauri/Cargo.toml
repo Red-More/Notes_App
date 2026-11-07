@@ -42,8 +42,8 @@ getrandom = "0.3"
 # 可灵 API 使用 AccessKey/SecretKey 签发 HS256 JWT。
 hmac = "0.12"
 hex = "0.4"
-# 视频作业轮询需要异步 sleep。
-tokio = { version = "1", features = ["time"] }
+# 视频作业轮询需要异步 sleep；run 编排用到 select!、Notify 与测试运行时。
+tokio = { version = "1", features = ["time", "sync", "macros", "rt"] }
 
 # M2-4b：Android Keystore。凭据密文写 SharedPreferences，加密密钥由 Keystore 生成且不可导出。
 # 仅 Android 目标编译；其 ndk-context 依赖已由 Tauri 的 tao 运行时初始化。

@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::agent::model_store::{self, ApiFormat, ModelEntry, ModelInput, ModelKind};
 use crate::agent::params::{self, LlmParams};
-use crate::agent::{conversations, discovery, llm, runs, secrets};
+use crate::agent::{conversations, discovery, events, llm, runs, secrets, supervisor};
 use crate::db;
 use crate::docs::{self, types::DocFields, versions};
 use crate::media::{assets, jobs};
@@ -52,7 +52,12 @@ fn acl_default_denies_and_allows_agent_workspace() {
     revoke_agent_acl(&vfs);
 
     // The seeded allow rule on /life/agent grants read and write to the Agent.
-    write_file(&mut vfs, "/life/agent/scratch", "工作草稿", WriteSource::Agent);
+    write_file(
+        &mut vfs,
+        "/life/agent/scratch",
+        "工作草稿",
+        WriteSource::Agent,
+    );
     match read_file(&vfs, "/life/agent/scratch.md") {
         ReadResult::File { content, .. } => assert!(content.contains("工作草稿")),
         ReadResult::Dir { .. } => panic!("expected a file"),
@@ -166,8 +171,14 @@ fn acl_filters_glob_and_grep_results() {
             principal: Principal::Agent,
         })
         .unwrap();
-    assert!(hits.hits.iter().all(|hit| hit.path.starts_with("/life/agent/")));
-    assert!(hits.hits.iter().any(|hit| hit.path == "/life/agent/private.md"));
+    assert!(hits
+        .hits
+        .iter()
+        .all(|hit| hit.path.starts_with("/life/agent/")));
+    assert!(hits
+        .hits
+        .iter()
+        .any(|hit| hit.path == "/life/agent/private.md"));
 
     let entries = vfs
         .glob(GlobRequest {
@@ -177,8 +188,12 @@ fn acl_filters_glob_and_grep_results() {
             principal: Principal::Agent,
         })
         .unwrap();
-    assert!(entries.iter().all(|entry| entry.path.starts_with("/life/agent/")));
-    assert!(entries.iter().any(|entry| entry.path == "/life/agent/private.md"));
+    assert!(entries
+        .iter()
+        .all(|entry| entry.path.starts_with("/life/agent/")));
+    assert!(entries
+        .iter()
+        .any(|entry| entry.path == "/life/agent/private.md"));
 
     // The user principal still sees the full result set (UI search keeps working).
     let user_hits = vfs
@@ -1147,6 +1162,7 @@ fn schema_creates_agent_and_media_tables() {
         "conversations",
         "messages",
         "agent_runs",
+        "agent_events",
         "settings",
         "media_jobs",
         "media_assets",
@@ -1228,7 +1244,9 @@ fn conversation_lifecycle_persists_messages() {
     assert_eq!(messages[0].role, "user");
     assert_eq!(messages[0].image_asset_ids.as_deref(), Some("[7]"));
     assert!(messages[1].tool_calls.is_some());
-    let usage = messages[1].usage.expect("usage must survive the round trip");
+    let usage = messages[1]
+        .usage
+        .expect("usage must survive the round trip");
     assert_eq!(usage.input, 120);
     assert_eq!(usage.output, 45);
     assert_eq!(usage.total_tokens, 165);
@@ -1329,11 +1347,7 @@ fn run_conversation(vfs: &VirtualFs) -> conversations::Conversation {
     conversations::create(vfs, Some("运行测试".into()), entry.id, entry.model_id).unwrap()
 }
 
-fn prompt_run(
-    vfs: &VirtualFs,
-    conv: &conversations::Conversation,
-    text: &str,
-) -> runs::RunStart {
+fn prompt_run(vfs: &VirtualFs, conv: &conversations::Conversation, text: &str) -> runs::RunStart {
     runs::start(
         vfs,
         conv.id,
@@ -1383,7 +1397,10 @@ fn agent_run_unique_index_blocks_a_second_executor() {
     let conv = run_conversation(&vfs);
     let first = prompt_run(&vfs, &conv, "一");
     let second = prompt_run(&vfs, &conv, "二");
-    assert_eq!(second.run.status, "queued", "a second prompt waits in the queue");
+    assert_eq!(
+        second.run.status, "queued",
+        "a second prompt waits in the queue"
+    );
 
     // The partial unique index only permits one executor per conversation.
     assert!(runs::transition(&vfs, second.run.run_id, "running").is_err());
@@ -1392,10 +1409,7 @@ fn agent_run_unique_index_blocks_a_second_executor() {
     let state = runs::state(&vfs, conv.id).unwrap();
     assert_eq!(state.active.unwrap().run_id, first.run.run_id);
     assert_eq!(state.queued.len(), 1);
-    assert_eq!(
-        state.queued[0].user_message.as_ref().unwrap().content,
-        "二"
-    );
+    assert_eq!(state.queued[0].user_message.as_ref().unwrap().content, "二");
 }
 
 #[test]
@@ -1501,7 +1515,10 @@ fn tool_arguments_and_duration_round_trip() {
     )
     .unwrap();
     let read = conversations::messages(&vfs, conv.id).unwrap();
-    assert_eq!(read[0].tool_args.as_deref(), Some(r#"{"path":"/life/a.md"}"#));
+    assert_eq!(
+        read[0].tool_args.as_deref(),
+        Some(r#"{"path":"/life/a.md"}"#)
+    );
     assert_eq!(read[0].tool_duration_ms, Some(1200));
     assert_eq!(read[0].run_id, Some(7));
 }
@@ -1778,10 +1795,22 @@ fn media_assets_dedupe_by_content_hash() {
     let vfs = test_vfs();
     let dir = std::env::temp_dir().join(format!("notes-media-{}", std::process::id()));
     let bytes = b"fake-png-bytes";
-    let first =
-        assets::store(vfs.conn(), &dir, bytes, "image/png", assets::AssetMeta::default()).unwrap();
-    let second =
-        assets::store(vfs.conn(), &dir, bytes, "image/png", assets::AssetMeta::default()).unwrap();
+    let first = assets::store(
+        vfs.conn(),
+        &dir,
+        bytes,
+        "image/png",
+        assets::AssetMeta::default(),
+    )
+    .unwrap();
+    let second = assets::store(
+        vfs.conn(),
+        &dir,
+        bytes,
+        "image/png",
+        assets::AssetMeta::default(),
+    )
+    .unwrap();
     assert_eq!(first.id, second.id, "identical bytes share one asset row");
     assert_eq!(first.sha256, second.sha256);
     let file = assets::path(&dir, &first);
@@ -3460,21 +3489,273 @@ fn privacy_egress_scopes_glob_and_grep_arguments() {
 
     // A relative glob is anchored at `root`; it must not fall back to /life.
     let glob = egress::guard(
-        &tool_call("fs_glob", serde_json::json!({ "pattern": "*.md", "root": "/life/notes" })),
+        &tool_call(
+            "fs_glob",
+            serde_json::json!({ "pattern": "*.md", "root": "/life/notes" }),
+        ),
         &snapshot,
     );
     assert!(!glob.blocked());
 
     // `fs_grep.pattern` is search text, not a path.
     let grep = egress::guard(
-        &tool_call("fs_grep", serde_json::json!({ "pattern": "会议", "path": "/life/notes" })),
+        &tool_call(
+            "fs_grep",
+            serde_json::json!({ "pattern": "会议", "path": "/life/notes" }),
+        ),
         &snapshot,
     );
     assert!(!grep.blocked());
 
     // Grep without a path can reach every S0 document, so it stays blocked.
-    let broad = egress::guard(&tool_call("fs_grep", serde_json::json!({ "pattern": "会议" })), &snapshot);
+    let broad = egress::guard(
+        &tool_call("fs_grep", serde_json::json!({ "pattern": "会议" })),
+        &snapshot,
+    );
     assert!(broad.blocked());
     assert!(broad.paths.iter().any(|p| p == "/life"));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// P3: Rust orchestration (pure answer)
+// ---------------------------------------------------------------------------
+
+fn rust_run(
+    vfs: &VirtualFs,
+    conversation_id: i64,
+    entry: &ModelEntry,
+    prompt: &str,
+) -> runs::AgentRun {
+    let message = conversations::NewMessage {
+        role: "user".into(),
+        content: prompt.into(),
+        ..Default::default()
+    };
+    runs::start(vfs, conversation_id, "prompt", &entry.id, Some(message))
+        .expect("run should start")
+        .run
+}
+
+fn state_event(run_id: i64, seq: i64, status: &str) -> events::RunEvent {
+    events::RunEvent::new(
+        run_id,
+        seq,
+        events::STATE,
+        serde_json::json!({ "status": status }),
+    )
+}
+
+#[test]
+fn run_events_replay_from_cursor_without_duplicates() {
+    let vfs = test_vfs();
+    let entry = add_model(&vfs, "事件模型", "gpt-events");
+    let conv = conversations::create(
+        &vfs,
+        Some("事件".into()),
+        entry.id.clone(),
+        entry.model_id.clone(),
+    )
+    .unwrap();
+    let run = rust_run(&vfs, conv.id, &entry, "第一句");
+    for seq in 1..=5 {
+        events::append(vfs.conn(), &state_event(run.run_id, seq, "running")).unwrap();
+    }
+    assert_eq!(events::max_seq(vfs.conn(), run.run_id).unwrap(), 5);
+    let replayed = events::replay(vfs.conn(), run.run_id, 2).unwrap();
+    assert_eq!(
+        replayed.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        vec![3, 4, 5],
+        "attach must continue strictly after the client cursor"
+    );
+    assert!(events::replay(vfs.conn(), run.run_id, 5)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn supervisor_finalize_success_writes_message_and_boundaries() {
+    let vfs = test_vfs();
+    let entry = add_model(&vfs, "回答模型", "gpt-answer");
+    let conv = conversations::create(
+        &vfs,
+        Some("回答".into()),
+        entry.id.clone(),
+        entry.model_id.clone(),
+    )
+    .unwrap();
+    let run = rust_run(&vfs, conv.id, &entry, "问题");
+    events::append(vfs.conn(), &state_event(run.run_id, 1, "running")).unwrap();
+
+    let finalized = supervisor::finalize(
+        &vfs,
+        &run,
+        &supervisor::Outcome::success("最终回答", None),
+        2,
+    )
+    .unwrap();
+    assert_eq!(finalized.run.status, "succeeded");
+    let kinds: Vec<&str> = finalized
+        .events
+        .iter()
+        .map(|event| event.kind.as_str())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![events::ASSISTANT, events::STATE, events::END],
+        "success writes assistant, terminal state and end boundaries"
+    );
+    let seqs: Vec<i64> = finalized.events.iter().map(|event| event.seq).collect();
+    assert!(
+        seqs.windows(2).all(|pair| pair[1] > pair[0]),
+        "event seq must be strictly increasing"
+    );
+    let message = finalized.message.expect("assistant row");
+    assert_eq!(message.role, "assistant");
+    assert_eq!(message.content, "最终回答");
+    assert_eq!(message.stop_reason.as_deref(), Some("stop"));
+    assert!(!message.is_partial);
+}
+
+#[test]
+fn supervisor_finalize_cancel_keeps_partial_snapshot() {
+    let vfs = test_vfs();
+    let entry = add_model(&vfs, "取消模型", "gpt-cancel");
+    let conv = conversations::create(
+        &vfs,
+        Some("取消".into()),
+        entry.id.clone(),
+        entry.model_id.clone(),
+    )
+    .unwrap();
+    let run = rust_run(&vfs, conv.id, &entry, "写一半就好");
+    runs::transition(&vfs, run.run_id, "cancelling").unwrap();
+
+    let finalized =
+        supervisor::finalize(&vfs, &run, &supervisor::Outcome::cancelled("半截文本"), 2).unwrap();
+    assert_eq!(finalized.run.status, "cancelled");
+    assert_eq!(
+        finalized.run.partial.as_deref(),
+        Some(r#"{"text":"半截文本"}"#),
+        "cancel must keep the received text for re-entry"
+    );
+    let message = finalized.message.expect("partial assistant row");
+    assert!(message.is_partial);
+    assert_eq!(message.stop_reason.as_deref(), Some("aborted"));
+    assert_eq!(message.content, "半截文本");
+}
+
+#[test]
+fn tool_call_fails_with_tool_not_supported() {
+    let mut accumulator = supervisor::Accumulator::default();
+    accumulator.apply(&llm::StreamEvent::TextDelta {
+        content_index: 0,
+        delta: "我先查一下".into(),
+    });
+    accumulator.apply(&llm::StreamEvent::ToolCallStart {
+        content_index: 0,
+        id: "call-1".into(),
+        tool_name: "fs_read".into(),
+    });
+
+    let outcome = supervisor::Outcome::from_accumulator(accumulator, false);
+    assert_eq!(outcome.status, "failed");
+    let failure = outcome.failure.as_ref().expect("failure is explicit");
+    assert_eq!(failure.code, "tool_not_supported");
+    assert!(failure.message.contains("暂不支持工具调用"));
+
+    // The failure must also be persisted, never swallowed.
+    let vfs = test_vfs();
+    let entry = add_model(&vfs, "工具模型", "gpt-tools");
+    let conv = conversations::create(
+        &vfs,
+        Some("工具".into()),
+        entry.id.clone(),
+        entry.model_id.clone(),
+    )
+    .unwrap();
+    let run = rust_run(&vfs, conv.id, &entry, "读取笔记");
+    let finalized = supervisor::finalize(&vfs, &run, &outcome, 2).unwrap();
+    assert_eq!(finalized.run.status, "failed");
+    assert_eq!(
+        finalized.run.error_code.as_deref(),
+        Some("tool_not_supported")
+    );
+    let message = finalized.message.expect("error message row");
+    assert!(message.is_error);
+    assert!(message.content.contains("暂不支持工具调用"));
+}
+
+#[test]
+fn provider_errors_map_to_stable_codes() {
+    let cases = [
+        ("尚未配置 API Key，请到设置中填写", "auth_missing"),
+        ("厂商返回 HTTP 401：unauthorized", "auth_invalid"),
+        ("厂商返回 HTTP 429：too many requests", "rate_limited"),
+        ("请求超时：timed out", "timeout"),
+        ("网络请求失败：error sending request", "network"),
+        ("响应不是合法 JSON：expected value", "protocol_changed"),
+        ("厂商返回 HTTP 400：bad request", "provider_rejected"),
+        ("完全无法识别的错误", "internal"),
+    ];
+    for (text, expected) in cases {
+        assert_eq!(supervisor::classify_error(text), expected, "{text}");
+    }
+}
+
+#[test]
+fn engines_agree_on_persisted_messages_and_final_state() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../../src/agent/fixtures/pureAnswer.json"))
+            .expect("fixture parses");
+    let vfs = test_vfs();
+    let entry = add_model(&vfs, "一致性模型", "gpt-parity");
+    let conv = conversations::create(
+        &vfs,
+        Some("一致性".into()),
+        entry.id.clone(),
+        entry.model_id.clone(),
+    )
+    .unwrap();
+
+    let history: Vec<conversations::NewMessage> = fixture["history"]
+        .as_array()
+        .expect("history array")
+        .iter()
+        .map(|item| conversations::NewMessage {
+            role: item["role"].as_str().unwrap().into(),
+            content: item["content"].as_str().unwrap().into(),
+            stop_reason: item
+                .get("stopReason")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            is_partial: item["isPartial"].as_bool().unwrap_or(false),
+            ..Default::default()
+        })
+        .collect();
+    conversations::append(&vfs, conv.id, history).unwrap();
+
+    let prompt = fixture["prompt"].as_str().unwrap();
+    let run = rust_run(&vfs, conv.id, &entry, prompt);
+    let outcome = supervisor::Outcome::success(fixture["answer"].as_str().unwrap(), None);
+    supervisor::finalize(&vfs, &run, &outcome, 2).unwrap();
+
+    let rows = conversations::messages(&vfs, conv.id).unwrap();
+    let expected = fixture["expectedMessages"].as_array().unwrap();
+    assert_eq!(rows.len(), expected.len(), "message row count parity");
+    for (row, want) in rows.iter().zip(expected) {
+        assert_eq!(row.role, want["role"].as_str().unwrap());
+        assert_eq!(row.content, want["content"].as_str().unwrap());
+        if let Some(stop) = want.get("stopReason").and_then(Value::as_str) {
+            assert_eq!(row.stop_reason.as_deref(), Some(stop));
+        }
+        if let Some(partial) = want.get("isPartial").and_then(Value::as_bool) {
+            assert_eq!(row.is_partial, partial);
+        }
+    }
+    let state = runs::state(&vfs, conv.id).unwrap();
+    assert_eq!(
+        state.latest.as_ref().map(|run| run.status.as_str()),
+        Some(fixture["expectedStatus"].as_str().unwrap())
+    );
 }

@@ -1,0 +1,29 @@
+{
+  "history": [
+    { "role": "user", "content": "你好", "stopReason": null, "isPartial": false },
+    {
+      "role": "assistant",
+      "content": "你好！有什么可以帮你？",
+      "stopReason": "stop",
+      "isPartial": false
+    }
+  ],
+  "prompt": "帮我总结今天",
+  "answer": "今天完成了两件事。",
+  "expectedMessages": [
+    { "role": "user", "content": "你好" },
+    {
+      "role": "assistant",
+      "content": "你好！有什么可以帮你？",
+      "stopReason": "stop"
+    },
+    { "role": "user", "content": "帮我总结今天" },
+    {
+      "role": "assistant",
+      "content": "今天完成了两件事。",
+      "stopReason": "stop",
+      "isPartial": false
+    }
+  ],
+  "expectedStatus": "succeeded"
+}

@@ -22,6 +22,7 @@ export type ErrorCode =
   | 'tool_other'
   | 'quota_steps'
   | 'quota_writes'
+  | 'tool_not_supported'
   | 'internal'
   | 'cancelled'
 
@@ -49,6 +50,7 @@ export const ERROR_COPY: Record<ErrorCode, string> = {
   tool_other: '工具执行失败',
   quota_steps: '单轮工具调用步数超限，请先总结再继续',
   quota_writes: '单轮写入次数超限，请合并内容后再试',
+  tool_not_supported: '当前版本暂不支持工具调用',
   internal: '内部错误',
   cancelled: '已取消',
 }
@@ -145,13 +147,18 @@ export function classifyError(error: unknown): ErrorInfo {
   return { code: classifyMessage(text), detail: text }
 }
 
-/** Classify the terminal state of an assistant message. */
+/**
+ * Classify one finished assistant message. The Rust engine attaches a stable
+ * `errorCode`, so the UI no longer has to guess from provider text (P0-3).
+ */
 export function classifyFailure(message: {
   stopReason?: string
   errorMessage?: string | null
+  errorCode?: string | null
 }): ErrorInfo {
   if (message.stopReason === 'aborted') return { code: 'cancelled', detail: '' }
   const text = message.errorMessage ?? ''
+  if (message.errorCode) return { code: message.errorCode as ErrorCode, detail: text }
   return { code: classifyMessage(text), detail: text }
 }
 

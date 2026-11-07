@@ -15,7 +15,7 @@
 use rusqlite::{params, Connection};
 
 /// Version stamped on databases created by this module.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Virtual file system root, kept in sync with `vfs::cap_gate::ROOT`.
 const ROOT: &str = "/life";
@@ -231,6 +231,20 @@ CREATE TABLE agent_runs (
 CREATE UNIQUE INDEX idx_agent_runs_executing
     ON agent_runs(conversation_id) WHERE status IN ('running', 'cancelling');
 CREATE INDEX idx_agent_runs_conversation ON agent_runs(conversation_id, run_id DESC);
+
+-- Boundary events of one run; token deltas never persist. `seq` is monotonic
+-- per run so a reconnecting client can replay everything after its cursor.
+CREATE TABLE agent_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id     INTEGER NOT NULL,
+    seq        INTEGER NOT NULL,
+    kind       TEXT NOT NULL,                 -- state | assistant | error | end
+    payload    TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    UNIQUE (run_id, seq),
+    FOREIGN KEY (run_id) REFERENCES agent_runs(run_id) ON DELETE CASCADE
+);
+CREATE INDEX idx_agent_events_run ON agent_events(run_id, seq);
 
 -- Non-secret settings only; API keys live in the Rust secret store.
 CREATE TABLE settings (

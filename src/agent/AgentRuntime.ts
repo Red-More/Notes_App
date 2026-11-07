@@ -21,11 +21,13 @@ import type {
   McpToolInfo,
   NewChatMessage,
   QueuedRun,
+  RustRunEvent,
+  RustRunSnapshot,
   SkillSummary,
 } from '../types'
 import { buildSkillsIndex } from './skills'
 import { createAgent, toAgentMessages, type AgentProfile } from './runtime'
-import { classifyError, classifyFailure, errorText, type ErrorInfo } from './errors'
+import { classifyError, classifyFailure, errorText, type ErrorCode, type ErrorInfo } from './errors'
 import {
   beginPrompt,
   createView,
@@ -86,6 +88,21 @@ export interface AgentRuntimeDeps {
   ): Promise<unknown>
   touchRun(runId: number, stepCount: number, writeCount: number, lastSeq: number): Promise<unknown>
   loadRunState(conversationId: number): Promise<AgentRunState>
+  /** Rust orchestrator (P3). Only used when `engine === 'rust'`. */
+  startRustRun(
+    conversationId: number,
+    trigger: AgentRunTrigger,
+    modelEntry: string,
+    message?: NewChatMessage | null,
+  ): Promise<AgentRunStart>
+  /** Replay boundary events after `afterSeq`, then stream live until the run ends. */
+  attachRustRun(
+    runId: number,
+    afterSeq: number,
+    onEvent: (event: RustRunEvent) => void,
+  ): Promise<void>
+  cancelRustRun(runId: number): Promise<AgentRun>
+  snapshotRustRun(runId: number, afterSeq: number): Promise<RustRunSnapshot>
 }
 
 export interface RuntimeSnapshot {
@@ -109,6 +126,11 @@ export interface AgentRuntimeOptions {
   streamFn?: StreamFn
   /** Frame scheduler; defaults to requestAnimationFrame. */
   schedule?: (flush: () => void) => void
+  /**
+   * Execution engine. `js` keeps the pi-agent path (default, fully usable);
+   * `rust` delegates to the new orchestration commands.
+   */
+  engine?: 'js' | 'rust'
 }
 
 /** Coalesce token deltas into one render per frame when the host offers rAF. */
@@ -132,6 +154,7 @@ export class AgentRuntime {
   private readonly deps: AgentRuntimeDeps
   private readonly streamFn?: StreamFn
   private readonly schedule: (flush: () => void) => void
+  private readonly engine: 'js' | 'rust'
 
   private agent: Agent | null = null
   private unsubscribe: (() => void) | null = null
@@ -158,6 +181,8 @@ export class AgentRuntime {
   private runWrites = 0
   private cancelRequested = false
   private pumping = false
+  /** In-flight `run_attach` channel; distinguishes rust cancellation. */
+  private rustAttach: Promise<void> | null = null
   /** Steering texts already written; their pi user events must not duplicate. */
   private steering: { text: string; runId: number | null }[] = []
 
@@ -165,6 +190,7 @@ export class AgentRuntime {
     this.deps = options.deps
     this.streamFn = options.streamFn
     this.schedule = options.schedule ?? defaultSchedule
+    this.engine = options.engine ?? 'js'
   }
 
   // ---------------------------------------------------------------- loading
@@ -197,7 +223,13 @@ export class AgentRuntime {
     this.queue = runState.queued
     this.interrupted = runState.latest?.status === 'interrupted' ? runState.latest : null
 
-    if (profile) {
+    if (this.engine === 'rust') {
+      // Rust owns the request; only rebuild the projection from SQLite.
+      if (runState.active) {
+        this.status = runState.active.status === 'cancelling' ? 'cancelling' : 'running'
+        void this.runRustRun(runState.active)
+      }
+    } else if (profile) {
       const skills = await this.deps.loadSkills().catch(() => [])
       const mcpTools = await this.deps.loadMcpTools().catch(() => [])
       this.skillsIndex = buildSkillsIndex(skills)
@@ -228,9 +260,9 @@ export class AgentRuntime {
   // ---------------------------------------------------------------- running
 
   async prompt(input: PromptInput): Promise<void> {
-    const agent = this.agent
     const conversation = this.conversation
-    if (!agent || !conversation) throw new Error('会话尚未就绪')
+    if (!conversation || (this.engine === 'js' && !this.agent)) throw new Error('会话尚未就绪')
+    if (this.engine === 'rust' && !this.profile) throw new Error('会话尚未就绪')
     if (this.status !== 'idle') throw new Error('上一条回复尚未结束')
     // The previous run may still be settling; a stale executor would make the
     // new run look queued even though nothing is running.
@@ -240,9 +272,12 @@ export class AgentRuntime {
     if (text === '' && input.attachments.length === 0) return
     const imageIds = input.attachments.map((file) => file.assetId)
     const dataUrls = input.attachments.map((file) => file.dataUrl)
+    if (this.engine === 'rust' && imageIds.length > 0) {
+      throw new Error('rust 引擎暂不支持图片输入')
+    }
 
     // The ledger insert and the user message share one transaction.
-    const started = await this.deps.startRun(conversation.id, 'prompt', conversation.provider, {
+    const started = await this.startRun(conversation, 'prompt', {
       role: 'user',
       content: text,
       imageAssetIds: imageIds.length > 0 ? JSON.stringify(imageIds) : null,
@@ -256,6 +291,10 @@ export class AgentRuntime {
     this.beginRun(started)
     this.addUserItem(started, text, imageIds, dataUrls)
     this.emit()
+    if (this.engine === 'rust') {
+      await this.runRustRun(started.run)
+      return
+    }
     await this.runTurn(text, input.attachments)
   }
 
@@ -263,7 +302,18 @@ export class AgentRuntime {
   steer(text: string): void {
     const message = text.trim()
     const conversation = this.conversation
-    if (!message || !this.agent || !conversation) return
+    if (!message || !conversation) return
+    if (this.engine === 'rust') {
+      // No mid-request injection yet; persist it so the next run reads it.
+      const runId = this.currentRun?.runId ?? null
+      const steerOfRun = runId
+      this.enqueueWrite(conversation.id, [
+        { role: 'user', content: message, runId, steerOfRun },
+      ])
+      this.emit()
+      return
+    }
+    if (!this.agent) return
     const runId = this.currentRun?.runId ?? null
     // Record the text so its pi user event does not persist a second row.
     this.steering.push({ text: message, runId })
@@ -279,7 +329,7 @@ export class AgentRuntime {
     const message = text.trim()
     const conversation = this.conversation
     if (!message || !conversation) return
-    const started = await this.deps.startRun(conversation.id, 'prompt', conversation.provider, {
+    const started = await this.startRun(conversation, 'prompt', {
       role: 'user',
       content: message,
     })
@@ -293,7 +343,22 @@ export class AgentRuntime {
     this.beginRun(started)
     this.addUserItem(started, message, [], [])
     this.emit()
+    if (this.engine === 'rust') {
+      await this.runRustRun(started.run)
+      return
+    }
     await this.runTurn(message, [])
+  }
+
+  /** Both engines share the ledger; only the command differs. */
+  private startRun(
+    conversation: ChatConversation,
+    trigger: AgentRunTrigger,
+    message: NewChatMessage | null,
+  ): Promise<AgentRunStart> {
+    return this.engine === 'rust'
+      ? this.deps.startRustRun(conversation.id, trigger, conversation.provider, message)
+      : this.deps.startRun(conversation.id, trigger, conversation.provider, message)
   }
 
   private beginRun(started: AgentRunStart): void {
@@ -364,6 +429,10 @@ export class AgentRuntime {
    * The partial answer stays in the transcript instead of being dropped.
    */
   async cancel(): Promise<void> {
+    if (this.engine === 'rust') {
+      await this.cancelRust()
+      return
+    }
     const agent = this.agent
     if (!agent && !this.currentRun) return
     this.cancelRequested = true
@@ -391,7 +460,220 @@ export class AgentRuntime {
     this.emit()
   }
 
-  /** Truncate to the user turn behind `messageKey` and continue from there. */
+  /** Cancel the in-flight Rust run, wait for its close-out, then cancel the queue. */
+  private async cancelRust(): Promise<void> {
+    const conversation = this.conversation
+    if (!conversation) return
+    this.cancelRequested = true
+    this.status = 'cancelling'
+    this.emit()
+
+    const runId = this.currentRun?.runId
+    if (runId !== undefined) {
+      try {
+        await this.deps.cancelRustRun(runId)
+      } catch (error) {
+        console.error('取消运行失败', error)
+      }
+    }
+    // The attach loop resolves once the end boundary event is delivered.
+    await this.rustAttach
+    await this.drain()
+
+    // Rust may have pumped the next queued run at the boundary; cancel it too.
+    const state = await this.deps.loadRunState(conversation.id).catch(() => null)
+    const remaining = [
+      ...(state?.queued.map((item) => item.run.runId) ?? []),
+      ...(state?.active ? [state.active.runId] : []),
+    ]
+    for (const id of remaining) {
+      try {
+        await this.deps.cancelRustRun(id)
+      } catch (error) {
+        console.error('取消排队运行失败', error)
+      }
+    }
+    if (remaining.length > 0) await this.rustAttach
+
+    this.currentRun = null
+    this.queue = []
+    this.cancelRequested = false
+    this.status = 'idle'
+    this.emit()
+  }
+
+  /** Reset the projection for a re-run (retry/resume) and mark it executing. */
+  private beginRustReRun(run: AgentRun, records: ChatMessageRecord[]): void {
+    this.currentRun = run
+    this.runSteps = 0
+    this.runWrites = 0
+    this.cancelRequested = false
+    this.lastError = null
+    this.interrupted = null
+    this.view = createView(projectHistory(records, this.images))
+    this.view.settled = false
+    this.status = 'running'
+    this.emit()
+  }
+
+  /** Attach to a Rust run: replay its boundary events, then stream until `end`. */
+  private async runRustRun(run: AgentRun): Promise<void> {
+    const attach = this.deps.attachRustRun(run.runId, 0, (event) => this.onRustEvent(event))
+    this.rustAttach = attach.catch((error) => {
+      console.error('订阅运行事件失败', error)
+    })
+    try {
+      await this.rustAttach
+    } finally {
+      this.rustAttach = null
+      await this.drain()
+      await this.refreshLedger()
+    }
+  }
+
+  /** Re-read the ledger after a run ends so a pumped queued run gets attached. */
+  private async refreshLedger(): Promise<void> {
+    const conversationId = this.conversation?.id
+    if (conversationId === undefined) return
+    const state = await this.deps
+      .loadRunState(conversationId)
+      .catch((): AgentRunState => ({ active: null, latest: null, queued: [] }))
+    this.queue = state.queued
+    this.interrupted = state.latest?.status === 'interrupted' ? state.latest : null
+    if (!state.active) {
+      this.currentRun = null
+      this.status = 'idle'
+      this.emit()
+      return
+    }
+    this.currentRun = state.active
+    this.status = state.active.status === 'cancelling' ? 'cancelling' : 'running'
+    this.emit()
+    void this.runRustRun(state.active)
+  }
+
+  /** Fold one boundary event from the Rust supervisor into the projection. */
+  private onRustEvent(event: RustRunEvent): void {
+    if (this.currentRun !== null && event.runId !== this.currentRun.runId) return
+    switch (event.kind) {
+      case 'state': {
+        const status = event.payload.status
+        if (this.currentRun) this.currentRun = { ...this.currentRun, status }
+        if (status === 'running') this.status = 'running'
+        else if (status === 'cancelling') this.status = 'cancelling'
+        this.emit()
+        return
+      }
+      case 'delta': {
+        this.appendRustDelta(event.payload.delta)
+        this.scheduleFlush()
+        return
+      }
+      case 'assistant': {
+        this.applyRustAssistant(event.payload.message, event.payload.errorCode)
+        this.emit()
+        return
+      }
+      case 'error': {
+        const code = event.payload.errorCode as ErrorCode
+        this.lastError = code === 'cancelled' ? null : { code, detail: event.payload.message }
+        this.emit()
+        return
+      }
+      case 'end': {
+        const status = event.payload.status
+        const code = event.payload.errorCode as ErrorCode | null
+        this.cancelRequested = false
+        this.lastError = status === 'failed' && code !== null ? { code, detail: '' } : null
+        this.currentRun = null
+        this.status = 'idle'
+        this.view = flushBuffer(this.view)
+        this.view = {
+          ...this.view,
+          streamingId: null,
+          settled: true,
+          closeOut: false,
+          pendingInitialUser: false,
+          buffer: null,
+        }
+        this.emit()
+        return
+      }
+    }
+  }
+
+  /** Live-only text: Rust owns persistence, so deltas never touch SQLite here. */
+  private appendRustDelta(delta: string): void {
+    if (delta === '') return
+    const id = this.ensureRustBubble()
+    const previous = this.view.buffer
+    const buffer =
+      previous !== null && previous.id === id
+        ? { ...previous, text: previous.text + delta }
+        : { id, text: delta, thinking: '', tools: new Map() }
+    this.view = { ...this.view, buffer }
+  }
+
+  private ensureRustBubble(): string {
+    const current = this.view.streamingId
+    if (
+      current !== null &&
+      this.view.items.some((item) => item.id === current && item.kind === 'assistant')
+    ) {
+      return current
+    }
+    const generated = nextItemId(this.view, 'a')
+    this.view = {
+      ...generated.view,
+      streamingId: generated.id,
+      settled: false,
+      closeOut: false,
+      pendingInitialUser: false,
+      buffer: null,
+      items: [
+        ...generated.view.items,
+        { id: generated.id, kind: 'assistant', text: '', streaming: true },
+      ],
+    }
+    return generated.id
+  }
+
+  /** Reconcile the live bubble with the row Rust already persisted. */
+  private applyRustAssistant(message: ChatMessageRecord, errorCode: string | null): void {
+    const flushed = flushBuffer(this.view)
+    const bubbleId = flushed.streamingId ?? `m-${message.id}`
+    const existing = flushed.items.find(
+      (item): item is Bubble => item.id === bubbleId && item.kind === 'assistant',
+    )
+    const failed = message.isError
+    const cancelled = message.isPartial || message.stopReason === 'aborted'
+    const bubble: Bubble = {
+      id: bubbleId,
+      kind: 'assistant',
+      text: message.content,
+      isError: failed,
+      cancelled,
+      errorCode: failed && errorCode !== null ? (errorCode as ErrorCode) : undefined,
+      usage: message.usage,
+      thinking: message.thinking,
+      thinkingSignature: message.thinkingSignature,
+      streaming: false,
+      changes: existing?.changes,
+    }
+    const items = flushed.items.some((item) => item.id === bubbleId)
+      ? flushed.items.map((item) => (item.id === bubbleId ? bubble : item))
+      : [...flushed.items, bubble]
+    this.view = {
+      ...flushed,
+      items,
+      streamingId: null,
+      settled: true,
+      closeOut: false,
+      pendingInitialUser: false,
+      buffer: null,
+    }
+  }
+
   async retry(messageKey: string): Promise<void> {
     const conversation = this.conversation
     const profile = this.profile
@@ -408,6 +690,27 @@ export class AgentRuntime {
     let userIndex = target - 1
     while (userIndex >= 0 && records[userIndex].role !== 'user') userIndex -= 1
     if (userIndex < 0) throw new Error('没有可重试的回答')
+
+    const keptRecords = records.slice(0, userIndex + 1)
+    if (this.engine === 'rust') {
+      // Truncate before starting: the supervisor reads the transcript immediately.
+      await this.drain()
+      await this.deps.truncate(conversation.id, records[userIndex].id)
+      const started = await this.startRun(conversation, 'retry', null)
+      if (started.run.status !== 'running') {
+        await this.deps.finishRun(started.run.runId, 'cancelled', {
+          partial: null,
+          errorCode: 'cancelled',
+          stepCount: 0,
+          writeCount: 0,
+          lastSeq: 0,
+        })
+        throw new Error('上一条回复尚未结束')
+      }
+      this.beginRustReRun(started.run, keptRecords)
+      await this.runRustRun(started.run)
+      return
+    }
 
     const started = await this.deps.startRun(conversation.id, 'retry', profile.provider, null)
     if (started.run.status !== 'running') {
@@ -461,6 +764,28 @@ export class AgentRuntime {
     const profile = this.profile
     if (!conversation || !profile || this.status !== 'idle') throw new Error('会话尚未就绪')
     await this.drainRunWrites()
+
+    if (this.engine === 'rust') {
+      const started = await this.startRun(conversation, 'resume', null)
+      if (started.run.status !== 'running') {
+        await this.deps.finishRun(started.run.runId, 'cancelled', {
+          partial: null,
+          errorCode: 'cancelled',
+          stepCount: 0,
+          writeCount: 0,
+          lastSeq: 0,
+        })
+        throw new Error('上一条回复尚未结束')
+      }
+      await this.drain()
+      const resumeFrom = started.run.resumeFromMessageId
+      if (resumeFrom !== null) await this.deps.truncate(conversation.id, resumeFrom)
+      const records = await this.deps.loadMessages(conversation.id)
+      this.images = await this.deps.loadImages(records).catch(() => new Map())
+      this.beginRustReRun(started.run, records)
+      await this.runRustRun(started.run)
+      return
+    }
 
     const started = await this.deps.resumeRun(conversation.id, profile.provider)
     if (started.run.status !== 'running') {
@@ -557,6 +882,18 @@ export class AgentRuntime {
    * BEFORE unsubscribing, otherwise the final partial never reaches SQLite.
    */
   async dispose(): Promise<void> {
+    if (this.engine === 'rust') {
+      if (this.status !== 'idle' || this.currentRun !== null) await this.cancelRust()
+      await this.drain()
+      await this.drainRunWrites()
+      this.teardownAgent()
+      this.rustAttach = null
+      this.currentRun = null
+      this.queue = []
+      this.status = 'idle'
+      this.view = createView([])
+      return
+    }
     const agent = this.agent
     if (!agent) {
       await this.drain()
@@ -856,6 +1193,8 @@ export class AgentRuntime {
 
   /** Start the oldest queued run after the previous one reached a terminal state. */
   private async pumpQueue(): Promise<void> {
+    // Rust pumps queued runs itself; re-attaching happens in `refreshLedger`.
+    if (this.engine === 'rust') return
     if (this.pumping || this.status !== 'idle' || !this.agent || this.queue.length === 0) return
     const next = this.queue[0]
     const text = next.userMessage?.content ?? ''
@@ -889,6 +1228,12 @@ export class AgentRuntime {
   private handleThrown(error: unknown): void {
     const info = classifyError(error)
     this.lastError = info.code === 'cancelled' ? null : info
+    if (this.engine === 'rust') {
+      // Rust owns persistence; never write a second error row.
+      this.status = 'idle'
+      this.emit()
+      return
+    }
     if (this.view.settled) return
     const generated = nextItemId(this.view, 'e')
     this.view = {

@@ -6,6 +6,7 @@ import type { AssistantMessage } from '@earendil-works/pi-ai'
 import type { StreamFn } from '@earendil-works/pi-agent-core'
 import { AgentRuntime, type AgentRuntimeDeps, type RuntimeSnapshot } from './AgentRuntime'
 import type { Bubble } from './chatView'
+import fixtureRaw from './fixtures/pureAnswer.json?raw'
 import type {
   AgentRun,
   AgentRunState,
@@ -15,6 +16,8 @@ import type {
   ChatConversation,
   ChatMessageRecord,
   NewChatMessage,
+  RustRunEvent,
+  RustRunSnapshot,
 } from '../types'
 
 const profile = {
@@ -127,6 +130,45 @@ function memoryDeps(conversation: ChatConversation) {
     return { run: { ...run }, message: record }
   }
 
+  /** Persisted boundary events and live subscribers, like the Rust supervisor. */
+  const rustEvents = new Map<number, RustRunEvent[]>()
+  const rustListeners = new Map<number, (event: RustRunEvent) => void>()
+  const terminal = (status: AgentRunStatus) =>
+    ['succeeded', 'failed', 'cancelled', 'interrupted'].includes(status)
+
+  const recordRust = (event: RustRunEvent): void => {
+    rustEvents.set(event.runId, [...(rustEvents.get(event.runId) ?? []), event])
+    rustListeners.get(event.runId)?.(event)
+  }
+
+  const nextSeq = (runId: number) => (rustEvents.get(runId)?.at(-1)?.seq ?? 0) + 1
+
+  const attachRustRun = async (
+    runId: number,
+    afterSeq: number,
+    onEvent: (event: RustRunEvent) => void,
+  ): Promise<void> => {
+    const run = runs.find((item) => item.runId === runId)
+    if (!run) throw new Error(`run ${runId} not found`)
+    let ended = false
+    for (const event of rustEvents.get(runId) ?? []) {
+      if (event.seq > afterSeq) {
+        onEvent(event)
+        ended = ended || event.kind === 'end'
+      }
+    }
+    if (ended || terminal(run.status)) return
+    await new Promise<void>((resolve) => {
+      rustListeners.set(runId, (event) => {
+        onEvent(event)
+        if (event.kind === 'end') {
+          rustListeners.delete(runId)
+          resolve()
+        }
+      })
+    })
+  }
+
   const deps: AgentRuntimeDeps = {
     loadMessages: async (conversationId) => [...(rows.get(conversationId) ?? [])],
     loadImages: async () => new Map(),
@@ -196,12 +238,48 @@ function memoryDeps(conversation: ChatConversation) {
         queued,
       }
     },
+    startRustRun: startRun,
+    attachRustRun,
+    cancelRustRun: async (runId) => {
+      const run = runs.find((item) => item.runId === runId)
+      if (!run) throw new Error(`run ${runId} not found`)
+      recordRust({
+        runId,
+        seq: nextSeq(runId),
+        kind: 'state',
+        payload: { status: 'cancelling' },
+      })
+      run.status = 'cancelling'
+      run.updatedAt = stamp()
+      return { ...run }
+    },
+    snapshotRustRun: async (runId, afterSeq): Promise<RustRunSnapshot> => {
+      const run = runs.find((item) => item.runId === runId)
+      if (!run) throw new Error(`run ${runId} not found`)
+      return {
+        run: { ...run },
+        events: (rustEvents.get(runId) ?? []).filter((event) => event.seq > afterSeq),
+      }
+    },
   }
 
   const assistantRows = (conversationId: number) =>
     (rows.get(conversationId) ?? []).filter((record) => record.role === 'assistant')
 
-  return { deps, rows, writes, runs, finishes, transitions, truncates, assistantRows }
+  return {
+    deps,
+    rows,
+    writes,
+    runs,
+    finishes,
+    transitions,
+    truncates,
+    assistantRows,
+    insert,
+    recordRust,
+    rustListeners,
+    rustEvents,
+  }
 }
 
 function conversation(id = 1, title = '测试对话'): ChatConversation {
@@ -295,6 +373,32 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void
 function assistants(snapshot: RuntimeSnapshot): Bubble[] {
   return snapshot.items.filter((item): item is Bubble => item.kind === 'assistant')
 }
+
+/** A Rust-mode runtime whose supervisor is simulated through `recordRust`. */
+function rustRuntime() {
+  const store = memoryDeps(conversation())
+  const runtime = new AgentRuntime({
+    deps: store.deps,
+    engine: 'rust',
+    schedule: (flush) => flush(),
+  })
+  return { runtime, store }
+}
+
+interface ParityFixture {
+  history: {
+    role: 'user' | 'assistant'
+    content: string
+    stopReason?: string | null
+    isPartial?: boolean
+  }[]
+  prompt: string
+  answer: string
+  expectedMessages: { role: string; content: string; stopReason?: string; isPartial?: boolean }[]
+  expectedStatus: string
+}
+
+const parity: ParityFixture = JSON.parse(fixtureRaw) as ParityFixture
 
 describe('AgentRuntime', () => {
   it('runs multiple turns and persists one row per message', async () => {
@@ -469,5 +573,214 @@ describe('AgentRuntime', () => {
     await resumed
     expect(store.finishes.some((call) => call.runId === resumeRun?.runId && call.status === 'succeeded'))
       .toBe(true)
+  })
+
+  it('rust engine renders boundary events without persisting transcript rows', async () => {
+    const { runtime, store } = rustRuntime()
+    await runtime.open(conversation(), profile)
+    const pending = runtime.prompt({ text: '问', attachments: [] })
+    await waitFor(() => store.runs.length === 1)
+    const runId = store.runs[0].runId
+    await waitFor(() => store.rustListeners.has(runId))
+
+    store.recordRust({ runId, seq: 1, kind: 'state', payload: { status: 'running' } })
+    store.recordRust({ runId, seq: 2, kind: 'delta', payload: { delta: '半' } })
+    const row = store.insert(1, {
+      role: 'assistant',
+      content: '半句答复',
+      runId,
+      stopReason: 'stop',
+    })
+    store.recordRust({
+      runId,
+      seq: 3,
+      kind: 'assistant',
+      payload: { message: row, errorCode: null },
+    })
+    store.recordRust({ runId, seq: 4, kind: 'state', payload: { status: 'succeeded' } })
+    store.recordRust({
+      runId,
+      seq: 5,
+      kind: 'end',
+      payload: { status: 'succeeded', errorCode: null, partial: null },
+    })
+    store.runs[0].status = 'succeeded'
+    await pending
+
+    expect(runtime.snapshot().items.map((item) => `${item.kind}:${item.text}`)).toEqual([
+      'user:问',
+      'assistant:半句答复',
+    ])
+    expect(runtime.snapshot().status).toBe('idle')
+    // The Rust supervisor owns persistence; the runtime never writes rows.
+    expect(store.writes).toHaveLength(0)
+  })
+
+  it('rust cancel waits for the terminal event and keeps the partial bubble', async () => {
+    const { runtime, store } = rustRuntime()
+    await runtime.open(conversation(), profile)
+    const pending = runtime.prompt({ text: '写一段', attachments: [] })
+    await waitFor(() => store.runs.length === 1)
+    const runId = store.runs[0].runId
+    await waitFor(() => store.rustListeners.has(runId))
+
+    store.recordRust({ runId, seq: 1, kind: 'state', payload: { status: 'running' } })
+    store.recordRust({ runId, seq: 2, kind: 'delta', payload: { delta: '半句' } })
+    await waitFor(() => (assistants(runtime.snapshot())[0]?.text ?? '') === '半句')
+
+    const cancelling = runtime.cancel()
+    await waitFor(() => store.runs[0].status === 'cancelling')
+    const row = store.insert(1, {
+      role: 'assistant',
+      content: '半句',
+      runId,
+      isPartial: true,
+      stopReason: 'aborted',
+    })
+    store.recordRust({
+      runId,
+      seq: 3,
+      kind: 'assistant',
+      payload: { message: row, errorCode: null },
+    })
+    store.recordRust({ runId, seq: 4, kind: 'state', payload: { status: 'cancelled' } })
+    store.recordRust({
+      runId,
+      seq: 5,
+      kind: 'end',
+      payload: { status: 'cancelled', errorCode: null, partial: '{"text":"半句"}' },
+    })
+    store.runs[0].status = 'cancelled'
+    await cancelling
+    await pending
+
+    const replies = assistants(runtime.snapshot())
+    expect(replies).toHaveLength(1)
+    expect(replies[0].text).toBe('半句')
+    expect(replies[0].cancelled).toBe(true)
+    expect(replies[0].streaming).toBe(false)
+    expect(runtime.snapshot().status).toBe('idle')
+  })
+
+  it('rust re-open re-attaches the active run and settles it on live events', async () => {
+    const store = memoryDeps(conversation())
+    const started = await store.deps.startRustRun(1, 'prompt', profile.provider, null)
+    const runId = started.run.runId
+    store.insert(1, { role: 'user', content: '问', runId })
+    store.recordRust({ runId, seq: 1, kind: 'state', payload: { status: 'running' } })
+
+    const runtime = new AgentRuntime({
+      deps: store.deps,
+      engine: 'rust',
+      schedule: (flush) => flush(),
+    })
+    await runtime.open(conversation(), profile)
+    expect(runtime.snapshot().status).toBe('running')
+    await waitFor(() => store.rustListeners.has(runId))
+
+    const row = store.insert(1, {
+      role: 'assistant',
+      content: '完成',
+      runId,
+      stopReason: 'stop',
+    })
+    store.recordRust({
+      runId,
+      seq: 2,
+      kind: 'assistant',
+      payload: { message: row, errorCode: null },
+    })
+    store.recordRust({ runId, seq: 3, kind: 'state', payload: { status: 'succeeded' } })
+    store.recordRust({
+      runId,
+      seq: 4,
+      kind: 'end',
+      payload: { status: 'succeeded', errorCode: null, partial: null },
+    })
+    store.runs[0].status = 'succeeded'
+    await waitFor(() => runtime.snapshot().status === 'idle')
+
+    expect(runtime.snapshot().items.map((item) => `${item.kind}:${item.text}`)).toEqual([
+      'user:问',
+      'assistant:完成',
+    ])
+  })
+
+  it('both engines agree on persisted messages and the final status', async () => {
+    const seed = (store: ReturnType<typeof memoryDeps>) => {
+      for (const item of parity.history) {
+        store.insert(1, {
+          role: item.role,
+          content: item.content,
+          stopReason: item.stopReason ?? null,
+          isPartial: item.isPartial ?? false,
+        })
+      }
+    }
+    const shape = (store: ReturnType<typeof memoryDeps>) =>
+      (store.rows.get(1) ?? []).map((row) => ({
+        role: row.role,
+        content: row.content,
+        stopReason: row.stopReason,
+        isPartial: row.isPartial,
+      }))
+
+    // JS engine: one stream call answers with the fixture text.
+    const jsStore = memoryDeps(conversation())
+    seed(jsStore)
+    const jsRuntime = new AgentRuntime({
+      deps: jsStore.deps,
+      streamFn: instantStream(() => parity.answer),
+      schedule: (flush) => flush(),
+    })
+    await jsRuntime.open(conversation(), profile)
+    await jsRuntime.prompt({ text: parity.prompt, attachments: [] })
+
+    // Rust engine: the supervisor persists the same row and emits boundaries.
+    const rustStore = memoryDeps(conversation())
+    seed(rustStore)
+    const rust = new AgentRuntime({
+      deps: rustStore.deps,
+      engine: 'rust',
+      schedule: (flush) => flush(),
+    })
+    await rust.open(conversation(), profile)
+    const pending = rust.prompt({ text: parity.prompt, attachments: [] })
+    await waitFor(() => rustStore.runs.length === 1)
+    const runId = rustStore.runs[0].runId
+    await waitFor(() => rustStore.rustListeners.has(runId))
+    rustStore.recordRust({ runId, seq: 1, kind: 'state', payload: { status: 'running' } })
+    const row = rustStore.insert(1, {
+      role: 'assistant',
+      content: parity.answer,
+      runId,
+      stopReason: 'stop',
+    })
+    rustStore.recordRust({
+      runId,
+      seq: 2,
+      kind: 'assistant',
+      payload: { message: row, errorCode: null },
+    })
+    rustStore.recordRust({
+      runId,
+      seq: 3,
+      kind: 'end',
+      payload: { status: 'succeeded', errorCode: null, partial: null },
+    })
+    rustStore.runs[0].status = 'succeeded'
+    await pending
+
+    expect(shape(rustStore)).toEqual(shape(jsStore))
+    expect(shape(rustStore)).toEqual(
+      parity.expectedMessages.map((item) => ({
+        role: item.role,
+        content: item.content,
+        stopReason: item.stopReason ?? null,
+        isPartial: item.isPartial ?? false,
+      })),
+    )
+    expect(rust.snapshot().status).toBe('idle')
+    expect(jsRuntime.snapshot().status).toBe('idle')
   })
 })

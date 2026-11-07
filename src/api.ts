@@ -35,6 +35,8 @@ import type {
   PrivacyEntity,
   PrivacyEntityKind,
   PrivacyLabel,
+  RustRunEvent,
+  RustRunSnapshot,
   Schedule,
   SensitivityLevel,
   SkillDetail,
@@ -611,6 +613,24 @@ export const chatApi = {
     invoke<AgentRunState>('chat_run_state', { conversationId }),
   runResume: (params: { conversationId: number; modelEntry: string }) =>
     invoke<AgentRunStart>('chat_run_resume', params),
+  /** Rust engine: start, subscribe, cancel and cold-reconnect a supervised run. */
+  runRustStart: (params: {
+    conversationId: number
+    trigger: AgentRunTrigger
+    modelEntry: string
+    message?: NewChatMessage | null
+  }) => invoke<AgentRunStart>('agent_run_start', params),
+  runRustAttach: (
+    params: { runId: number; afterSeq: number },
+    onEvent: (event: RustRunEvent) => void,
+  ) => {
+    const channel = new Channel<RustRunEvent>()
+    channel.onmessage = onEvent
+    return invoke<void>('agent_run_attach', { ...params, onEvent: channel })
+  },
+  runRustCancel: (runId: number) => invoke<AgentRun>('agent_run_cancel', { runId }),
+  runRustSnapshot: (runId: number, afterSeq: number) =>
+    invoke<RustRunSnapshot>('agent_run_snapshot', { runId, afterSeq }),
   settings: () => invoke<AgentSettings>('agent_settings'),
   saveModel: (input: {
     id?: string

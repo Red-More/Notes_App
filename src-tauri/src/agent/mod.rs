@@ -6,18 +6,22 @@
 //! - API Key 存在 Keystore（Android）或 0600 私有文件（桌面），不进 SQLite、不进 JS、不进日志。
 //! - 会话与消息落 `life.db`；模型可见工具为 5 个 `fs_*` + 1 个技能元工具 `load_skill`。
 
+pub mod cancel;
 pub mod conversations;
 pub mod discovery;
+pub mod events;
 pub mod llm;
 pub mod model_store;
 pub mod params;
 pub mod runs;
 pub mod secrets;
+pub mod supervisor;
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
+
+use cancel::CancellationToken;
 
 /// 模型可见的工具白名单，Rust 侧二次校验。
 /// 5 个 `fs_*` 之外只额外允许技能元工具 `load_skill`（不触达真实文件系统）。
@@ -33,8 +37,8 @@ pub const TOOL_ALLOWLIST: [&str; 6] = [
 /// Tauri 管理的 Agent 状态：HTTP 客户端、密钥文件、取消标记。
 pub struct AgentState {
     pub secrets: secrets::SecretStore,
-    /// 每个流式请求一个取消标记；`agent_cancel` 置位。
-    pub cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// 每个流式请求一个取消令牌；`agent_cancel` 置位。
+    pub cancels: Mutex<HashMap<String, CancellationToken>>,
     /// 仅 HTTPS + 禁重定向 + 读超时的客户端；初始化失败时为 None，请求会报错而不是降级。
     pub client: Option<reqwest::Client>,
 }
@@ -64,12 +68,12 @@ impl AgentState {
     }
 
     /// 注册取消标记；同一 requestId 重复调用会覆盖旧标记。
-    pub fn register_cancel(&self, request_id: &str) -> Arc<AtomicBool> {
-        let flag = Arc::new(AtomicBool::new(false));
+    pub fn register_cancel(&self, request_id: &str) -> CancellationToken {
+        let token = CancellationToken::new();
         if let Ok(mut map) = self.cancels.lock() {
-            map.insert(request_id.to_string(), flag.clone());
+            map.insert(request_id.to_string(), token.clone());
         }
-        flag
+        token
     }
 
     pub fn clear_cancel(&self, request_id: &str) {
@@ -80,8 +84,8 @@ impl AgentState {
 
     pub fn cancel(&self, request_id: &str) {
         if let Ok(map) = self.cancels.lock() {
-            if let Some(flag) = map.get(request_id) {
-                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(token) = map.get(request_id) {
+                token.cancel();
             }
         }
     }

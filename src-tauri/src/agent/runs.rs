@@ -66,10 +66,7 @@ fn now(conn: &Connection) -> Result<String, ToolError> {
 }
 
 fn is_terminal(status: &str) -> bool {
-    matches!(
-        status,
-        "succeeded" | "failed" | "cancelled" | "interrupted"
-    )
+    matches!(status, "succeeded" | "failed" | "cancelled" | "interrupted")
 }
 
 /// Only these transitions are legal; terminal rows never move again.
@@ -110,23 +107,22 @@ fn has_executor(conn: &Connection, conversation_id: i64) -> Result<bool, ToolErr
 
 /// Last row that must be kept when resuming; partial answers are dropped.
 fn last_complete_id(conn: &Connection, conversation_id: i64) -> Result<Option<i64>, ToolError> {
-    Ok(conn.query_row(
-        "SELECT id FROM messages
+    Ok(conn
+        .query_row(
+            "SELECT id FROM messages
          WHERE conversation_id = ?1 AND (is_partial IS NULL OR is_partial = 0)
          ORDER BY id DESC LIMIT 1",
-        params![conversation_id],
-        |r| r.get(0),
-    )
-    .optional()?)
+            params![conversation_id],
+            |r| r.get(0),
+        )
+        .optional()?)
 }
 
 fn get(conn: &Connection, run_id: i64) -> Result<Option<AgentRun>, ToolError> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {RUN_COLUMNS} FROM agent_runs WHERE run_id = ?1"
     ))?;
-    Ok(stmt
-        .query_row(params![run_id], row_to_run)
-        .optional()?)
+    Ok(stmt.query_row(params![run_id], row_to_run).optional()?)
 }
 
 fn row_to_run(r: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRun> {
@@ -181,7 +177,14 @@ pub fn start(
              (conversation_id, status, trigger, model_entry, resume_from_message_id,
               created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-        params![conversation_id, status, trigger, model_entry, resume_from, at],
+        params![
+            conversation_id,
+            status,
+            trigger,
+            model_entry,
+            resume_from,
+            at
+        ],
     )?;
     let run_id = tx.last_insert_rowid();
     let inserted = match message {
@@ -202,16 +205,21 @@ pub fn start(
     )?;
     tx.commit()?;
 
-    let run = get(conn, run_id)?
-        .ok_or_else(|| ToolError::Storage { message: "运行记录写入后未能读回".into() })?;
-    Ok(RunStart { run, message: inserted })
+    let run = get(conn, run_id)?.ok_or_else(|| ToolError::Storage {
+        message: "运行记录写入后未能读回".into(),
+    })?;
+    Ok(RunStart {
+        run,
+        message: inserted,
+    })
 }
 
 /// Move a run to `status`, rejecting illegal or terminal transitions.
 pub fn transition(vfs: &VirtualFs, run_id: i64, status: &str) -> Result<AgentRun, ToolError> {
     let conn = vfs.conn();
-    let current = get(conn, run_id)?
-        .ok_or_else(|| ToolError::NotFound { path: format!("run#{run_id}") })?;
+    let current = get(conn, run_id)?.ok_or_else(|| ToolError::NotFound {
+        path: format!("run#{run_id}"),
+    })?;
     if !allowed(&current.status, status) {
         return Err(ToolError::invalid(format!(
             "非法运行状态迁移：{} → {status}",
@@ -224,14 +232,39 @@ pub fn transition(vfs: &VirtualFs, run_id: i64, status: &str) -> Result<AgentRun
         "UPDATE agent_runs SET status = ?1, updated_at = ?2, ended_at = ?3 WHERE run_id = ?4",
         params![status, at, ended, run_id],
     )?;
-    get(conn, run_id)?
-        .ok_or_else(|| ToolError::Storage { message: "运行记录更新后未能读回".into() })
+    get(conn, run_id)?.ok_or_else(|| ToolError::Storage {
+        message: "运行记录更新后未能读回".into(),
+    })
 }
 
 /// Finish a run with its partial snapshot and counters.
 #[allow(clippy::too_many_arguments)]
 pub fn finish(
     vfs: &VirtualFs,
+    run_id: i64,
+    status: &str,
+    partial: Option<String>,
+    error_code: Option<String>,
+    step_count: i64,
+    write_count: i64,
+    last_seq: i64,
+) -> Result<AgentRun, ToolError> {
+    finish_on(
+        vfs.conn(),
+        run_id,
+        status,
+        partial,
+        error_code,
+        step_count,
+        write_count,
+        last_seq,
+    )
+}
+
+/// Same as [`finish`], but usable inside an existing transaction.
+#[allow(clippy::too_many_arguments)]
+pub fn finish_on(
+    conn: &Connection,
     run_id: i64,
     status: &str,
     partial: Option<String>,
@@ -250,9 +283,9 @@ pub fn finish(
             return Err(ToolError::invalid("中断快照超过 1MB 上限"));
         }
     }
-    let conn = vfs.conn();
-    let current = get(conn, run_id)?
-        .ok_or_else(|| ToolError::NotFound { path: format!("run#{run_id}") })?;
+    let current = get(conn, run_id)?.ok_or_else(|| ToolError::NotFound {
+        path: format!("run#{run_id}"),
+    })?;
     if !allowed(&current.status, status) {
         return Err(ToolError::invalid(format!(
             "非法运行状态迁移：{} → {status}",
@@ -276,8 +309,30 @@ pub fn finish(
             run_id
         ],
     )?;
-    get(conn, run_id)?
-        .ok_or_else(|| ToolError::Storage { message: "运行记录更新后未能读回".into() })
+    get(conn, run_id)?.ok_or_else(|| ToolError::Storage {
+        message: "运行记录更新后未能读回".into(),
+    })
+}
+
+/// Read one run row; used by the orchestrator to re-check status before acting.
+pub fn get_run(conn: &Connection, run_id: i64) -> Result<Option<AgentRun>, ToolError> {
+    get(conn, run_id)
+}
+
+/// Oldest still-queued run of a conversation; the supervisor starts it after
+/// the previous run reaches a terminal state.
+pub fn next_queued(conn: &Connection, conversation_id: i64) -> Result<Option<AgentRun>, ToolError> {
+    Ok(conn
+        .query_row(
+            &format!(
+                "SELECT {RUN_COLUMNS} FROM agent_runs
+                 WHERE conversation_id = ?1 AND status = 'queued'
+                 ORDER BY run_id ASC LIMIT 1"
+            ),
+            params![conversation_id],
+            row_to_run,
+        )
+        .optional()?)
 }
 
 /// Persist progress counters while a run is still executing.
@@ -306,9 +361,8 @@ pub fn touch(
 pub fn recover(conn: &Connection) -> Result<usize, ToolError> {
     let at = now(conn)?;
     let ids = {
-        let mut stmt = conn.prepare(
-            "SELECT run_id FROM agent_runs WHERE status IN ('running', 'cancelling')",
-        )?;
+        let mut stmt = conn
+            .prepare("SELECT run_id FROM agent_runs WHERE status IN ('running', 'cancelling')")?;
         let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
         rows.collect::<rusqlite::Result<Vec<i64>>>()?
     };
