@@ -191,11 +191,7 @@ pub fn delete(conn: &Connection, secrets: &SecretStore, id: &str) -> Result<(), 
     Ok(())
 }
 
-fn apply_token(
-    secrets: &SecretStore,
-    id: &str,
-    token: Option<String>,
-) -> Result<(), ToolError> {
+fn apply_token(secrets: &SecretStore, id: &str, token: Option<String>) -> Result<(), ToolError> {
     let Some(token) = token else {
         return Ok(());
     };
@@ -539,13 +535,17 @@ mod tests {
 
     #[test]
     fn qualified_names_are_sanitized_and_prefixed() {
-        assert_eq!(qualified_name("mcp_1", "search docs"), "mcp_mcp_1_search_docs");
+        assert_eq!(
+            qualified_name("mcp_1", "search docs"),
+            "mcp_mcp_1_search_docs"
+        );
         assert_eq!(qualified_name("srv-2", "a.b"), "mcp_srv_2_a.b");
     }
 
     #[test]
     fn sse_payload_picks_the_matching_response() {
-        let body = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n\n";
+        let body =
+            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n\n";
         let value = parse_rpc_payload(body, 1).unwrap();
         assert_eq!(value["result"]["ok"], true);
         assert!(parse_rpc_payload(body, 2).is_err());

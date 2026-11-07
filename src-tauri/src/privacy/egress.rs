@@ -186,10 +186,7 @@ fn referenced_paths(messages: &[Value]) -> Vec<String> {
                 "fs_grep" => {
                     // `pattern` is the search text, not a path; the optional
                     // `path` limits the search scope. No path means all of /life.
-                    let scope = args
-                        .get("path")
-                        .and_then(Value::as_str)
-                        .unwrap_or("/life");
+                    let scope = args.get("path").and_then(Value::as_str).unwrap_or("/life");
                     if let Some(scope) = normalize_ref(scope) {
                         paths.insert(scope);
                     }

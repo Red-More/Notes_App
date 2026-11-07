@@ -254,9 +254,7 @@ pub fn message_for_run(conn: &Connection, run_id: i64) -> Result<Option<ChatMess
         "SELECT {MESSAGE_COLUMNS} FROM messages
          WHERE run_id = ?1 AND role = 'user' ORDER BY id ASC LIMIT 1"
     ))?;
-    let row = stmt
-        .query_row(params![run_id], row_to_message)
-        .optional()?;
+    let row = stmt.query_row(params![run_id], row_to_message).optional()?;
     Ok(row)
 }
 
@@ -375,7 +373,11 @@ fn ensure_exists(conn: &Connection, id: i64) -> Result<(), ToolError> {
 }
 
 /// Delete every message newer than `message_id`; retry keeps the user turn intact.
-pub fn truncate_after(vfs: &VirtualFs, conversation_id: i64, message_id: i64) -> Result<usize, ToolError> {
+pub fn truncate_after(
+    vfs: &VirtualFs,
+    conversation_id: i64,
+    message_id: i64,
+) -> Result<usize, ToolError> {
     let conn = vfs.conn();
     ensure_exists(conn, conversation_id)?;
     let at = now(conn)?;

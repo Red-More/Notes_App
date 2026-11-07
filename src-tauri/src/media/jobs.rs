@@ -170,7 +170,8 @@ struct RawJob {
     updated_at: String,
 }
 
-const SELECT_JOB: &str = "SELECT id, kind, model_entry, status, progress, asset_id, error, result, \
+const SELECT_JOB: &str =
+    "SELECT id, kind, model_entry, status, progress, asset_id, error, result, \
                           units, cost_usd, created_at, updated_at FROM media_jobs";
 
 pub fn submit(conn: &Connection, input: NewJob) -> Result<Job, ToolError> {
@@ -225,9 +226,7 @@ pub fn get(conn: &Connection, id: i64) -> Result<Job, ToolError> {
 
 pub fn list(conn: &Connection, limit: i64) -> Result<Vec<Job>, ToolError> {
     let limit = limit.clamp(1, MAX_LIST);
-    let mut stmt = conn.prepare(&format!(
-        "{SELECT_JOB} ORDER BY id DESC LIMIT ?1"
-    ))?;
+    let mut stmt = conn.prepare(&format!("{SELECT_JOB} ORDER BY id DESC LIMIT ?1"))?;
     let rows = stmt.query_map(params![limit], row_to_raw)?;
     let mut jobs = Vec::new();
     for row in rows {
@@ -300,7 +299,15 @@ pub fn finish(
              units = ?6, cost_usd = ?7,
              updated_at = datetime('now','localtime')
          WHERE id = ?1",
-        params![id, status.as_str(), asset_id, result, error, units, cost_usd],
+        params![
+            id,
+            status.as_str(),
+            asset_id,
+            result,
+            error,
+            units,
+            cost_usd
+        ],
     )?;
     get(conn, id)
 }

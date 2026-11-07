@@ -226,9 +226,7 @@ fn validate_mime(mime: &str) -> Result<(), ToolError> {
     if mime.is_empty()
         || mime.len() > 64
         || !mime.contains('/')
-        || mime
-            .chars()
-            .any(|c| c.is_control() || c.is_whitespace())
+        || mime.chars().any(|c| c.is_control() || c.is_whitespace())
     {
         return Err(ToolError::invalid("资产 MIME 类型非法"));
     }

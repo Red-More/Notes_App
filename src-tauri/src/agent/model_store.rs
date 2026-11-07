@@ -504,9 +504,9 @@ fn validate_format_for_kind(kind: ModelKind, format: ApiFormat) -> Result<(), To
                 "视频模型必须使用 OpenAI Videos、DashScope、火山或可灵协议",
             ))
         }
-        ModelKind::Asr if format != ApiFormat::OpenAiTranscriptions => {
-            Err(ToolError::invalid("转写模型必须使用 OpenAI Transcriptions 协议"))
-        }
+        ModelKind::Asr if format != ApiFormat::OpenAiTranscriptions => Err(ToolError::invalid(
+            "转写模型必须使用 OpenAI Transcriptions 协议",
+        )),
         _ => Ok(()),
     }
 }

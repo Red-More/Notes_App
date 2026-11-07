@@ -209,12 +209,7 @@ pub async fn run(app: AppHandle, job_id: i64) {
 }
 
 /// Billable units and USD cost for one successful job.
-fn job_usage(
-    app: &AppHandle,
-    kind: jobs::JobKind,
-    params: &LlmParams,
-    job: &Value,
-) -> (f64, f64) {
+fn job_usage(app: &AppHandle, kind: jobs::JobKind, params: &LlmParams, job: &Value) -> (f64, f64) {
     match kind {
         jobs::JobKind::Image => {
             let units = 1.0;
@@ -664,8 +659,7 @@ async fn video(
     }
     let submit_url = model_store::endpoint(entry);
     let payload = post_json(app, entry, params, key, &body, cancel).await?;
-    let task_id =
-        video_task_id(&payload).ok_or_else(|| "视频提交响应缺少任务 id".to_string())?;
+    let task_id = video_task_id(&payload).ok_or_else(|| "视频提交响应缺少任务 id".to_string())?;
     let poll_url = format!("{}/{}", submit_url.trim_end_matches('/'), task_id);
 
     for _ in 0..VIDEO_POLL_LIMIT {
@@ -684,7 +678,10 @@ async fn video(
             update_progress(app, job_id, percent);
         }
         let state = video_status(&status);
-        if matches!(state.as_str(), "completed" | "succeeded" | "success" | "done") {
+        if matches!(
+            state.as_str(),
+            "completed" | "succeeded" | "success" | "done"
+        ) {
             if let Some(url) = video_url(&status) {
                 // Signed media URLs are foreign hosts: never forward the API key.
                 let bytes = get_bytes(app, &url, None).await?;
@@ -729,11 +726,7 @@ async fn get_bytes(app: &AppHandle, url: &str, key: Option<&str>) -> Result<Vec<
     Ok(bytes.to_vec())
 }
 
-async fn get(
-    app: &AppHandle,
-    url: &str,
-    key: Option<&str>,
-) -> Result<reqwest::Response, String> {
+async fn get(app: &AppHandle, url: &str, key: Option<&str>) -> Result<reqwest::Response, String> {
     let state = app.state::<AgentState>();
     let Some(client) = &state.client else {
         return Err("HTTP 客户端初始化失败，请重启应用".to_string());
@@ -801,9 +794,11 @@ fn video_url(payload: &Value) -> Option<String> {
 }
 
 fn video_progress(payload: &Value) -> Option<u32> {
-    let raw = payload
-        .get("progress")
-        .or_else(|| payload.get("output").and_then(|output| output.get("progress")))?;
+    let raw = payload.get("progress").or_else(|| {
+        payload
+            .get("output")
+            .and_then(|output| output.get("progress"))
+    })?;
     if let Some(percent) = raw.as_u64() {
         return Some(percent.min(100) as u32);
     }
@@ -1048,7 +1043,8 @@ mod tests {
             video_url(&poll).as_deref(),
             Some("https://cdn.example/v.mp4")
         );
-        let nested = json!({"output": {"status": "in_progress", "url": "https://cdn.example/w.mp4"}});
+        let nested =
+            json!({"output": {"status": "in_progress", "url": "https://cdn.example/w.mp4"}});
         assert_eq!(video_status(&nested), "in_progress");
         assert_eq!(
             video_url(&nested).as_deref(),

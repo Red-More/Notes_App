@@ -90,12 +90,7 @@ impl VirtualFs {
     pub fn read(&self, req: ReadRequest) -> Result<ReadResult, ToolError> {
         let path = cap_gate::normalize_path(&req.path)?;
         cap_gate::ensure_model_readable(&path)?;
-        acl::ensure_allowed(
-            &self.conn,
-            &path,
-            acl::AclPermission::Read,
-            req.principal,
-        )?;
+        acl::ensure_allowed(&self.conn, &path, acl::AclPermission::Read, req.principal)?;
         let row: Option<(i64, String, i64, Option<String>)> = self
             .conn
             .query_row(
