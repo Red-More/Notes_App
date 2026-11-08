@@ -4209,7 +4209,7 @@ async fn write_cap_blocks_writes_but_keeps_the_loop_alive() {
 
     assert!(matches!(outcome.stop, agent_loop::Stop::Complete));
     assert_eq!(outcome.steps, 8);
-    assert_eq!(outcome.writes, 8);
+    assert_eq!(outcome.writes, 0, "blocked writes never reach the ledger");
     assert!(host.executed.is_empty(), "blocked writes never run");
     assert_eq!(host.records.len(), 8);
     for record in &host.records {
@@ -4224,7 +4224,7 @@ async fn write_cap_blocks_writes_but_keeps_the_loop_alive() {
     let latest = state.latest.expect("run row");
     assert_eq!(latest.status, "succeeded");
     assert_eq!(latest.step_count, 8);
-    assert_eq!(latest.write_count, 8);
+    assert_eq!(latest.write_count, 0);
 }
 
 fn rust_loop_fixture(
@@ -4292,16 +4292,13 @@ async fn step_cap_finishes_with_an_explicit_error_code() {
     conversations::append(&vfs, conv.id, host.rows.clone()).unwrap();
     let converted = supervisor::Outcome::from_loop(outcome);
     assert_eq!(converted.status, "succeeded");
-    assert_eq!(
-        converted.run_error_code.as_deref(),
-        Some("step_limit_exceeded")
-    );
+    assert_eq!(converted.run_error_code.as_deref(), Some("quota_steps"));
     supervisor::finalize(&vfs, &run, &converted, 2).unwrap();
 
     let state = runs::state(&vfs, conv.id).unwrap();
     let latest = state.latest.expect("run row");
     assert_eq!(latest.status, "succeeded");
-    assert_eq!(latest.error_code.as_deref(), Some("step_limit_exceeded"));
+    assert_eq!(latest.error_code.as_deref(), Some("quota_steps"));
     let rows = conversations::messages(&vfs, conv.id).unwrap();
     let last_row = rows.last().expect("rows");
     assert_eq!(last_row.role, "tool");
@@ -4510,4 +4507,149 @@ fn persisted_tool_turns_are_rebuilt_after_a_refresh() {
     assert_eq!(tool["toolCallId"], "c1");
     assert_eq!(tool["toolName"], "fs_read");
     assert_eq!(tool["isError"], true);
+}
+
+/// Both engines replay the same fixture: identical rows, ledger and end state.
+#[tokio::test]
+async fn shared_tool_fixture_matches_the_expected_transcript() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../../src/agent/fixtures/toolLoop.json"))
+            .expect("tool fixture parses");
+
+    for case in fixture["cases"].as_array().expect("cases array") {
+        let name = case["name"].as_str().expect("case name");
+        let prompt = case["prompt"].as_str().expect("case prompt");
+        let (vfs, conv, entry, run) = rust_loop_fixture(prompt);
+
+        let rounds: Vec<agent_loop::Round> = case["rounds"]
+            .as_array()
+            .expect("rounds")
+            .iter()
+            .map(|round| agent_loop::Round {
+                text: round["text"].as_str().unwrap_or_default().into(),
+                thinking: None,
+                thinking_signature: None,
+                usage: None,
+                stop_reason: round["stopReason"].as_str().unwrap_or("stop").into(),
+                calls: round["calls"]
+                    .as_array()
+                    .expect("calls")
+                    .iter()
+                    .map(|call| tools::ToolCall {
+                        id: call["id"].as_str().unwrap().into(),
+                        name: call["name"].as_str().unwrap().into(),
+                        arguments: call["arguments"].clone(),
+                        argument_error: None,
+                    })
+                    .collect(),
+                error_message: None,
+                cancelled: false,
+            })
+            .collect();
+
+        let results: Vec<(&str, tools::ToolResult)> = case["results"]
+            .as_array()
+            .expect("results")
+            .iter()
+            .map(|result| {
+                let id = result["id"].as_str().unwrap();
+                let text = result["text"].as_str().unwrap();
+                if result["isError"].as_bool().unwrap_or(false) {
+                    (id, tools::ToolResult::fail(text))
+                } else {
+                    (id, tools::ToolResult::ok(text))
+                }
+            })
+            .collect();
+
+        let limits = agent_loop::Limits {
+            max_steps: case["maxSteps"].as_i64().expect("maxSteps"),
+            max_writes: case["maxWrites"].as_i64().expect("maxWrites"),
+        };
+        let mut host = ScriptHost::new(run.run_id, rounds, results);
+        let outcome = agent_loop::run(
+            &mut host,
+            vec![serde_json::json!({ "role": "user", "content": prompt })],
+            &loop_model(&entry),
+            limits,
+        )
+        .await;
+
+        conversations::append(&vfs, conv.id, host.rows.clone()).unwrap();
+        supervisor::finalize(&vfs, &run, &supervisor::Outcome::from_loop(outcome), 2).unwrap();
+
+        let rows = conversations::messages(&vfs, conv.id).unwrap();
+        let expected = case["expectedMessages"]
+            .as_array()
+            .expect("expectedMessages");
+        assert_eq!(rows.len(), expected.len(), "{name}: row count");
+        for (row, want) in rows.iter().zip(expected) {
+            let role = want["role"].as_str().unwrap();
+            assert_eq!(row.role, role, "{name}: role order");
+            match role {
+                "user" | "assistant" => assert_eq!(row.content, want["content"].as_str().unwrap()),
+                "tool" => {
+                    assert_eq!(
+                        row.tool_call_id.as_deref(),
+                        want["toolCallId"].as_str(),
+                        "{name}"
+                    );
+                    assert_eq!(
+                        row.tool_name.as_deref(),
+                        want["toolName"].as_str(),
+                        "{name}"
+                    );
+                    assert_eq!(row.content, want["text"].as_str().unwrap(), "{name}");
+                    assert_eq!(row.is_error, want["isError"].as_bool().unwrap(), "{name}");
+                    if !row.is_error {
+                        assert!(
+                            row.tool_duration_ms.is_some(),
+                            "{name}: executed tool rows record a duration"
+                        );
+                    }
+                }
+                other => panic!("unexpected role {other}"),
+            }
+            if let Some(calls) = want.get("toolCalls").and_then(Value::as_i64) {
+                let stored = row
+                    .tool_calls
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                    .and_then(|value| value.as_array().map(Vec::len))
+                    .unwrap_or(0);
+                assert_eq!(stored as i64, calls, "{name}: stored tool calls");
+            }
+            if let Some(stop) = want.get("stopReason").and_then(Value::as_str) {
+                assert_eq!(
+                    row.stop_reason.as_deref(),
+                    Some(stop),
+                    "{name}: stop reason"
+                );
+            }
+        }
+
+        let state = runs::state(&vfs, conv.id).unwrap();
+        let latest = state.latest.expect("run row");
+        assert_eq!(
+            latest.status,
+            case["expectedStatus"].as_str().unwrap(),
+            "{name}: run status"
+        );
+        assert_eq!(
+            latest.error_code.as_deref(),
+            case["expectedErrorCode"].as_str(),
+            "{name}: run error code"
+        );
+        let run_expectation = &case["expectedRun"];
+        assert_eq!(
+            latest.step_count,
+            run_expectation["stepCount"].as_i64().unwrap(),
+            "{name}: step count"
+        );
+        assert_eq!(
+            latest.write_count,
+            run_expectation["writeCount"].as_i64().unwrap(),
+            "{name}: write count"
+        );
+    }
 }

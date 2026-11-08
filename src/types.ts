@@ -384,6 +384,7 @@ export type RustRunEvent = {
   | { kind: 'state'; payload: { status: AgentRunStatus } }
   | { kind: 'delta'; payload: { delta: string } }
   | { kind: 'assistant'; payload: { message: ChatMessageRecord; errorCode: string | null } }
+  | { kind: 'tool'; payload: ChatMessageRecord }
   | { kind: 'error'; payload: { errorCode: string; message: string } }
   | {
       kind: 'end'

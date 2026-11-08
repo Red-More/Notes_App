@@ -1,12 +1,15 @@
 //! Runtime-level behaviour with an injected streamFn (no network, no Tauri).
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai'
-import type { AssistantMessage } from '@earendil-works/pi-ai'
+import type { AssistantMessage, JsonObject } from '@earendil-works/pi-ai'
 import type { StreamFn } from '@earendil-works/pi-agent-core'
 import { AgentRuntime, type AgentRuntimeDeps, type RuntimeSnapshot } from './AgentRuntime'
 import type { Bubble } from './chatView'
 import fixtureRaw from './fixtures/pureAnswer.json?raw'
+import toolLoopRaw from './fixtures/toolLoop.json?raw'
+import { api } from '../api'
+import type { VfsReadResult } from '../types'
 import type {
   AgentRun,
   AgentRunState,
@@ -400,6 +403,71 @@ interface ParityFixture {
 
 const parity: ParityFixture = JSON.parse(fixtureRaw) as ParityFixture
 
+interface ToolLoopCall {
+  id: string
+  name: string
+  arguments: JsonObject
+}
+
+interface ToolLoopCase {
+  name: string
+  prompt: string
+  maxSteps: number
+  maxWrites: number
+  rounds: { text: string; stopReason: 'stop' | 'toolUse'; calls: ToolLoopCall[] }[]
+  results: { id: string; name: string; text: string; isError: boolean }[]
+  expectedMessages: {
+    role: string
+    content?: string
+    toolCallId?: string
+    toolName?: string
+    text?: string
+    isError?: boolean
+    toolCalls?: number
+    stopReason?: string
+  }[]
+  expectedStatus: AgentRunStatus
+  expectedErrorCode: string | null
+  expectedRun: { stepCount: number; writeCount: number }
+}
+
+const toolLoop = (JSON.parse(toolLoopRaw) as { cases: ToolLoopCase[] }).cases
+
+/** Replay the fixture rounds through a scripted stream (one call per round). */
+function toolLoopStream(rounds: ToolLoopCase['rounds']): StreamFn {
+  let index = 0
+  return () => {
+    const round = rounds[index++]
+    const stream = createAssistantMessageEventStream()
+    const partial = assistantMessage(round.text)
+    const content: AssistantMessage['content'] = round.text === ''
+      ? []
+      : [{ type: 'text', text: round.text }]
+    for (const call of round.calls) {
+      content.push({ type: 'toolCall', id: call.id, name: call.name, arguments: call.arguments })
+    }
+    const final = { ...partial, content, stopReason: round.stopReason } as AssistantMessage
+    stream.push({ type: 'start', partial })
+    stream.push({ type: 'done', reason: round.stopReason, message: final })
+    stream.end(final)
+    return stream
+  }
+}
+
+/** Parse a `fs_read` render back into the value that produced it. */
+function readResultValue(text: string): VfsReadResult {
+  const [head, body = ''] = text.split('\n\n')
+  const lines = head.split('\n')
+  return {
+    kind: 'file',
+    path: lines[0].slice('path: '.length),
+    rev: Number(lines[1].slice('rev: '.length)),
+    totalLines: Number(lines[2].slice('totalLines: '.length)),
+    content: body,
+    meta: null,
+  }
+}
+
 describe('AgentRuntime', () => {
   it('runs multiple turns and persists one row per message', async () => {
     const replies = ['第一答', '第二答']
@@ -782,5 +850,153 @@ describe('AgentRuntime', () => {
     )
     expect(rust.snapshot().status).toBe('idle')
     expect(jsRuntime.snapshot().status).toBe('idle')
+  })
+
+  it('both engines agree on tool turns, quota caps and the final state', async () => {
+    const shape = (store: ReturnType<typeof memoryDeps>) =>
+      (store.rows.get(1) ?? []).map((row) => ({
+        role: row.role,
+        content: row.content,
+        stopReason: row.stopReason,
+        toolCallId: row.toolCallId,
+        toolName: row.toolName,
+        isError: row.isError,
+        toolCalls:
+          row.toolCalls === null
+            ? null
+            : (JSON.parse(row.toolCalls) as { id: string; name: string; arguments: unknown }[]).map(
+                (call) => ({ id: call.id, name: call.name, arguments: call.arguments }),
+              ),
+        toolArgs: row.toolArgs === null ? null : JSON.parse(row.toolArgs),
+      }))
+    const project = (snapshot: RuntimeSnapshot) =>
+      snapshot.items.map((item) =>
+        item.kind === 'tool'
+          ? `tool:${item.toolName}:${item.status}:${item.args}:${item.text}`
+          : `${item.kind}:${item.text}`,
+      )
+    const expectFixtureRows = (
+      rows: ReturnType<typeof shape>,
+      testCase: ToolLoopCase,
+    ) => {
+      expect(rows).toHaveLength(testCase.expectedMessages.length)
+      rows.forEach((row, index) => {
+        const want = testCase.expectedMessages[index]
+        expect(row.role).toBe(want.role)
+        if (row.role === 'tool') {
+          expect(row.toolCallId).toBe(want.toolCallId)
+          expect(row.toolName).toBe(want.toolName)
+          expect(row.content).toBe(want.text)
+          expect(row.isError).toBe(want.isError)
+        } else {
+          expect(row.content).toBe(want.content)
+          expect(row.toolCalls?.length ?? null).toBe(want.toolCalls ?? null)
+          expect(row.stopReason).toBe(want.stopReason ?? null)
+        }
+      })
+    }
+
+    for (const testCase of toolLoop) {
+      try {
+        // JS engine: tools really run, but against spied Tauri wrappers.
+        const read = testCase.results.find((result) => result.name === 'fs_read')
+        if (read) {
+          vi.spyOn(api, 'fsRead').mockImplementation(async () => {
+            if (read.isError) throw new Error(read.text)
+            return readResultValue(read.text)
+          })
+        }
+        vi.spyOn(api, 'fsGlob').mockResolvedValue([])
+
+        const jsStore = memoryDeps(conversation())
+        const jsRuntime = new AgentRuntime({
+          deps: jsStore.deps,
+          streamFn: toolLoopStream(testCase.rounds),
+          schedule: (flush) => flush(),
+        })
+        await jsRuntime.open(conversation(), { ...profile, toolRounds: testCase.maxSteps })
+        await jsRuntime.prompt({ text: testCase.prompt, attachments: [] })
+        await waitFor(
+          () => (jsStore.rows.get(1) ?? []).length === testCase.expectedMessages.length,
+        )
+
+        // Rust engine: the supervisor owns tool execution and persistence.
+        const rustStore = memoryDeps(conversation())
+        const rust = new AgentRuntime({
+          deps: rustStore.deps,
+          engine: 'rust',
+          schedule: (flush) => flush(),
+        })
+        await rust.open(conversation(), { ...profile, toolRounds: testCase.maxSteps })
+        const pending = rust.prompt({ text: testCase.prompt, attachments: [] })
+        await waitFor(() => rustStore.runs.length === 1)
+        const runId = rustStore.runs[0].runId
+        await waitFor(() => rustStore.rustListeners.has(runId))
+
+        let seq = 1
+        rustStore.recordRust({ runId, seq: seq++, kind: 'state', payload: { status: 'running' } })
+        for (const round of testCase.rounds) {
+          const header = rustStore.insert(1, {
+            role: 'assistant',
+            content: round.text,
+            stopReason: round.stopReason,
+            toolCalls:
+              round.calls.length === 0
+                ? null
+                : JSON.stringify(
+                    round.calls.map((call) => ({ type: 'toolCall', ...call })),
+                  ),
+            runId,
+          })
+          rustStore.recordRust({
+            runId,
+            seq: seq++,
+            kind: 'assistant',
+            payload: { message: header, errorCode: null },
+          })
+          for (const call of round.calls) {
+            const result = testCase.results.find((item) => item.id === call.id)!
+            const row = rustStore.insert(1, {
+              role: 'tool',
+              content: result.text,
+              toolCallId: call.id,
+              toolName: call.name,
+              isError: result.isError,
+              toolArgs: JSON.stringify(call.arguments),
+              toolDurationMs: result.isError ? null : 5,
+              runId,
+            })
+            rustStore.recordRust({ runId, seq: seq++, kind: 'tool', payload: row })
+          }
+        }
+        rustStore.recordRust({
+          runId,
+          seq: seq++,
+          kind: 'end',
+          payload: {
+            status: testCase.expectedStatus,
+            errorCode: testCase.expectedErrorCode,
+            partial: null,
+          },
+        })
+        rustStore.runs[0].status = testCase.expectedStatus
+        rustStore.runs[0].errorCode = testCase.expectedErrorCode
+        await pending
+
+        expectFixtureRows(shape(jsStore), testCase)
+        expect(shape(rustStore)).toEqual(shape(jsStore))
+        expect(project(rust.snapshot())).toEqual(project(jsRuntime.snapshot()))
+
+        const finish = jsStore.finishes[0]
+        expect(finish.status).toBe(testCase.expectedStatus)
+        expect(finish.errorCode).toBe(testCase.expectedErrorCode)
+        expect(finish.stepCount).toBe(testCase.expectedRun.stepCount)
+        expect(finish.writeCount).toBe(testCase.expectedRun.writeCount)
+        expect(jsRuntime.snapshot().status).toBe('idle')
+        expect(rust.snapshot().status).toBe('idle')
+      } finally {
+        vi.restoreAllMocks()
+      }
+    }
   })
 })

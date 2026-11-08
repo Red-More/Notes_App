@@ -1,0 +1,197 @@
+{
+  "cases": [
+    {
+      "name": "roundTrip",
+      "prompt": "读一下草稿",
+      "maxSteps": 500,
+      "maxWrites": 8,
+      "rounds": [
+        {
+          "text": "",
+          "stopReason": "toolUse",
+          "calls": [
+            {
+              "id": "call_1",
+              "name": "fs_read",
+              "arguments": { "path": "/life/agent/draft.md" }
+            }
+          ]
+        },
+        {
+          "text": "草稿写着：第一行。",
+          "stopReason": "stop",
+          "calls": []
+        }
+      ],
+      "results": [
+        {
+          "id": "call_1",
+          "name": "fs_read",
+          "text": "path: /life/agent/draft.md\nrev: 1\ntotalLines: 1\n\n第一行",
+          "isError": false
+        }
+      ],
+      "expectedMessages": [
+        { "role": "user", "content": "读一下草稿" },
+        { "role": "assistant", "content": "", "toolCalls": 1, "stopReason": "toolUse" },
+        {
+          "role": "tool",
+          "toolCallId": "call_1",
+          "toolName": "fs_read",
+          "text": "path: /life/agent/draft.md\nrev: 1\ntotalLines: 1\n\n第一行",
+          "isError": false
+        },
+        { "role": "assistant", "content": "草稿写着：第一行。", "stopReason": "stop" }
+      ],
+      "expectedStatus": "succeeded",
+      "expectedErrorCode": null,
+      "expectedRun": { "stepCount": 1, "writeCount": 0 }
+    },
+    {
+      "name": "toolFailure",
+      "prompt": "读不存在的草稿",
+      "maxSteps": 500,
+      "maxWrites": 8,
+      "rounds": [
+        {
+          "text": "",
+          "stopReason": "toolUse",
+          "calls": [
+            {
+              "id": "call_1",
+              "name": "fs_read",
+              "arguments": { "path": "/life/agent/missing.md" }
+            }
+          ]
+        },
+        {
+          "text": "那个文件不存在，我先不读了。",
+          "stopReason": "stop",
+          "calls": []
+        }
+      ],
+      "results": [
+        {
+          "id": "call_1",
+          "name": "fs_read",
+          "text": "未找到：/life/agent/missing.md",
+          "isError": true
+        }
+      ],
+      "expectedMessages": [
+        { "role": "user", "content": "读不存在的草稿" },
+        { "role": "assistant", "content": "", "toolCalls": 1, "stopReason": "toolUse" },
+        {
+          "role": "tool",
+          "toolCallId": "call_1",
+          "toolName": "fs_read",
+          "text": "未找到：/life/agent/missing.md",
+          "isError": true
+        },
+        { "role": "assistant", "content": "那个文件不存在，我先不读了。", "stopReason": "stop" }
+      ],
+      "expectedStatus": "succeeded",
+      "expectedErrorCode": null,
+      "expectedRun": { "stepCount": 1, "writeCount": 0 }
+    },
+    {
+      "name": "writeCap",
+      "prompt": "一次写八篇",
+      "maxSteps": 500,
+      "maxWrites": 8,
+      "rounds": [
+        {
+          "text": "",
+          "stopReason": "toolUse",
+          "calls": [
+            { "id": "call_1", "name": "fs_write", "arguments": { "path": "/life/agent/note-1", "content": "x" } },
+            { "id": "call_2", "name": "fs_write", "arguments": { "path": "/life/agent/note-2", "content": "x" } },
+            { "id": "call_3", "name": "fs_write", "arguments": { "path": "/life/agent/note-3", "content": "x" } },
+            { "id": "call_4", "name": "fs_write", "arguments": { "path": "/life/agent/note-4", "content": "x" } },
+            { "id": "call_5", "name": "fs_write", "arguments": { "path": "/life/agent/note-5", "content": "x" } },
+            { "id": "call_6", "name": "fs_write", "arguments": { "path": "/life/agent/note-6", "content": "x" } },
+            { "id": "call_7", "name": "fs_write", "arguments": { "path": "/life/agent/note-7", "content": "x" } },
+            { "id": "call_8", "name": "fs_write", "arguments": { "path": "/life/agent/note-8", "content": "x" } }
+          ]
+        },
+        {
+          "text": "先合并成一篇再写。",
+          "stopReason": "stop",
+          "calls": []
+        }
+      ],
+      "results": [
+        { "id": "call_1", "name": "fs_write", "text": "单轮文档写入超过 8 次，请先合并内容再继续", "isError": true },
+        { "id": "call_2", "name": "fs_write", "text": "单轮文档写入超过 8 次，请先合并内容再继续", "isError": true },
+        { "id": "call_3", "name": "fs_write", "text": "单轮文档写入超过 8 次，请先合并内容再继续", "isError": true },
+        { "id": "call_4", "name": "fs_write", "text": "单轮文档写入超过 8 次，请先合并内容再继续", "isError": true },
+        { "id": "call_5", "name": "fs_write", "text": "单轮文档写入超过 8 次，请先合并内容再继续", "isError": true },
+        { "id": "call_6", "name": "fs_write", "text": "单轮文档写入超过 8 次，请先合并内容再继续", "isError": true },
+        { "id": "call_7", "name": "fs_write", "text": "单轮文档写入超过 8 次，请先合并内容再继续", "isError": true },
+        { "id": "call_8", "name": "fs_write", "text": "单轮文档写入超过 8 次，请先合并内容再继续", "isError": true }
+      ],
+      "expectedMessages": [
+        { "role": "user", "content": "一次写八篇" },
+        { "role": "assistant", "content": "", "toolCalls": 8, "stopReason": "toolUse" },
+        { "role": "tool", "toolCallId": "call_1", "toolName": "fs_write", "text": "单轮文档写入超过 8 次，请先合并内容再继续", "isError": true },
+        { "role": "tool", "toolCallId": "call_2", "toolName": "fs_write", "text": "单轮文档写入超过 8 次，请先合并内容再继续", "isError": true },
+        { "role": "tool", "toolCallId": "call_3", "toolName": "fs_write", "text": "单轮文档写入超过 8 次，请先合并内容再继续", "isError": true },
+        { "role": "tool", "toolCallId": "call_4", "toolName": "fs_write", "text": "单轮文档写入超过 8 次，请先合并内容再继续", "isError": true },
+        { "role": "tool", "toolCallId": "call_5", "toolName": "fs_write", "text": "单轮文档写入超过 8 次，请先合并内容再继续", "isError": true },
+        { "role": "tool", "toolCallId": "call_6", "toolName": "fs_write", "text": "单轮文档写入超过 8 次，请先合并内容再继续", "isError": true },
+        { "role": "tool", "toolCallId": "call_7", "toolName": "fs_write", "text": "单轮文档写入超过 8 次，请先合并内容再继续", "isError": true },
+        { "role": "tool", "toolCallId": "call_8", "toolName": "fs_write", "text": "单轮文档写入超过 8 次，请先合并内容再继续", "isError": true },
+        { "role": "assistant", "content": "先合并成一篇再写。", "stopReason": "stop" }
+      ],
+      "expectedStatus": "succeeded",
+      "expectedErrorCode": null,
+      "expectedRun": { "stepCount": 8, "writeCount": 0 }
+    },
+    {
+      "name": "stepCap",
+      "prompt": "连续查三次",
+      "maxSteps": 2,
+      "maxWrites": 8,
+      "rounds": [
+        {
+          "text": "",
+          "stopReason": "toolUse",
+          "calls": [
+            { "id": "call_1", "name": "fs_glob", "arguments": { "pattern": "/life/agent/*.md" } }
+          ]
+        },
+        {
+          "text": "",
+          "stopReason": "toolUse",
+          "calls": [
+            { "id": "call_2", "name": "fs_glob", "arguments": { "pattern": "/life/agent/*.md" } }
+          ]
+        },
+        {
+          "text": "",
+          "stopReason": "toolUse",
+          "calls": [
+            { "id": "call_3", "name": "fs_glob", "arguments": { "pattern": "/life/agent/*.md" } }
+          ]
+        }
+      ],
+      "results": [
+        { "id": "call_1", "name": "fs_glob", "text": "没有命中任何路径", "isError": false },
+        { "id": "call_2", "name": "fs_glob", "text": "没有命中任何路径", "isError": false },
+        { "id": "call_3", "name": "fs_glob", "text": "单轮工具调用超过 2 步，请先总结已获得的信息再继续", "isError": true }
+      ],
+      "expectedMessages": [
+        { "role": "user", "content": "连续查三次" },
+        { "role": "assistant", "content": "", "toolCalls": 1, "stopReason": "toolUse" },
+        { "role": "tool", "toolCallId": "call_1", "toolName": "fs_glob", "text": "没有命中任何路径", "isError": false },
+        { "role": "assistant", "content": "", "toolCalls": 1, "stopReason": "toolUse" },
+        { "role": "tool", "toolCallId": "call_2", "toolName": "fs_glob", "text": "没有命中任何路径", "isError": false },
+        { "role": "assistant", "content": "", "toolCalls": 1, "stopReason": "toolUse" },
+        { "role": "tool", "toolCallId": "call_3", "toolName": "fs_glob", "text": "单轮工具调用超过 2 步，请先总结已获得的信息再继续", "isError": true }
+      ],
+      "expectedStatus": "succeeded",
+      "expectedErrorCode": "quota_steps",
+      "expectedRun": { "stepCount": 3, "writeCount": 0 }
+    }
+  ]
+}

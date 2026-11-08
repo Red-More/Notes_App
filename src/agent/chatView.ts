@@ -173,7 +173,7 @@ export function documentPath(card: ToolCard): string | null {
 }
 
 /** Paths written by the tool turn that produced this assistant reply. */
-function turnChanges(items: Item[], assistantIndex: number): string[] {
+export function turnChanges(items: Item[], assistantIndex: number): string[] {
   const paths: string[] = []
   for (let i = assistantIndex - 1; i >= 0; i -= 1) {
     const item = items[i]

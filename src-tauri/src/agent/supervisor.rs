@@ -256,7 +256,8 @@ impl Outcome {
                 ..base
             },
             LoopStop::StepLimit => Self {
-                run_error_code: Some("step_limit_exceeded".into()),
+                // UI taxonomy code; the UI renders `quota_steps` copy for it.
+                run_error_code: Some("quota_steps".into()),
                 ..base
             },
             LoopStop::Cancelled => {

@@ -35,10 +35,12 @@ import {
   nextItemId,
   projectHistory,
   reduceEvent,
+  turnChanges,
   type Bubble,
   type ChatView,
   type ImageData,
   type Item,
+  type ToolCard,
   type ViewEffect,
 } from './chatView'
 
@@ -179,6 +181,8 @@ export class AgentRuntime {
   private queue: QueuedRun[] = []
   private runSteps = 0
   private runWrites = 0
+  /** Which quota blocked the last batch; surfaced as the run's error code. */
+  private limit: 'steps' | 'writes' | null = null
   private cancelRequested = false
   private pumping = false
   /** In-flight `run_attach` channel; distinguishes rust cancellation. */
@@ -208,6 +212,7 @@ export class AgentRuntime {
     this.queue = []
     this.runSteps = 0
     this.runWrites = 0
+    this.limit = null
     this.cancelRequested = false
     this.steering = []
 
@@ -254,6 +259,7 @@ export class AgentRuntime {
       mcpTools,
       `conv_${this.conversation?.id ?? 0}`,
       this.streamFn,
+      { blocked: (kind) => { this.limit = kind } },
     )
   }
 
@@ -365,6 +371,7 @@ export class AgentRuntime {
     this.currentRun = started.run
     this.runSteps = 0
     this.runWrites = 0
+    this.limit = null
     this.cancelRequested = false
     this.lastError = null
     this.interrupted = null
@@ -507,6 +514,7 @@ export class AgentRuntime {
     this.currentRun = run
     this.runSteps = 0
     this.runWrites = 0
+    this.limit = null
     this.cancelRequested = false
     this.lastError = null
     this.interrupted = null
@@ -571,6 +579,11 @@ export class AgentRuntime {
       }
       case 'assistant': {
         this.applyRustAssistant(event.payload.message, event.payload.errorCode)
+        this.emit()
+        return
+      }
+      case 'tool': {
+        this.applyRustTool(event.payload)
         this.emit()
         return
       }
@@ -642,9 +655,6 @@ export class AgentRuntime {
   private applyRustAssistant(message: ChatMessageRecord, errorCode: string | null): void {
     const flushed = flushBuffer(this.view)
     const bubbleId = flushed.streamingId ?? `m-${message.id}`
-    const existing = flushed.items.find(
-      (item): item is Bubble => item.id === bubbleId && item.kind === 'assistant',
-    )
     const failed = message.isError
     const cancelled = message.isPartial || message.stopReason === 'aborted'
     const bubble: Bubble = {
@@ -658,11 +668,16 @@ export class AgentRuntime {
       thinking: message.thinking,
       thinkingSignature: message.thinkingSignature,
       streaming: false,
-      changes: existing?.changes,
     }
-    const items = flushed.items.some((item) => item.id === bubbleId)
+    let items = flushed.items.some((item) => item.id === bubbleId)
       ? flushed.items.map((item) => (item.id === bubbleId ? bubble : item))
       : [...flushed.items, bubble]
+    // Same projection as a reload: paths written by this turn's tool cards.
+    const index = items.findIndex((item) => item.id === bubbleId && item.kind === 'assistant')
+    if (index >= 0) {
+      const changes = turnChanges(items, index)
+      items = items.map((item, i) => (i === index ? { ...(item as Bubble), changes } : item))
+    }
     this.view = {
       ...flushed,
       items,
@@ -672,6 +687,25 @@ export class AgentRuntime {
       pendingInitialUser: false,
       buffer: null,
     }
+  }
+
+  /** Fold a persisted tool row into the transcript (Rust owns execution). */
+  private applyRustTool(message: ChatMessageRecord): void {
+    const flushed = flushBuffer(this.view)
+    const id = `m-${message.id}`
+    const card: ToolCard = {
+      id,
+      kind: 'tool',
+      toolName: message.toolName ?? 'tool',
+      args: message.toolArgs ?? '',
+      status: message.isError ? 'error' : 'done',
+      text: message.content,
+      durationMs: message.toolDurationMs ?? undefined,
+    }
+    const items = flushed.items.some((item) => item.id === id && item.kind === 'tool')
+      ? flushed.items.map((item) => (item.id === id && item.kind === 'tool' ? card : item))
+      : [...flushed.items, card]
+    this.view = { ...flushed, items }
   }
 
   async retry(messageKey: string): Promise<void> {
@@ -983,6 +1017,7 @@ export class AgentRuntime {
       // Settle the ledger row, then start the next queued run if any.
       void this.settleRun(
         cancelled ? 'cancelled' : this.lastError !== null ? 'failed' : 'succeeded',
+        this.limit === 'steps' ? 'quota_steps' : null,
       ).then(() => {
         if (!cancelled) void this.pumpQueue()
       })
@@ -1129,14 +1164,18 @@ export class AgentRuntime {
   }
 
   /** Close the ledger row exactly once; later calls are no-ops. */
-  private settleRun(status: 'succeeded' | 'failed' | 'cancelled'): Promise<void> {
+  private settleRun(
+    status: 'succeeded' | 'failed' | 'cancelled',
+    overrideCode: string | null = null,
+  ): Promise<void> {
     const run = this.currentRun
     if (!run) return Promise.resolve()
     this.currentRun = null
     // Cancelled or failed runs keep whatever text was already shown.
     const partial = status === 'succeeded' ? null : this.lastPartialText()
     const payload = partial !== null ? JSON.stringify({ text: partial }) : null
-    const errorCode = status === 'cancelled' ? 'cancelled' : (this.lastError?.code ?? null)
+    const errorCode =
+      status === 'cancelled' ? 'cancelled' : (overrideCode ?? this.lastError?.code ?? null)
     this.enqueueRunWrite(() =>
       this.deps.finishRun(run.runId, status, {
         partial: payload,

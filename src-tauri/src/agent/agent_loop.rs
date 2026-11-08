@@ -107,7 +107,9 @@ pub async fn run<H: LoopHost>(
     limits: Limits,
 ) -> LoopOutcome {
     let mut steps = 0;
+    // Successful writes for the run ledger; `attempts` drives the write cap.
     let mut writes = 0;
+    let mut attempts = 0;
     let mut persisted_text = String::new();
     let mut usage = None;
     let mut stop_reason = "stop".to_string();
@@ -195,7 +197,7 @@ pub async fn run<H: LoopHost>(
             .filter(|call| is_write(&call.name))
             .count() as i64;
         let step_blocked = steps >= limits.max_steps;
-        let write_blocked = writes + write_calls >= limits.max_writes;
+        let write_blocked = attempts + write_calls >= limits.max_writes;
         let truncated = round.stop_reason == "length";
 
         for call in &header.calls {
@@ -256,9 +258,12 @@ pub async fn run<H: LoopHost>(
                 );
             }
             steps += 1;
+            if !result.is_error && is_write(&call.name) {
+                writes += 1;
+            }
             messages.push(tool_message(&record));
         }
-        writes += write_calls;
+        attempts += write_calls;
 
         if step_blocked {
             return finish(

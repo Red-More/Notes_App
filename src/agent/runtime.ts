@@ -199,6 +199,12 @@ export async function toAgentMessages(
   return messages
 }
 
+/** Quota hooks the runtime uses to settle the run with the right error code. */
+export interface AgentLimitHooks {
+  /** Called when a batch is blocked by one of the quotas. */
+  blocked?: (kind: 'steps' | 'writes') => void
+}
+
 /** 用历史消息创建 Agent；system prompt 与工具在这里一次性装配。 */
 export function createAgent(
   profile: AgentProfile,
@@ -208,6 +214,7 @@ export function createAgent(
   mcpTools: McpToolInfo[] = [],
   sessionId?: string,
   streamFn: StreamFn = nativeStreamFn,
+  hooks: AgentLimitHooks = {},
 ): Agent {
   return new Agent({
     initialState: {
@@ -244,6 +251,7 @@ export function createAgent(
         }
       }
       if (steps >= maxSteps) {
+        hooks.blocked?.('steps')
         return {
           block: true,
           reason: `单轮工具调用超过 ${maxSteps} 步，请先总结已获得的信息再继续`,
@@ -252,6 +260,7 @@ export function createAgent(
       }
       // 写配额覆盖 fs_write 与 fs_edit：两者都算写入，达到上限后新建与编辑都拦截。
       if (writes >= MAX_WRITES_PER_RUN) {
+        hooks.blocked?.('writes')
         return {
           block: true,
           reason: `单轮文档写入超过 ${MAX_WRITES_PER_RUN} 次，请先合并内容再继续`,
