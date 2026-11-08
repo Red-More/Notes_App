@@ -1,4 +1,4 @@
-//! Cancellation primitive shared by the streaming proxy and the run supervisor.
+//! Cancellation primitive shared by the streaming proxy and the run runtime.
 //!
 //! HTTP waits must wake up on cancel instead of waiting for the next chunk or
 //! the read timeout (P0-5), so every network await is raced against

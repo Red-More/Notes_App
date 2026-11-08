@@ -76,8 +76,6 @@ pub fn run() {
             // Agent 侧状态：HTTP 客户端、私有密钥文件、取消标记。
             let secret_path = app.path().app_data_dir()?.join("agent-secrets.json");
             app.manage(agent::AgentState::new(secret_path));
-            // Rust 编排器的运行槽位、取消令牌与实时事件通道。
-            app.manage(agent::supervisor::AgentRunHub::new());
             // 媒体资产目录与作业取消标记；与 Agent run 生命周期解耦。
             let media_root = app.path().app_data_dir()?.join("media");
             std::fs::create_dir_all(&media_root)?;
@@ -158,10 +156,6 @@ pub fn run() {
             commands::agent::chat_run_touch,
             commands::agent::chat_run_state,
             commands::agent::chat_run_resume,
-            commands::agent::agent_run_start,
-            commands::agent::agent_run_attach,
-            commands::agent::agent_run_cancel,
-            commands::agent::agent_run_snapshot,
             commands::agent::agent_settings,
             commands::agent::agent_model_save,
             commands::agent::agent_model_delete,

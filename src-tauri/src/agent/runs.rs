@@ -314,27 +314,6 @@ pub fn finish_on(
     })
 }
 
-/// Read one run row; used by the orchestrator to re-check status before acting.
-pub fn get_run(conn: &Connection, run_id: i64) -> Result<Option<AgentRun>, ToolError> {
-    get(conn, run_id)
-}
-
-/// Oldest still-queued run of a conversation; the supervisor starts it after
-/// the previous run reaches a terminal state.
-pub fn next_queued(conn: &Connection, conversation_id: i64) -> Result<Option<AgentRun>, ToolError> {
-    Ok(conn
-        .query_row(
-            &format!(
-                "SELECT {RUN_COLUMNS} FROM agent_runs
-                 WHERE conversation_id = ?1 AND status = 'queued'
-                 ORDER BY run_id ASC LIMIT 1"
-            ),
-            params![conversation_id],
-            row_to_run,
-        )
-        .optional()?)
-}
-
 /// Persist progress counters while a run is still executing.
 pub fn touch(
     vfs: &VirtualFs,

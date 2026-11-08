@@ -7,7 +7,7 @@
 //! - `agent_stream` 的模型条目/协议/tools 在 Rust 侧二次校验，前端不可绕过。
 
 use tauri::ipc::Channel;
-use tauri::{Manager, State};
+use tauri::State;
 
 use serde::Deserialize;
 
@@ -16,7 +16,7 @@ use crate::agent::model_store::{
     self, AgentSettings, ApiFormat, ModelEntry, ModelInput, ModelKind, ModelView,
 };
 use crate::agent::params::{self, LlmParams};
-use crate::agent::{conversations, discovery, events, llm, runs, supervisor, AgentState};
+use crate::agent::{conversations, discovery, llm, runs, AgentState};
 use crate::privacy;
 use crate::vfs::error::ToolError;
 use crate::vfs::VfsState;
@@ -168,118 +168,6 @@ pub fn chat_run_resume(
 ) -> Result<runs::RunStart, ToolError> {
     let vfs = crate::lock(&state.0);
     runs::start(&vfs, conversation_id, "resume", &model_entry, None)
-}
-
-/// Start a Rust-orchestrated run: validate the entry, persist run + user
-/// message, then execute in the background. The `js` path keeps using
-/// `chat_run_*` and `agent_stream`; this command is only used by `engine=rust`.
-#[tauri::command]
-pub fn agent_run_start(
-    app: tauri::AppHandle,
-    vfs_state: State<'_, VfsState>,
-    agent_state: State<'_, AgentState>,
-    conversation_id: i64,
-    trigger: String,
-    model_entry: String,
-    message: Option<conversations::NewMessage>,
-) -> Result<runs::RunStart, ToolError> {
-    {
-        let vfs = crate::lock(&vfs_state.0);
-        model_store::cleanup_legacy(vfs.conn(), &agent_state.secrets);
-        let entry = model_store::resolve(vfs.conn(), &model_entry)?;
-        if !entry.kind.is_chat() {
-            return Err(ToolError::invalid("该模型条目不是对话模型"));
-        }
-        if !agent_state.secrets.has(&entry.id) {
-            return Err(ToolError::invalid(supervisor::error_copy("auth_missing")));
-        }
-    }
-    let started = {
-        let vfs = crate::lock(&vfs_state.0);
-        runs::start(&vfs, conversation_id, &trigger, &model_entry, message)?
-    };
-    if started.run.status == "queued" {
-        // A previous run owns the conversation; its supervisor pumps the queue.
-        supervisor::mark_queued(&app, started.run.run_id)?;
-    } else {
-        supervisor::start(&app, &started.run, "running")?;
-    }
-    Ok(started)
-}
-
-/// Replay persisted boundary events after `after_seq`, then stream live until
-/// the run reaches a terminal state. Returns when the channel closes or ends.
-#[tauri::command]
-pub async fn agent_run_attach(
-    app: tauri::AppHandle,
-    run_id: i64,
-    after_seq: i64,
-    on_event: Channel<events::RunEvent>,
-) -> Result<(), ToolError> {
-    {
-        let vfs_state = app.state::<VfsState>();
-        let vfs = crate::lock(&vfs_state.0);
-        runs::get_run(vfs.conn(), run_id)?.ok_or_else(|| ToolError::NotFound {
-            path: format!("run#{run_id}"),
-        })?;
-    }
-    supervisor::attach(&app, run_id, after_seq, |event| {
-        if let Err(e) = on_event.send(event) {
-            log::warn!("run attach channel closed: {e}");
-        }
-    })
-    .await;
-    Ok(())
-}
-
-/// Cancel a run: queued runs finish immediately, running ones trip the token
-/// and let the supervisor persist `partial` + `cancelled`.
-#[tauri::command]
-pub fn agent_run_cancel(
-    app: tauri::AppHandle,
-    vfs_state: State<'_, VfsState>,
-    run_id: i64,
-) -> Result<runs::AgentRun, ToolError> {
-    let current = {
-        let vfs = crate::lock(&vfs_state.0);
-        runs::get_run(vfs.conn(), run_id)?.ok_or_else(|| ToolError::NotFound {
-            path: format!("run#{run_id}"),
-        })?
-    };
-    if matches!(
-        current.status.as_str(),
-        "succeeded" | "failed" | "cancelled" | "interrupted"
-    ) {
-        return Ok(current);
-    }
-    if current.status == "queued" {
-        return supervisor::cancel_queued(&app, &current);
-    }
-    {
-        let vfs = crate::lock(&vfs_state.0);
-        if runs::transition(&vfs, run_id, "cancelling").is_ok() {
-            supervisor::publish_state(&app, run_id, "cancelling")?;
-        }
-    }
-    let hub = app.state::<supervisor::AgentRunHub>();
-    if let Some(token) = hub.token(run_id) {
-        token.cancel();
-    }
-    let vfs = crate::lock(&vfs_state.0);
-    runs::get_run(vfs.conn(), run_id)?.ok_or_else(|| ToolError::NotFound {
-        path: format!("run#{run_id}"),
-    })
-}
-
-/// Cold reconnect: run row plus every boundary event after the cursor.
-#[tauri::command]
-pub fn agent_run_snapshot(
-    state: State<'_, VfsState>,
-    run_id: i64,
-    after_seq: i64,
-) -> Result<supervisor::RunSnapshot, ToolError> {
-    let vfs = crate::lock(&state.0);
-    supervisor::snapshot(&vfs, run_id, after_seq)
 }
 
 fn key_status(
