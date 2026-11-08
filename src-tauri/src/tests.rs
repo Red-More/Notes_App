@@ -225,6 +225,85 @@ fn folders_list_covers_all_system_dirs_and_skips_agents() {
 }
 
 #[test]
+fn system_folders_reject_delete_and_rename() {
+    let mut vfs = test_vfs();
+    let diary_id: i64 = vfs
+        .conn()
+        .query_row(
+            "SELECT inode FROM inodes WHERE path = '/life/diary'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let diary = docs::create(&mut vfs, "diary", "今天", "今天很累", None, None).unwrap();
+
+    let err = docs::folders::delete(&mut vfs, diary_id).unwrap_err();
+    assert!(
+        matches!(err, ToolError::SystemFolder { .. }),
+        "delete must be rejected as a system folder: {err:?}"
+    );
+    let json = serde_json::to_value(&err).unwrap();
+    assert_eq!(json["code"], "systemFolder");
+    assert!(json["message"].as_str().unwrap().contains("日记"));
+
+    let err = docs::folders::rename(&mut vfs, diary_id, "心情").unwrap_err();
+    assert!(
+        matches!(err, ToolError::SystemFolder { .. }),
+        "rename must be rejected as a system folder: {err:?}"
+    );
+
+    // Nothing moved: the folder and its document stay exactly where they were.
+    let folders: i64 = vfs
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM inodes WHERE path = '/life/diary' AND deleted = 0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(folders, 1);
+    let kept: i64 = vfs
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM inodes WHERE path = ?1 AND deleted = 0",
+            params![diary.path],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(kept, 1, "the diary document must not be moved");
+}
+
+#[test]
+fn ordinary_folder_delete_still_moves_notes_to_root() {
+    let mut vfs = test_vfs();
+    let folder = docs::folders::create(&mut vfs, "项目").unwrap();
+    let note = docs::create(&mut vfs, "note", "会议", "内容", Some(folder.id), None).unwrap();
+    docs::folders::delete(&mut vfs, folder.id).unwrap();
+
+    let (path, kind): (String, String) = vfs
+        .conn()
+        .query_row(
+            "SELECT i.path, m.kind FROM inodes i JOIN meta m ON m.inode = i.inode
+             WHERE i.inode = ?1",
+            params![note.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(path.starts_with("/life/notes/"), "note moved to the root: {path}");
+    assert!(!path.starts_with("/life/notes/项目/"), "note left the folder: {path}");
+    assert_eq!(kind, "note", "the document kind is untouched");
+    let folder_left: i64 = vfs
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM inodes WHERE path LIKE '/life/notes/项目%' AND deleted = 0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(folder_left, 0, "the folder itself is removed");
+}
+
+#[test]
 fn doc_list_inside_a_folder_ignores_kind_filter() {
     let mut vfs = test_vfs();
     let todo = docs::create(&mut vfs, "todo", "买菜", "- [ ] 买菜", None, None).unwrap();

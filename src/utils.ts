@@ -118,6 +118,8 @@ function toolErrorHint(e: unknown): string | null {
       return '参数不合法'
     case 'contentTooLarge':
       return '内容过大，无法保存'
+    case 'systemFolder':
+      return '系统文件夹不能删除或重命名'
     case 'storage':
       return '存储失败，请稍后重试'
     default:

@@ -29,6 +29,29 @@ fn default_display_name(path: &str) -> Option<&'static str> {
     }
 }
 
+/// System folders seeded from `DEFAULT_DIRS` cannot be deleted or renamed.
+///
+/// Deleting one of them would move its documents into `/life/notes` while their
+/// `kind` stays `diary`/`todo`/..., hiding the files from every list. `/life/notes`
+/// is excluded here because it has its own dedicated rename command.
+fn protected_folder_name(path: &str) -> Option<&'static str> {
+    if path == NOTES_ROOT {
+        return None;
+    }
+    default_display_name(path)
+}
+
+/// Reject delete/rename on a protected system folder with a dedicated error code.
+fn guard_protected(path: &str, action: &str) -> Result<(), ToolError> {
+    match protected_folder_name(path) {
+        Some(name) => Err(ToolError::SystemFolder {
+            path: path.to_string(),
+            message: format!("「{name}」是系统文件夹，不能{action}"),
+        }),
+        None => Ok(()),
+    }
+}
+
 /// 列出文件夹统计。默认文件夹 = `/life/notes` 本身，folderId 为 null。
 pub fn list(vfs: &VirtualFs) -> Result<FolderStats, ToolError> {
     let conn = vfs.conn();
@@ -127,10 +150,12 @@ pub fn create(vfs: &mut VirtualFs, name: &str) -> Result<Folder, ToolError> {
 pub fn rename(vfs: &mut VirtualFs, id: i64, name: &str) -> Result<(), ToolError> {
     let name = validate_name(name)?;
     let conn = vfs.conn();
-    let path = folder_path_by_id(conn, id)?;
+    let path = directory_path_by_id(conn, id)?;
     if path.as_str() == NOTES_ROOT {
         return Err(ToolError::invalid("默认文件夹请使用重命名默认文件夹接口"));
     }
+    guard_protected(&path, "重命名")?;
+    ensure_note_folder(&path)?;
     if folder_name_exists(conn, &name, Some(id))? {
         return Err(ToolError::invalid("同名文件夹已存在"));
     }
@@ -153,10 +178,12 @@ pub fn rename_default(vfs: &mut VirtualFs, name: &str) -> Result<(), ToolError> 
 /// 删除文件夹：先把其中笔记移动到默认文件夹，再删除空目录。
 pub fn delete(vfs: &mut VirtualFs, id: i64) -> Result<(), ToolError> {
     let tx = vfs.conn_mut().transaction()?;
-    let path = folder_path_by_id(&tx, id)?;
+    let path = directory_path_by_id(&tx, id)?;
     if path.as_str() == NOTES_ROOT {
         return Err(ToolError::invalid("不能删除默认文件夹"));
     }
+    guard_protected(&path, "删除")?;
+    ensure_note_folder(&path)?;
 
     let nested: i64 = tx.query_row(
         "SELECT COUNT(*) FROM inodes
@@ -296,6 +323,34 @@ fn folder_path_by_id(conn: &Connection, id: i64) -> Result<String, ToolError> {
         None => Err(ToolError::NotFound {
             path: format!("folder#{id}"),
         }),
+    }
+}
+
+/// Resolve any directory by id so delete/rename can reject system folders with
+/// their own error before falling back to the notes-root check.
+fn directory_path_by_id(conn: &Connection, id: i64) -> Result<String, ToolError> {
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT kind, path FROM inodes WHERE inode = ?1 AND deleted = 0",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    match row {
+        Some((kind, path)) if kind == "directory" => Ok(path),
+        Some(_) => Err(ToolError::invalid("目标不是文件夹")),
+        None => Err(ToolError::NotFound {
+            path: format!("folder#{id}"),
+        }),
+    }
+}
+
+/// Anything past the system-folder guard must be an ordinary folder.
+fn ensure_note_folder(path: &str) -> Result<(), ToolError> {
+    if path.starts_with("/life/notes/") {
+        Ok(())
+    } else {
+        Err(ToolError::invalid("目标不是笔记文件夹"))
     }
 }
 

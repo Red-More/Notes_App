@@ -35,6 +35,8 @@ pub enum ToolError {
     InvalidArgument { message: String },
     /// 单文件内容超过 1MB 上限。
     ContentTooLarge { limit: usize, actual: usize },
+    /// 系统文件夹（日记/待办/联系人/日程/AI 工作区）不允许删除或重命名。
+    SystemFolder { path: String, message: String },
     /// SQLite 读写失败。
     Storage { message: String },
 }
@@ -76,6 +78,7 @@ impl std::fmt::Display for ToolError {
             Self::ContentTooLarge { limit, actual } => {
                 write!(f, "内容过大：{actual} 字节，上限 {limit} 字节")
             }
+            Self::SystemFolder { message, .. } => write!(f, "{message}"),
             Self::Storage { message } => write!(f, "存储错误：{message}"),
         }
     }
