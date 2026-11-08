@@ -956,6 +956,25 @@ textarea {
   outline: none;
 }
 
+/* Inline image widget: the Markdown source stays intact behind the picture. */
+.cm-asset-image {
+  display: inline-block;
+  vertical-align: bottom;
+  padding: 2px 4px;
+}
+
+.cm-asset-image img {
+  max-width: min(100%, 520px);
+  max-height: 360px;
+  border-radius: 8px;
+  vertical-align: bottom;
+  cursor: pointer;
+}
+
+.cm-asset-image.asset-missing {
+  vertical-align: baseline;
+}
+
 /* ============ Split preview ============ */
 .editor-preview {
   flex: 1 1 0;

@@ -13,7 +13,7 @@ const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_BATCH_MESSAGES: usize = 100;
 const MAX_MODEL_CHARS: usize = 100;
 /// Per-message attachment cap; matches the chat composer guard.
-const MAX_IMAGES_PER_MESSAGE: usize = 4;
+const MAX_IMAGES_PER_MESSAGE: usize = 8;
 
 /// 会话列表项。
 #[derive(Debug, Clone, Serialize)]

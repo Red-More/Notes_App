@@ -55,9 +55,9 @@ interface Attachment {
 }
 
 /** Mirrors the backend limits so oversize input fails with a readable message. */
-const MAX_CHAT_IMAGES = 4
-const MAX_CHAT_IMAGE_BYTES = 8 * 1024 * 1024
-const MAX_CHAT_TOTAL_BYTES = 16 * 1024 * 1024
+const MAX_CHAT_IMAGES = 8
+const MAX_CHAT_IMAGE_BYTES = 32 * 1024 * 1024
+const MAX_CHAT_TOTAL_BYTES = 40 * 1024 * 1024
 
 /** User attachment strip; a stale asset shows a visible placeholder. */
 function BubbleImages({ ids }: { ids: number[] }) {
@@ -441,11 +441,11 @@ export default function ChatPage({ isActive }: Props) {
           continue
         }
         if (file.size > MAX_CHAT_IMAGE_BYTES) {
-          toast('单张图片不能超过 8MB')
+          toast('单张图片不能超过 32MB')
           continue
         }
         if (total + file.size > MAX_CHAT_TOTAL_BYTES) {
-          toast('图片总大小不能超过 16MB')
+          toast('图片总大小不能超过 40MB')
           break
         }
         try {

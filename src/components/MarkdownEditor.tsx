@@ -4,9 +4,12 @@ import {
   useImperativeHandle,
   useRef,
 } from 'react'
-import { EditorState, Prec } from '@codemirror/state'
+import { EditorState, Prec, RangeSetBuilder } from '@codemirror/state'
 import {
+  Decoration,
   EditorView,
+  ViewPlugin,
+  WidgetType,
   crosshairCursor,
   drawSelection,
   dropCursor,
@@ -17,6 +20,8 @@ import {
   lineNumbers,
   placeholder,
   rectangularSelection,
+  type DecorationSet,
+  type ViewUpdate,
 } from '@codemirror/view'
 import { highlightSelectionMatches } from '@codemirror/search'
 import {
@@ -36,6 +41,7 @@ import {
   indentOnInput,
   indentUnit,
   syntaxHighlighting,
+  syntaxTree,
 } from '@codemirror/language'
 import {
   autocompletion,
@@ -54,6 +60,7 @@ import { tags } from '@lezer/highlight'
 import { findUnclosedFence } from '../editor/diagnostics'
 import { insertMarkdownLink, toggleInlineMarker } from '../editor/commands'
 import { indentUnitFor, type EditorPrefs } from '../editor/prefs'
+import { assetDataUrl } from '../assets'
 
 export interface MarkdownEditorHandle {
   focus: () => void
@@ -236,6 +243,121 @@ function linePosition(view: EditorView, line: number): number {
   return view.state.doc.line(clamped).from
 }
 
+/**
+ * Renders `![alt](asset:<id>)` as an inline picture while keeping the Markdown
+ * source untouched. Clicking the picture selects the exact source range so the
+ * user can delete it; cursor movement, selection and history stay native.
+ */
+const ASSET_IMAGE_RE = /!\[([^\]]*)\]\(asset:(\d+)\)/g
+
+class AssetImageWidget extends WidgetType {
+  readonly id: number
+  readonly alt: string
+  readonly from: number
+  readonly to: number
+
+  constructor(id: number, alt: string, from: number, to: number) {
+    super()
+    this.id = id
+    this.alt = alt
+    this.from = from
+    this.to = to
+  }
+
+  eq(other: AssetImageWidget): boolean {
+    return (
+      other.id === this.id &&
+      other.alt === this.alt &&
+      other.from === this.from &&
+      other.to === this.to
+    )
+  }
+
+  toDOM(view: EditorView): HTMLElement {
+    const wrap = document.createElement('span')
+    wrap.className = 'cm-asset-image'
+    wrap.title = '点击选中图片源码'
+    const image = document.createElement('img')
+    image.alt = this.alt || '图片'
+    image.loading = 'lazy'
+    image.addEventListener('mousedown', (event) => {
+      event.preventDefault()
+      view.dispatch({ selection: { anchor: this.from, head: this.to } })
+      view.focus()
+    })
+    void assetDataUrl(this.id).then((url) => {
+      if (!wrap.isConnected) return
+      if (url) {
+        image.src = url
+      } else {
+        wrap.classList.add('asset-missing')
+        wrap.textContent = '图片缺失'
+      }
+    })
+    wrap.appendChild(image)
+    return wrap
+  }
+}
+
+type SyntaxNodeLike = { name: string; parent: SyntaxNodeLike | null }
+
+/** Skip image syntax that sits inside code, where it is literal text. */
+function insideCode(state: EditorState, pos: number): boolean {
+  let node: SyntaxNodeLike | null = syntaxTree(state).resolveInner(pos, 1)
+  while (node) {
+    if (node.name === 'FencedCode' || node.name === 'CodeBlock' || node.name === 'InlineCode') {
+      return true
+    }
+    node = node.parent
+  }
+  return false
+}
+
+function buildAssetDecorations(view: EditorView): DecorationSet {
+  const builder = new RangeSetBuilder<Decoration>()
+  let coveredUntil = 0
+  for (const range of view.visibleRanges) {
+    let pos = range.from
+    while (pos <= range.to) {
+      const line = view.state.doc.lineAt(pos)
+      for (const match of line.text.matchAll(ASSET_IMAGE_RE)) {
+        const start = line.from + (match.index ?? 0)
+        const end = start + match[0].length
+        // Visible ranges can overlap at a line boundary; never add twice.
+        if (start < coveredUntil || insideCode(view.state, start)) continue
+        builder.add(
+          start,
+          end,
+          Decoration.replace({
+            widget: new AssetImageWidget(Number(match[2]), match[1], start, end),
+          }),
+        )
+        coveredUntil = end
+      }
+      if (line.to >= range.to) break
+      pos = line.to + 1
+    }
+  }
+  return builder.finish()
+}
+
+const assetImagePlugin = ViewPlugin.fromClass(
+  class {
+    decorations: DecorationSet
+
+    constructor(view: EditorView) {
+      this.decorations = buildAssetDecorations(view)
+    }
+
+    update(update: ViewUpdate) {
+      if (update.docChanged || update.viewportChanged) {
+        this.decorations = buildAssetDecorations(update.view)
+      }
+    }
+  },
+  { decorations: (plugin) => plugin.decorations },
+)
+
 function buildExtensions(prefs: EditorPrefs, refs: EditorRefs) {
   return [
     lineNumbers(),
@@ -266,6 +388,7 @@ function buildExtensions(prefs: EditorPrefs, refs: EditorRefs) {
       ]),
     ),
     markdown({ codeLanguages: languages }),
+    assetImagePlugin,
     indentationMarkers({
       thickness: 1,
       activeThickness: 2,

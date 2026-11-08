@@ -17,11 +17,10 @@ use sha2::{Digest, Sha256};
 use crate::vfs::error::ToolError;
 
 /// Per-image hard limit, aligned with the LLM request guard in `agent::llm`.
-pub const MAX_ASSET_BYTES: usize = 8 * 1024 * 1024;
-/// Longest accepted side, in pixels.
-pub const MAX_ASSET_SIDE: u32 = 8192;
-/// Total accepted pixels per image.
-pub const MAX_ASSET_PIXELS: u64 = 16_000_000;
+pub const MAX_ASSET_BYTES: usize = 32 * 1024 * 1024;
+/// Longest accepted side, in pixels. Providers get a downscaled copy at send
+/// time, so the stored original may be much larger than the vendor limit.
+pub const MAX_ASSET_SIDE: u32 = 16384;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -79,9 +78,6 @@ impl AssetStore {
             return Err(ToolError::invalid(format!(
                 "图片边长不能超过 {MAX_ASSET_SIDE}px"
             )));
-        }
-        if u64::from(width) * u64::from(height) > MAX_ASSET_PIXELS {
-            return Err(ToolError::invalid("图片总像素超过 1600 万"));
         }
 
         let sha = sha256_hex(bytes);
@@ -226,7 +222,9 @@ fn sniff_mime(bytes: &[u8]) -> Option<&'static str> {
     None
 }
 
-fn dimensions(mime: &str, bytes: &[u8]) -> Option<(u32, u32)> {
+/// Probe encoded dimensions without decoding pixels (used by the send-time
+/// downscaler to skip images that already fit).
+pub(crate) fn dimensions(mime: &str, bytes: &[u8]) -> Option<(u32, u32)> {
     match mime {
         "image/png" => png_size(bytes),
         "image/jpeg" => jpeg_size(bytes),

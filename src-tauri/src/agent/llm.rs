@@ -16,8 +16,13 @@
 //! - 禁用重定向、仅 HTTPS。
 
 use std::collections::BTreeMap;
+use std::io::Cursor;
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use futures_util::StreamExt;
+use image::imageops::FilterType;
+use image::{DynamicImage, ExtendedColorType, ImageFormat};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
@@ -25,15 +30,21 @@ use super::cancel::CancellationToken;
 use super::model_store::{self, ApiFormat, ModelEntry};
 use super::params::{CacheRetention, LlmParams, ThinkingMode};
 use super::{AgentState, TOOL_ALLOWLIST};
+use crate::assets;
 use crate::vfs::error::ToolError;
 
 const MAX_SYSTEM_BYTES: usize = 64 * 1024;
 const MAX_MESSAGES: usize = 200;
 const MAX_TOTAL_BYTES: usize = 24 * 1024 * 1024;
-const MAX_IMAGES_PER_REQUEST: usize = 8;
-const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
-const MAX_IMAGES_TOTAL_BYTES: usize = 16 * 1024 * 1024;
+const MAX_IMAGES_PER_REQUEST: usize = 16;
+const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_IMAGES_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 const ALLOWED_IMAGE_MIME: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+/// Vendor-side hard limits. Anything larger is downscaled in memory right
+/// before the request leaves, so the stored original can stay untouched.
+const VENDOR_MAX_SIDE: u32 = 1568;
+const VENDOR_MAX_BYTES: usize = 5 * 1024 * 1024;
+const VENDOR_JPEG_QUALITY: u8 = 85;
 /// Remote MCP tools are namespaced with `mcp_`; the cap keeps request bodies small.
 const MAX_MCP_TOOLS: usize = 32;
 const MAX_MODEL_CHARS: usize = 100;
@@ -522,18 +533,134 @@ fn validate_images(messages: &[Value]) -> Result<(), ToolError> {
                     image.mime
                 )));
             }
-            // Base64 decodes to ~3/4 of its length.
-            let bytes = (image.data.len() / 4).saturating_mul(3);
+            // Base64 decodes to ~3/4 of its length; count the padding exactly.
+            let bytes = decoded_base64_len(&image.data);
             if bytes > MAX_IMAGE_BYTES {
-                return Err(ToolError::invalid("单张图片超过 8MB"));
+                return Err(ToolError::invalid(format!(
+                    "单张图片不能超过 {}MB",
+                    MAX_IMAGE_BYTES / 1024 / 1024
+                )));
             }
             total_bytes = total_bytes.saturating_add(bytes);
             if total_bytes > MAX_IMAGES_TOTAL_BYTES {
-                return Err(ToolError::invalid("图片总量超过 16MB"));
+                return Err(ToolError::invalid(format!(
+                    "图片总量不能超过 {}MB",
+                    MAX_IMAGES_TOTAL_BYTES / 1024 / 1024
+                )));
             }
         }
     }
     Ok(())
+}
+
+/// Exact decoded length of standard base64, without allocating the bytes.
+fn decoded_base64_len(data: &str) -> usize {
+    let padding = data
+        .as_bytes()
+        .iter()
+        .rev()
+        .take(2)
+        .filter(|byte| **byte == b'=')
+        .count();
+    (data.len() / 4)
+        .saturating_mul(3)
+        .saturating_sub(padding)
+}
+
+/// Base64 payload bytes of all user images; kept out of the text-context budget.
+fn image_payload_bytes(messages: &[Value]) -> usize {
+    messages
+        .iter()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        .filter_map(|message| message.get("content"))
+        .flat_map(images_of)
+        .map(|image| image.data.len())
+        .sum()
+}
+
+/// Downscale every attachment to the vendor limits before it is sent.
+///
+/// The stored asset keeps the original bytes; only this in-memory copy shrinks.
+/// A decode/encode failure is reported instead of silently sending the original.
+fn shrink_turns(turns: &mut [Turn]) -> Result<(), ToolError> {
+    for turn in turns.iter_mut() {
+        for image in turn.images.iter_mut() {
+            shrink_image(image)?;
+        }
+    }
+    Ok(())
+}
+
+fn shrink_image(part: &mut ImagePart) -> Result<(), ToolError> {
+    let raw = BASE64
+        .decode(part.data.as_bytes())
+        .map_err(|error| ToolError::invalid(format!("图片数据解码失败：{error}")))?;
+    // Fast path: already within both vendor limits, keep the exact bytes.
+    if raw.len() <= VENDOR_MAX_BYTES {
+        if let Some((width, height)) = assets::dimensions(&part.mime, &raw) {
+            if width.max(height) <= VENDOR_MAX_SIDE {
+                return Ok(());
+            }
+        }
+    }
+    let decoded = image::load_from_memory(&raw)
+        .map_err(|error| ToolError::invalid(format!("图片解析失败，无法缩放：{error}")))?;
+    let scaled = downscale(decoded);
+    let (mime, bytes) = encode_within_budget(&scaled, part.mime == "image/png")?;
+    part.mime = mime.to_string();
+    part.data = BASE64.encode(bytes);
+    Ok(())
+}
+
+/// Proportional downscale; the longest side becomes VENDOR_MAX_SIDE.
+fn downscale(image: DynamicImage) -> DynamicImage {
+    let (width, height) = (image.width(), image.height());
+    let longest = width.max(height);
+    if longest <= VENDOR_MAX_SIDE {
+        return image;
+    }
+    let ratio = f64::from(VENDOR_MAX_SIDE) / f64::from(longest);
+    let scaled_width = (f64::from(width) * ratio).round().max(1.0) as u32;
+    let scaled_height = (f64::from(height) * ratio).round().max(1.0) as u32;
+    image.resize_exact(scaled_width, scaled_height, FilterType::Lanczos3)
+}
+
+/// Keep lossless PNG when it still fits the byte budget; otherwise JPEG q85.
+fn encode_within_budget(
+    image: &DynamicImage,
+    prefer_png: bool,
+) -> Result<(&'static str, Vec<u8>), ToolError> {
+    if prefer_png {
+        let png = encode(image, ImageFormat::Png)?;
+        if png.len() <= VENDOR_MAX_BYTES {
+            return Ok(("image/png", png));
+        }
+    }
+    Ok(("image/jpeg", encode_jpeg(image)?))
+}
+
+fn encode(image: &DynamicImage, format: ImageFormat) -> Result<Vec<u8>, ToolError> {
+    let mut buffer = Vec::new();
+    image
+        .write_to(&mut Cursor::new(&mut buffer), format)
+        .map_err(|error| ToolError::invalid(format!("图片压缩失败：{error}")))?;
+    Ok(buffer)
+}
+
+fn encode_jpeg(image: &DynamicImage) -> Result<Vec<u8>, ToolError> {
+    let mut buffer = Vec::new();
+    let rgb = image.to_rgb8();
+    let mut encoder =
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buffer, VENDOR_JPEG_QUALITY);
+    encoder
+        .encode(
+            rgb.as_raw(),
+            rgb.width(),
+            rgb.height(),
+            ExtendedColorType::Rgb8,
+        )
+        .map_err(|error| ToolError::invalid(format!("图片压缩失败：{error}")))?;
+    Ok(buffer)
 }
 
 pub fn validate_request(req: &ProxyRequest, entry: &ModelEntry) -> Result<(), ToolError> {
@@ -576,11 +703,14 @@ pub fn validate_request(req: &ProxyRequest, entry: &ModelEntry) -> Result<(), To
         return Err(ToolError::invalid("system prompt 超过 64KB"));
     }
     // 只序列化一次整份上下文来计算大小，避免逐条 to_string 造成重复分配。
+    // 图片有自己的上限（MAX_IMAGES_TOTAL_BYTES），这里只约束文本部分，
+    // 否则 32MB 的合法单图会被 24MB 的上下文上限提前拒绝。
     let total = serde_json::to_vec(&req.context.messages)
         .map_err(|e| ToolError::invalid(format!("上下文序列化失败：{e}")))?
-        .len();
+        .len()
+        .saturating_sub(image_payload_bytes(&req.context.messages));
     if total > MAX_TOTAL_BYTES {
-        return Err(ToolError::invalid("单次请求上下文超过 24MB"));
+        return Err(ToolError::invalid("单次请求上下文（不含图片）超过 24MB"));
     }
     validate_images(&req.context.messages)?;
     if tools.len() > TOOL_ALLOWLIST.len() + MAX_MCP_TOOLS {
@@ -646,10 +776,13 @@ pub async fn run(
     let mut req = req;
     req.context.messages = trim_messages(&req.context.messages);
     validate_request(&req, entry)?;
+
+    // 发送前缩放放在 StreamStart 之前，失败时以普通错误返回，绝不发出原图。
+    let (system, tools) = replay_system(&req.context.messages);
+    let mut turns = to_turns(&req.context.messages);
+    shrink_turns(&mut turns)?;
     emit(StreamEvent::Start);
 
-    let (system, tools) = replay_system(&req.context.messages);
-    let turns = to_turns(&req.context.messages);
     let model = entry.model_id.clone();
 
     let key = match state.secrets.get(&entry.id) {
@@ -2393,4 +2526,58 @@ async fn anthropic_json(
         usage,
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::Rgba;
+
+    fn png_of(width: u32, height: u32) -> Vec<u8> {
+        let buffer = image::ImageBuffer::from_pixel(width, height, Rgba([120u8, 30, 200, 255]));
+        let image = DynamicImage::ImageRgba8(buffer);
+        let mut bytes = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
+            .expect("encode fixture png");
+        bytes
+    }
+
+    fn part(mime: &str, bytes: &[u8]) -> ImagePart {
+        ImagePart {
+            mime: mime.to_string(),
+            data: BASE64.encode(bytes),
+        }
+    }
+
+    #[test]
+    fn oversized_images_are_downscaled_to_vendor_limits() {
+        let mut image = part("image/png", &png_of(2000, 1000));
+        shrink_image(&mut image).unwrap();
+        let bytes = BASE64.decode(image.data).unwrap();
+        let decoded = image::load_from_memory(&bytes).unwrap();
+        assert!(decoded.width().max(decoded.height()) <= VENDOR_MAX_SIDE);
+        assert_eq!((decoded.width(), decoded.height()), (1568, 784));
+        assert!(bytes.len() <= VENDOR_MAX_BYTES);
+    }
+
+    #[test]
+    fn images_already_within_limits_keep_their_bytes() {
+        let source = png_of(100, 100);
+        let mut image = part("image/png", &source);
+        shrink_image(&mut image).unwrap();
+        assert_eq!(image.mime, "image/png");
+        assert_eq!(BASE64.decode(image.data).unwrap(), source);
+    }
+
+    #[test]
+    fn corrupt_image_data_reports_a_readable_error() {
+        let mut image = part("image/png", b"not an image");
+        let error = shrink_image(&mut image).unwrap_err();
+        let json = serde_json::to_value(&error).unwrap();
+        assert!(json["message"]
+            .as_str()
+            .unwrap()
+            .contains("图片解析失败"));
+    }
 }

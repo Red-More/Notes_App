@@ -38,6 +38,8 @@ url = "2"
 # 图片资产：内容哈希用于去重，十六进制哈希作为磁盘文件名。
 sha2 = "0.10"
 hex = "0.4"
+# 发送前缩放：厂商对单图有硬上限，需在内存中解码并降级，不落盘。
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # 取消与超时：select!、Notify 与测试运行时。
 tokio = { version = "1", features = ["time", "sync", "macros", "rt"] }
 

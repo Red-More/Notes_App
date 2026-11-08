@@ -1418,13 +1418,13 @@ fn user_messages_keep_image_asset_ids_and_assistant_rejects_them() {
         conv.id,
         vec![conversations::NewMessage {
             role: "user".into(),
-            image_asset_ids: vec![1, 2, 3, 4, 5],
+            image_asset_ids: vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
             ..Default::default()
         }],
     );
     assert!(
         matches!(too_many, Err(ToolError::InvalidArgument { .. })),
-        "more than four images must be rejected"
+        "more than eight images must be rejected"
     );
 
     let assistant = conversations::append(
@@ -2131,6 +2131,16 @@ fn proxy_request_validates_image_attachments() {
         "bounded images must pass"
     );
 
+    let relaxed: Vec<serde_json::Value> = (0..9)
+        .map(|_| serde_json::json!({"type": "image", "data": "aGVsbG8=", "mimeType": "image/png"}))
+        .collect();
+    let mut nine = proxy_request("custom_1", "gpt-4o-mini");
+    nine.context.messages = vec![serde_json::json!({ "role": "user", "content": relaxed })];
+    assert!(
+        llm::validate_request(&nine, &entry).is_ok(),
+        "nine images fit the relaxed cap"
+    );
+
     let mut bad_mime = proxy_request("custom_1", "gpt-4o-mini");
     bad_mime.context.messages = vec![serde_json::json!({
         "role": "user",
@@ -2145,7 +2155,7 @@ fn proxy_request_validates_image_attachments() {
         "non-image MIME types must be rejected"
     );
 
-    let too_many: Vec<serde_json::Value> = (0..9)
+    let too_many: Vec<serde_json::Value> = (0..17)
         .map(|_| serde_json::json!({"type": "image", "data": "aGVsbG8=", "mimeType": "image/png"}))
         .collect();
     let mut many = proxy_request("custom_1", "gpt-4o-mini");
@@ -2155,7 +2165,7 @@ fn proxy_request_validates_image_attachments() {
     })];
     assert!(
         llm::validate_request(&many, &entry).is_err(),
-        "more than eight images must be rejected"
+        "more than sixteen images must be rejected"
     );
 }
 
