@@ -12,6 +12,8 @@ const MAX_TITLE_CHARS: usize = 80;
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_BATCH_MESSAGES: usize = 100;
 const MAX_MODEL_CHARS: usize = 100;
+/// Per-message attachment cap; matches the chat composer guard.
+const MAX_IMAGES_PER_MESSAGE: usize = 4;
 
 /// 会话列表项。
 #[derive(Debug, Clone, Serialize)]
@@ -63,6 +65,8 @@ pub struct ChatMessage {
     pub stop_reason: Option<String>,
     /// Non-null marks this user row as guidance injected into that run.
     pub steer_of_run: Option<i64>,
+    /// Image assets attached to a user message (empty for other rows).
+    pub image_asset_ids: Vec<i64>,
     pub created_at: String,
 }
 
@@ -99,6 +103,8 @@ pub struct NewMessage {
     pub stop_reason: Option<String>,
     #[serde(default)]
     pub steer_of_run: Option<i64>,
+    #[serde(default)]
+    pub image_asset_ids: Vec<i64>,
 }
 
 fn now(conn: &Connection) -> Result<String, ToolError> {
@@ -227,7 +233,7 @@ pub fn delete(vfs: &VirtualFs, id: i64) -> Result<(), ToolError> {
 const MESSAGE_COLUMNS: &str = "id, role, content, tool_calls, tool_call_id, tool_name, is_error,
     created_at, usage_input, usage_output, usage_total, usage_cache_read, usage_cache_write,
     thinking, thinking_signature, run_id, tool_args, tool_duration_ms,
-    is_partial, stop_reason, steer_of_run";
+    is_partial, stop_reason, steer_of_run, image_asset_ids";
 
 /// 读取一条会话的消息，按 id 升序。
 pub fn messages(vfs: &VirtualFs, conversation_id: i64) -> Result<Vec<ChatMessage>, ToolError> {
@@ -297,14 +303,31 @@ pub fn insert_message(
             return Err(ToolError::invalid("工具调用记录过大"));
         }
     }
+    if item.image_asset_ids.len() > MAX_IMAGES_PER_MESSAGE {
+        return Err(ToolError::invalid(format!(
+            "单条消息最多 {MAX_IMAGES_PER_MESSAGE} 张图片"
+        )));
+    }
+    // Only user turns may carry images; assistant replies are text/tool only.
+    if !item.image_asset_ids.is_empty() && item.role != "user" {
+        return Err(ToolError::invalid("只有用户消息可以携带图片"));
+    }
+    let image_ids = if item.image_asset_ids.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&item.image_asset_ids).map_err(|e| ToolError::Storage {
+            message: format!("图片引用序列化失败：{e}"),
+        })?)
+    };
     tx.execute(
         "INSERT INTO messages
              (conversation_id, role, content, tool_calls, tool_call_id, tool_name, is_error,
               usage_input, usage_output, usage_total, usage_cache_read, usage_cache_write,
               thinking, thinking_signature, run_id, tool_args,
-              tool_duration_ms, is_partial, stop_reason, steer_of_run, created_at)
+              tool_duration_ms, is_partial, stop_reason, steer_of_run, image_asset_ids,
+              created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                 ?17, ?18, ?19, ?20, ?21)",
+                 ?17, ?18, ?19, ?20, ?21, ?22)",
         params![
             conversation_id,
             item.role,
@@ -326,6 +349,7 @@ pub fn insert_message(
             if item.is_partial { 1 } else { 0 },
             item.stop_reason,
             item.steer_of_run,
+            image_ids,
             at
         ],
     )?;
@@ -346,6 +370,7 @@ pub fn insert_message(
         is_partial: item.is_partial,
         stop_reason: item.stop_reason,
         steer_of_run: item.steer_of_run,
+        image_asset_ids: item.image_asset_ids,
         created_at: at.to_string(),
     })
 }
@@ -417,6 +442,10 @@ fn row_to_message(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
         is_partial: r.get::<_, Option<i64>>(18)?.unwrap_or(0) != 0,
         stop_reason: r.get(19)?,
         steer_of_run: r.get(20)?,
+        image_asset_ids: r
+            .get::<_, Option<String>>(21)?
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default(),
         created_at: r.get(7)?,
     })
 }

@@ -25,6 +25,8 @@ export interface Bubble {
   thinkingSignature?: string | null
   /** Paths touched by this reply, cached when the reply settles. */
   changes?: string[]
+  /** Image assets the user attached to this message. */
+  imageAssetIds?: number[]
 }
 
 export interface ToolCard {
@@ -201,6 +203,7 @@ export function projectHistory(records: ChatMessageRecord[]): Item[] {
         id: `m-${record.id}`,
         kind: 'user',
         text: record.content,
+        imageAssetIds: record.imageAssetIds.length > 0 ? record.imageAssetIds : undefined,
       })
     } else if (record.role === 'assistant') {
       if (record.content.trim() === '') continue

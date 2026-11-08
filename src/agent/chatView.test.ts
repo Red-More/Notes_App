@@ -71,6 +71,7 @@ function record(partial: Partial<ChatMessageRecord> & { id: number }): ChatMessa
     isPartial: false,
     stopReason: null,
     steerOfRun: null,
+    imageAssetIds: [],
     createdAt: '2026-01-01 00:00:00',
   }
   return { ...base, ...partial }

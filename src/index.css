@@ -1203,6 +1203,17 @@ body.split-resizing {
   border-radius: 8px;
 }
 
+/* Missing image asset: a visible inline placeholder, never a broken icon. */
+.asset-missing {
+  display: inline-block;
+  padding: 2px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 0.85em;
+}
+
 /* Tables scroll horizontally instead of being clipped on phones. */
 .md-preview .table-scroll {
   margin: 0 0 0.9em;
@@ -3357,6 +3368,84 @@ body.split-resizing {
 .chat-send:disabled {
   background: var(--border);
   color: var(--text-3);
+}
+
+/* Attach button mirrors the send button's footprint but stays neutral. */
+.chat-attach {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-2);
+}
+
+.chat-attach:disabled {
+  color: var(--text-3);
+}
+
+.chat-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chat-attachment {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+.chat-attachment img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.chat-attachment-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(20, 22, 28, 0.6);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.chat-bubble-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.chat-bubble-images img {
+  max-width: 200px;
+  max-height: 200px;
+  border-radius: 8px;
+  object-fit: contain;
+}
+
+.chat-bubble-image-loading {
+  display: inline-block;
+  width: 72px;
+  height: 72px;
+  border-radius: 8px;
+  background: var(--surface-2);
 }
 
 .chat-send.stop {

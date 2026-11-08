@@ -1,4 +1,5 @@
 mod agent;
+mod assets;
 mod commands;
 mod db;
 mod docs;
@@ -67,6 +68,9 @@ pub fn run() {
             // Agent 侧状态：HTTP 客户端、私有密钥文件、取消标记。
             let secret_path = app.path().app_data_dir()?.join("agent-secrets.json");
             app.manage(agent::AgentState::new(secret_path));
+            // 图片资产字节落在应用私有目录，虚拟文件系统里只保留 Markdown。
+            let asset_root = app.path().app_data_dir()?.join("assets");
+            app.manage(assets::AssetStore::new(asset_root));
             // Log to the console and a rotating file under the OS log dir in
             // every build mode, so diagnostics exist on user machines too.
             let log_dir = app.path().app_log_dir()?;
@@ -120,6 +124,8 @@ pub fn run() {
             commands::export::export_doc,
             commands::export::export_docs,
             commands::export::export_folder,
+            commands::assets::asset_import,
+            commands::assets::asset_data,
             commands::index::index_query,
             commands::index::search_reindex,
             commands::skill::skill_list,

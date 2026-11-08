@@ -64,6 +64,8 @@ export interface MarkdownEditorHandle {
   scrollToLine: (line: number) => void
   /** Move the selection to a line and center it (preview click-to-source). */
   revealLine: (line: number) => void
+  /** Insert text at the caret (used by image insertion) and keep focus. */
+  insertAtCursor: (text: string) => void
   /** 1-based line at the top of the editor viewport. */
   getTopLine: () => number
 }
@@ -420,6 +422,17 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
             selection: { anchor: pos },
             effects: EditorView.scrollIntoView(pos, { y: 'center' }),
           })
+        },
+        insertAtCursor: (text) => {
+          const view = viewRef.current
+          if (!view) return
+          const { from, to } = view.state.selection.main
+          view.dispatch({
+            changes: { from, to, insert: text },
+            selection: { anchor: from + text.length },
+            effects: EditorView.scrollIntoView(from + text.length, { y: 'nearest' }),
+          })
+          view.focus()
         },
         getTopLine: () => {
           const view = viewRef.current

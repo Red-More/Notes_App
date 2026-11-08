@@ -142,16 +142,58 @@ function toAssistantMessage(record: ChatMessageRecord, profile: AgentProfile): A
   }
 }
 
+/** One image block as pi-ai expects it inside a user message. */
+export interface ImageAttachment {
+  data: string
+  mimeType: string
+}
+
+/** Plain text when no images are attached; text+image blocks otherwise. */
+export function userContent(text: string, images: ImageAttachment[]):
+  | string
+  | Array<
+      | { type: 'text'; text: string }
+      | { type: 'image'; data: string; mimeType: string }
+    > {
+  if (images.length === 0) return text
+  return [
+    { type: 'text', text },
+    ...images.map((image) => ({
+      type: 'image' as const,
+      data: image.data,
+      mimeType: image.mimeType,
+    })),
+  ]
+}
+
+/** Load up to four attachments; a missing file is skipped, not fatal. */
+async function loadAttachments(
+  ids: number[],
+  loadImage?: (id: number) => Promise<ImageAttachment | null>,
+): Promise<ImageAttachment[]> {
+  if (ids.length === 0 || !loadImage) return []
+  const loaded = await Promise.all(
+    ids.map((id) => loadImage(id).catch(() => null)),
+  )
+  return loaded.filter((image): image is ImageAttachment => image != null)
+}
+
 /** 数据库记录 → pi transcript。 */
 export async function toAgentMessages(
   records: ChatMessageRecord[],
   profile: AgentProfile,
+  loadImage?: (id: number) => Promise<ImageAttachment | null>,
 ): Promise<AgentMessage[]> {
   const messages: AgentMessage[] = []
   for (const record of records) {
     const timestamp = parseDbTime(record.createdAt).getTime()
     if (record.role === 'user') {
-      messages.push({ role: 'user', content: record.content, timestamp })
+      const images = await loadAttachments(record.imageAssetIds, loadImage)
+      messages.push({
+        role: 'user',
+        content: userContent(record.content, images),
+        timestamp,
+      } as AgentMessage)
     } else if (record.role === 'assistant') {
       // Failure/cancel bubbles are UI state, not model context.
       if (record.isError) continue

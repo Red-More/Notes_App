@@ -4,7 +4,8 @@
 //! 不使用 `dangerouslySetInnerHTML`，模型输出不经过任何 HTML 解析。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { api, chatApi } from '../../api'
+import { api, assetApi, chatApi } from '../../api'
+import { assetDataUrl } from '../../assets'
 import type { AgentProfile } from '../../agent/runtime'
 import { profileFromSettings } from '../../agent/runtime'
 import { AgentRuntime } from '../../agent/AgentRuntime'
@@ -16,7 +17,7 @@ import type {
   ChatConversation,
   MessageUsage,
 } from '../../types'
-import { friendlyError } from '../../utils'
+import { friendlyError, bytesToBase64 } from '../../utils'
 import { toast } from '../../toast'
 import { Modal } from '../../components/ui'
 import PageHeader from '../../components/PageHeader'
@@ -25,6 +26,7 @@ import {
   IconChat,
   IconEdit,
   IconEye,
+  IconImage,
   IconInfo,
   IconNote,
   IconPlus,
@@ -43,6 +45,48 @@ interface Props {
 interface DocPreview {
   path: string
   html: string
+}
+
+/** Composer attachment: asset id, preview URL and byte size for the total check. */
+interface Attachment {
+  id: number
+  url: string
+  size: number
+}
+
+/** Mirrors the backend limits so oversize input fails with a readable message. */
+const MAX_CHAT_IMAGES = 4
+const MAX_CHAT_IMAGE_BYTES = 8 * 1024 * 1024
+const MAX_CHAT_TOTAL_BYTES = 16 * 1024 * 1024
+
+/** User attachment strip; a stale asset shows a visible placeholder. */
+function BubbleImages({ ids }: { ids: number[] }) {
+  const [urls, setUrls] = useState<Array<string | null | undefined>>([])
+  useEffect(() => {
+    let alive = true
+    void Promise.all(ids.map((id) => assetDataUrl(id))).then((list) => {
+      if (alive) setUrls(list)
+    })
+    return () => {
+      alive = false
+    }
+  }, [ids])
+  return (
+    <div className="chat-bubble-images">
+      {ids.map((id, index) => {
+        const url = urls[index]
+        if (url === undefined) return <span key={id} className="chat-bubble-image-loading" />
+        if (url === null) {
+          return (
+            <span key={id} className="asset-missing">
+              图片缺失
+            </span>
+          )
+        }
+        return <img key={id} src={url} alt={`用户图片 ${index + 1}`} />
+      })}
+    </div>
+  )
 }
 
 /** Remove the YAML frontmatter so previews match what the editor renders. */
@@ -184,6 +228,10 @@ export default function ChatPage({ isActive }: Props) {
   const [conversation, setConversation] = useState<ChatConversation | null>(null)
   const [items, setItems] = useState<Item[]>([])
   const [input, setInput] = useState('')
+  // Composer attachments; `attachmentRef` mirrors it for async imports.
+  const [attachments, setAttachments] = useState<Attachment[]>([])
+  const attachmentRef = useRef<Attachment[]>([])
+  const imageInputRef = useRef<HTMLInputElement>(null)
   const [streaming, setStreaming] = useState(false)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [renameId, setRenameId] = useState<number | null>(null)
@@ -268,6 +316,8 @@ export default function ChatPage({ isActive }: Props) {
     async (conv: ChatConversation) => {
       conversationRef.current = conv
       setConversation(conv)
+      attachmentRef.current = []
+      setAttachments([])
       setLoading(true)
       try {
         // 优先使用会话记录里的模型条目；该条目被删除后回退到当前激活模型。
@@ -366,29 +416,102 @@ export default function ChatPage({ isActive }: Props) {
     }
   }, [])
 
+  const setAttachmentList = useCallback((next: Attachment[]) => {
+    attachmentRef.current = next
+    setAttachments(next)
+  }, [])
+
+  /** Import picked/pasted images as assets; every limit failure is announced. */
+  const addImageFiles = useCallback(
+    async (files: File[]) => {
+      if (streaming) {
+        toast('当前回复进行中，暂不支持发送图片')
+        return
+      }
+      if (files.length === 0) return
+      let next = [...attachmentRef.current]
+      let total = next.reduce((sum, item) => sum + item.size, 0)
+      for (const file of files) {
+        if (next.length >= MAX_CHAT_IMAGES) {
+          toast(`单条消息最多 ${MAX_CHAT_IMAGES} 张图片`)
+          break
+        }
+        if (file.type !== '' && !file.type.startsWith('image/')) {
+          toast('仅支持图片文件')
+          continue
+        }
+        if (file.size > MAX_CHAT_IMAGE_BYTES) {
+          toast('单张图片不能超过 8MB')
+          continue
+        }
+        if (total + file.size > MAX_CHAT_TOTAL_BYTES) {
+          toast('图片总大小不能超过 16MB')
+          break
+        }
+        try {
+          const bytes = new Uint8Array(await file.arrayBuffer())
+          const asset = await assetApi.import({ data: bytesToBase64(bytes), source: 'chat' })
+          // Same image twice shares one asset id; keep a single preview.
+          if (next.some((item) => item.id === asset.id)) continue
+          const url = await assetDataUrl(asset.id)
+          next = [...next, { id: asset.id, url: url ?? '', size: asset.size }]
+          total += asset.size
+        } catch (e) {
+          toast(friendlyError(e))
+        }
+      }
+      setAttachmentList(next)
+    },
+    [setAttachmentList, streaming],
+  )
+
+  const removeAttachment = useCallback(
+    (id: number) => {
+      setAttachmentList(attachmentRef.current.filter((item) => item.id !== id))
+    },
+    [setAttachmentList],
+  )
+
+  /** Pasting an image stores it as an asset and previews it in the composer. */
+  const handleComposerPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file != null)
+    if (files.length === 0) return
+    event.preventDefault()
+    void addImageFiles(files)
+  }
+
   const submitPrompt = useCallback(
-    async (text: string) => {
-      if (!text || streaming) return
+    async (text: string, imageAssetIds: number[]) => {
+      if ((!text && imageAssetIds.length === 0) || streaming) return
       if (!conversationRef.current) {
         toast('会话尚未就绪')
         return
       }
+      const previous = attachmentRef.current
       setInput('')
-      void ensureTitle(text)
+      setAttachmentList([])
+      void ensureTitle(text || '图片')
       try {
         // The runtime persists the user turn, runs the loop and writes results.
-        await runtime.prompt({ text })
+        await runtime.prompt({ text, imageAssetIds })
       } catch (e) {
         // Rejected before anything was written: keep the draft for a retry.
         setInput((prev) => prev || text)
+        setAttachmentList(previous)
         toast(friendlyError(e))
       }
     },
-    [ensureTitle, runtime, streaming],
+    [ensureTitle, runtime, setAttachmentList, streaming],
   )
 
   const send = useCallback(() => {
-    void submitPrompt(input.trim())
+    void submitPrompt(
+      input.trim(),
+      attachmentRef.current.map((item) => item.id),
+    )
   }, [input, submitPrompt])
 
   /** Enqueue guidance while a run is active; the agent injects it at the next boundary. */
@@ -661,6 +784,7 @@ export default function ChatPage({ isActive }: Props) {
                       )}
                       {item.kind === 'user' && (
                         <div className={`chat-bubble ${item.kind} ${item.isError ? 'error' : ''}`}>
+                          {item.imageAssetIds && <BubbleImages ids={item.imageAssetIds} />}
                           {item.text}
                         </div>
                       )}
@@ -748,6 +872,27 @@ export default function ChatPage({ isActive }: Props) {
             ，点击继续
           </button>
         )}
+        {attachments.length > 0 && (
+          <div className="chat-attachments">
+            {attachments.map((attachment) => (
+              <div className="chat-attachment" key={attachment.id}>
+                {attachment.url ? (
+                  <img src={attachment.url} alt="待发送图片" />
+                ) : (
+                  <span className="asset-missing">图片缺失</span>
+                )}
+                <button
+                  type="button"
+                  className="chat-attachment-remove"
+                  aria-label="移除图片"
+                  onClick={() => removeAttachment(attachment.id)}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="chat-composer-row">
           <textarea
             className="chat-input"
@@ -756,6 +901,7 @@ export default function ChatPage({ isActive }: Props) {
             placeholder={hasModel ? '说点什么…' : '请先添加模型'}
             disabled={!hasModel}
             onChange={(e) => setInput(e.target.value)}
+            onPaste={handleComposerPaste}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault()
@@ -764,6 +910,16 @@ export default function ChatPage({ isActive }: Props) {
               }
             }}
           />
+          {!streaming && hasModel && (
+            <button
+              type="button"
+              className="chat-attach"
+              aria-label="添加图片"
+              onClick={() => imageInputRef.current?.click()}
+            >
+              <IconImage size={20} />
+            </button>
+          )}
           {streaming && (
             <button
               type="button"
@@ -795,13 +951,25 @@ export default function ChatPage({ isActive }: Props) {
               type="button"
               className="chat-send"
               aria-label="发送"
-              disabled={input.trim() === '' || !hasModel}
+              disabled={(input.trim() === '' && attachments.length === 0) || !hasModel}
               onClick={() => void send()}
             >
               <IconSend size={20} />
             </button>
           )}
         </div>
+        <input
+          ref={imageInputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/gif,image/webp"
+          multiple
+          hidden
+          onChange={(e) => {
+            const files = Array.from(e.target.files ?? [])
+            e.target.value = ''
+            void addImageFiles(files)
+          }}
+        />
       </div>
 
       {docPreview && (

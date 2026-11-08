@@ -3,7 +3,7 @@
 //! Keeping these in one module lets tests substitute fakes without importing
 //! Tauri at all.
 
-import { chatApi, mcpApi, skillApi } from '../api'
+import { assetApi, chatApi, mcpApi, skillApi } from '../api'
 import type { AgentRuntimeDeps } from './AgentRuntime'
 
 export function createRuntimeDeps(): AgentRuntimeDeps {
@@ -15,6 +15,7 @@ export function createRuntimeDeps(): AgentRuntimeDeps {
     },
     loadSkills: () => skillApi.list(),
     loadMcpTools: () => mcpApi.tools(),
+    loadAsset: (id) => assetApi.data(id),
     createConversation: (title) => chatApi.create({ title }),
     startRun: (conversationId, trigger, modelEntry, message) =>
       chatApi.runStart({ conversationId, trigger, modelEntry, message: message ?? null }),

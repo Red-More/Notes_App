@@ -15,7 +15,7 @@
 use rusqlite::{params, Connection};
 
 /// Version stamped on databases created by this module.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Virtual file system root, kept in sync with `vfs::cap_gate::ROOT`.
 const ROOT: &str = "/life";
@@ -201,6 +201,7 @@ CREATE TABLE messages (
     is_partial         INTEGER,              -- 1 when the answer was cut short
     stop_reason        TEXT,                  -- stop | aborted | error
     steer_of_run       INTEGER,               -- non-null marks a steering message
+    image_asset_ids    TEXT,                  -- JSON array; user rows may carry images
     FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 );
 CREATE INDEX idx_messages_conversation ON messages(conversation_id, id);
@@ -251,6 +252,20 @@ CREATE TABLE settings (
     value      TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+-- Image assets referenced by notes (`asset:<id>`) and chat messages. Bytes
+-- live under the app-data `assets/` directory, sharded by hash prefix.
+CREATE TABLE assets (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    sha256     TEXT NOT NULL UNIQUE,
+    mime       TEXT NOT NULL,
+    size       INTEGER NOT NULL,
+    width      INTEGER,
+    height     INTEGER,
+    created_at TEXT NOT NULL,
+    source     TEXT NOT NULL DEFAULT 'import'
+);
+CREATE INDEX idx_assets_created ON assets(created_at DESC);
 ";
 
 /// True when the database was created by this build.

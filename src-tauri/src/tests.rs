@@ -775,22 +775,77 @@ fn cross_index_refreshes_on_write_and_save() {
 #[test]
 fn export_markdown_and_zip_regression() {
     let mut vfs = test_vfs();
+    let root = std::env::temp_dir().join(format!("notes-export-assets-{}", std::process::id()));
+    let store = crate::assets::AssetStore::new(root.clone());
     let first = docs::create(&mut vfs, "note", "导出测试", "导出正文", None, None).unwrap();
     let second = docs::create(&mut vfs, "note", "第二篇", "正文二", None, None).unwrap();
 
-    let markdown = docs::export::markdown(&vfs, first.id).unwrap();
-    assert!(markdown.starts_with("---"));
-    assert!(markdown.contains("导出正文"));
+    let asset = store.import(vfs.conn(), &tiny_png(), "note").unwrap();
+    docs::save(
+        &mut vfs,
+        first.id,
+        None,
+        Some(format!("导出正文\n\n![图](asset:{})", asset.id)),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
 
-    let entries = docs::export::collect(&vfs, &[first.id, second.id]).unwrap();
+    let markdown = docs::export::collect_one(&vfs, first.id, &store)
+        .unwrap()
+        .markdown;
+    assert!(markdown.starts_with("---"));
+    assert!(markdown.contains("assets/"), "asset refs must be rewritten");
+
+    let entries = docs::export::collect(&vfs, &[first.id, second.id], &store).unwrap();
     assert_eq!(entries.len(), 2);
     let bytes = docs::export::zip_entries(&entries).unwrap();
     let archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
-    assert_eq!(archive.len(), 2, "multi-doc export must contain both files");
+    assert_eq!(
+        archive.len(),
+        3,
+        "zip must contain two notes plus the referenced image"
+    );
 
-    let folder_entries = docs::export::collect_folder(&vfs, -1).unwrap();
+    let folder_entries = docs::export::collect_folder(&vfs, -1, &store).unwrap();
     assert_eq!(folder_entries.len(), 2);
     assert!(docs::export::zip_entries(&folder_entries).is_ok());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn assets_import_dedupes_by_hash_and_reads_back() {
+    let vfs = test_vfs();
+    let root = std::env::temp_dir().join(format!("notes-assets-{}", std::process::id()));
+    let store = crate::assets::AssetStore::new(root.clone());
+
+    let first = store.import(vfs.conn(), &tiny_png(), "note").unwrap();
+    let again = store.import(vfs.conn(), &tiny_png(), "note").unwrap();
+    assert_eq!(first.id, again.id, "identical bytes must reuse the row");
+    assert_eq!(first.mime, "image/png");
+    assert_eq!(first.width, Some(1));
+
+    let data = store.data(vfs.conn(), first.id).unwrap();
+    assert_eq!(data.mime, "image/png");
+    assert!(!data.data.is_empty());
+
+    let rejected = store.import(vfs.conn(), b"not an image", "note");
+    assert!(matches!(
+        rejected,
+        Err(crate::vfs::error::ToolError::InvalidArgument { .. })
+    ));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Minimal PNG header (signature + IHDR) used by the asset tests.
+#[cfg(test)]
+fn tiny_png() -> Vec<u8> {
+    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    bytes.extend_from_slice(&[0, 0, 0, 13]);
+    bytes.extend_from_slice(b"IHDR");
+    bytes.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0]);
+    bytes
 }
 
 #[test]
@@ -1235,6 +1290,7 @@ fn schema_creates_agent_tables() {
         "agent_runs",
         "agent_events",
         "settings",
+        "assets",
     ] {
         let count: i64 = conn
             .query_row(
@@ -1329,6 +1385,61 @@ fn conversation_lifecycle_persists_messages() {
         )
         .unwrap();
     assert_eq!(orphan, 0, "deleting a conversation cascades its messages");
+}
+
+#[test]
+fn user_messages_keep_image_asset_ids_and_assistant_rejects_them() {
+    let vfs = test_vfs();
+    let entry = add_model(&vfs, "测试模型", "demo-model");
+    let conv = conversations::create(&vfs, None, entry.id.clone(), entry.model_id.clone()).unwrap();
+
+    let inserted = conversations::append(
+        &vfs,
+        conv.id,
+        vec![conversations::NewMessage {
+            role: "user".into(),
+            content: "看这几张图".into(),
+            image_asset_ids: vec![1, 2, 3, 4],
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+    assert_eq!(inserted[0].image_asset_ids, vec![1, 2, 3, 4]);
+
+    let messages = conversations::messages(&vfs, conv.id).unwrap();
+    assert_eq!(
+        messages[0].image_asset_ids,
+        vec![1, 2, 3, 4],
+        "asset ids must survive the round trip"
+    );
+
+    let too_many = conversations::append(
+        &vfs,
+        conv.id,
+        vec![conversations::NewMessage {
+            role: "user".into(),
+            image_asset_ids: vec![1, 2, 3, 4, 5],
+            ..Default::default()
+        }],
+    );
+    assert!(
+        matches!(too_many, Err(ToolError::InvalidArgument { .. })),
+        "more than four images must be rejected"
+    );
+
+    let assistant = conversations::append(
+        &vfs,
+        conv.id,
+        vec![conversations::NewMessage {
+            role: "assistant".into(),
+            image_asset_ids: vec![1],
+            ..Default::default()
+        }],
+    );
+    assert!(
+        matches!(assistant, Err(ToolError::InvalidArgument { .. })),
+        "assistant rows cannot carry images"
+    );
 }
 
 #[test]

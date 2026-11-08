@@ -20,7 +20,7 @@ import type {
   SkillSummary,
 } from '../types'
 import { buildSkillsIndex } from './skills'
-import { createAgent, toAgentMessages, type AgentProfile } from './runtime'
+import { createAgent, toAgentMessages, userContent, type AgentProfile, type ImageAttachment } from './runtime'
 import { classifyError, classifyFailure, errorText, type ErrorInfo } from './errors'
 import {
   beginPrompt,
@@ -39,6 +39,8 @@ export type RuntimeStatus = 'idle' | 'running' | 'cancelling'
 
 export interface PromptInput {
   text: string
+  /** Image assets attached to this user turn (validated by the composer). */
+  imageAssetIds?: number[]
 }
 
 /** Everything the runtime needs from the outside; fakeable in tests. */
@@ -48,6 +50,8 @@ export interface AgentRuntimeDeps {
   truncate(conversationId: number, messageId: number): Promise<void>
   loadSkills(): Promise<SkillSummary[]>
   loadMcpTools(): Promise<McpToolInfo[]>
+  /** Bytes of one image asset, for replaying and sending user attachments. */
+  loadAsset(id: number): Promise<{ data: string; mime: string }>
   createConversation(title: string): Promise<ChatConversation>
   /** Run ledger: the database is the queue, so re-entry never loses work. */
   startRun(
@@ -202,7 +206,10 @@ export class AgentRuntime {
   ): Promise<Agent> {
     return createAgent(
       profile,
-      await toAgentMessages(records, profile),
+      await toAgentMessages(records, profile, async (id) => {
+        const asset = await this.deps.loadAsset(id)
+        return { data: asset.data, mimeType: asset.mime }
+      }),
       this.skillsIndex,
       skills,
       mcpTools,
@@ -223,23 +230,25 @@ export class AgentRuntime {
     await this.drainRunWrites()
 
     const text = input.text.trim()
-    if (text === '') return
+    const imageAssetIds = input.imageAssetIds ?? []
+    if (text === '' && imageAssetIds.length === 0) return
 
     // The ledger insert and the user message share one transaction.
     const started = await this.startRun(conversation, 'prompt', {
       role: 'user',
       content: text,
+      imageAssetIds,
     })
     if (started.run.status !== 'running') {
       this.queue.push({ run: started.run, userMessage: started.message })
-      this.addUserItem(started, text)
+      this.addUserItem(started, text, imageAssetIds)
       this.emit()
       return
     }
     this.beginRun(started)
-    this.addUserItem(started, text)
+    this.addUserItem(started, text, imageAssetIds)
     this.emit()
-    await this.runTurn(text)
+    await this.runTurn(text, imageAssetIds)
   }
 
   /** Inject guidance at the next turn boundary, persisted with its run marker. */
@@ -301,7 +310,7 @@ export class AgentRuntime {
   }
 
   /** Append the optimistic user bubble; its row id comes from the ledger insert. */
-  private addUserItem(started: AgentRunStart, text: string): void {
+  private addUserItem(started: AgentRunStart, text: string, imageAssetIds: number[] = []): void {
     const generated = started.message
       ? { view: this.view, id: `m-${started.message.id}` }
       : nextItemId(this.view, 'u')
@@ -313,16 +322,37 @@ export class AgentRuntime {
           id: generated.id,
           kind: 'user',
           text,
+          imageAssetIds: imageAssetIds.length > 0 ? imageAssetIds : undefined,
         },
       ],
     }
   }
 
-  private async runTurn(text: string): Promise<void> {
+  /** Read attachment bytes; a missing file fails the run with a readable error. */
+  private async resolveAttachments(ids: number[]): Promise<ImageAttachment[]> {
+    if (ids.length === 0) return []
+    try {
+      return await Promise.all(
+        ids.map(async (id) => {
+          const asset = await this.deps.loadAsset(id)
+          return { data: asset.data, mimeType: asset.mime }
+        }),
+      )
+    } catch {
+      throw new Error('图片资产读取失败，请重新发送')
+    }
+  }
+
+  private async runTurn(text: string, imageAssetIds: number[] = []): Promise<void> {
     const agent = this.agent
     if (!agent) return
     try {
-      await agent.prompt(text)
+      const images = await this.resolveAttachments(imageAssetIds)
+      await agent.prompt({
+        role: 'user',
+        content: userContent(text, images),
+        timestamp: Date.now(),
+      } as AgentMessage)
     } catch (error) {
       this.handleThrown(error)
     } finally {
@@ -521,6 +551,7 @@ export class AgentRuntime {
           toolDurationMs: record.toolDurationMs,
           isPartial: record.isPartial,
           stopReason: record.stopReason,
+          imageAssetIds: record.imageAssetIds,
         })),
       )
     }
@@ -841,7 +872,8 @@ export class AgentRuntime {
     if (this.pumping || this.status !== 'idle' || !this.agent || this.queue.length === 0) return
     const next = this.queue[0]
     const text = next.userMessage?.content ?? ''
-    if (text.trim() === '') {
+    const imageAssetIds = next.userMessage?.imageAssetIds ?? []
+    if (text.trim() === '' && imageAssetIds.length === 0) {
       this.queue.shift()
       this.emit()
       return
@@ -859,7 +891,7 @@ export class AgentRuntime {
       this.view = beginPrompt(this.view)
       this.status = 'running'
       this.emit()
-      await this.runTurn(text)
+      await this.runTurn(text, imageAssetIds)
     } finally {
       this.pumping = false
       this.settleAfterRun()

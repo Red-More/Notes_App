@@ -1,7 +1,8 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { save } from '@tauri-apps/plugin-dialog'
-import { api } from '../../api'
+import { api, assetApi } from '../../api'
 import {
+  bytesToBase64,
   computeKbInset,
   diffLines,
   formatAmPmDateTime,
@@ -10,6 +11,7 @@ import {
   friendlyError,
   safeFileName,
 } from '../../utils'
+import { hasAssetRefs } from '../../assets'
 import type { Folder, NoteVersion } from '../../types'
 import { ConfirmDialog, Modal } from '../../components/ui'
 import { toast } from '../../toast'
@@ -40,6 +42,7 @@ import {
   IconExport,
   IconEye,
   IconFolder,
+  IconImage,
   IconPlus,
   IconRedo,
   IconRestore,
@@ -136,6 +139,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   const titleRef = useRef<HTMLInputElement>(null)
   const editorRef = useRef<MarkdownEditorHandle>(null)
   const previewRef = useRef<MarkdownPreviewHandle>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   // The lazy preview reports readiness through this callback ref; the scroll
   // alignment effect waits for it so the first split view starts in sync.
@@ -320,6 +324,32 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     // A failed write keeps the user in edit mode so the draft is not lost.
     if (await doSave()) exitEditing()
   }, [doSave, exitEditing])
+
+  /** Import images as assets and insert Markdown references at the caret. */
+  const insertImages = useCallback(async (files: File[]) => {
+    for (const file of files) {
+      try {
+        const bytes = new Uint8Array(await file.arrayBuffer())
+        const asset = await assetApi.import({ data: bytesToBase64(bytes), source: 'note' })
+        editorRef.current?.insertAtCursor(`\n![图片](asset:${asset.id})\n`)
+      } catch (e) {
+        console.error('插入图片失败', e)
+        toast(friendlyError(e))
+        return
+      }
+    }
+  }, [])
+
+  /** Pasting an image from the clipboard stores it and inserts its reference. */
+  const handleEditorPaste = (event: React.ClipboardEvent<HTMLDivElement>) => {
+    const files = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file != null)
+    if (files.length === 0) return
+    event.preventDefault()
+    void insertImages(files)
+  }
 
   // ---- Keyboard-aware editing viewport ----
   // Android edge-to-edge WebViews keep the layout/visual viewport unchanged
@@ -531,13 +561,24 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
       return
     }
     try {
+      // Notes with images export as a ZIP so the Markdown and its images stay
+      // together; plain Markdown stays a single `.md` file.
+      const withImages = hasAssetRefs(content)
       const path = await save({
-        defaultPath: `${safeFileName(title || '未命名')}.md`,
-        filters: [{ name: 'Markdown', extensions: ['md'] }],
+        defaultPath: `${safeFileName(title || '未命名')}.${withImages ? 'zip' : 'md'}`,
+        filters: [
+          withImages
+            ? { name: 'ZIP（含图片）', extensions: ['zip'] }
+            : { name: 'Markdown', extensions: ['md'] },
+        ],
       })
       if (path == null) return
-      await api.exportNoteTo({ noteId: noteIdRef.current, destPath: path })
-      toast('已导出')
+      await api.exportNoteTo({
+        noteId: noteIdRef.current,
+        destPath: path,
+        withAssets: withImages,
+      })
+      toast(withImages ? '已导出（图片随包）' : '已导出')
     } catch (e) {
       console.error(e)
       toast(friendlyError(e))
@@ -671,6 +712,15 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
             <IconClose size={22} />
           </button>
           <div className="edit-bar-actions">
+            <button
+              type="button"
+              className="edit-bar-btn"
+              onClick={() => fileInputRef.current?.click()}
+              onPointerDown={keepFieldFocus}
+              aria-label="插入图片"
+            >
+              <IconImage size={22} />
+            </button>
             <button
               type="button"
               className="edit-bar-btn"
@@ -846,7 +896,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
                       {wordCount}字
                     </span>
                   </div>
-                  <div className="markdown-editor-host" onFocus={enterEditing}>
+                  <div className="markdown-editor-host" onFocus={enterEditing} onPaste={handleEditorPaste}>
                     <MarkdownEditor
                       ref={editorRef}
                       value={content}
@@ -1037,6 +1087,20 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
           </div>
         </Modal>
       )}
+
+      {/* Hidden picker: selected images become assets referenced by id. */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/png,image/jpeg,image/gif,image/webp"
+        multiple
+        hidden
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? [])
+          e.target.value = ''
+          void insertImages(files)
+        }}
+      />
 
       {restoreConfirm && (
         <ConfirmDialog

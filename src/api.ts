@@ -7,6 +7,8 @@ import type {
   AgentRunStatus,
   AgentRunTrigger,
   AgentSettings,
+  AssetData,
+  AssetInfo,
   ChatConversation,
   ChatMessageRecord,
   ConnectionTestResult,
@@ -107,7 +109,8 @@ export const docApi = {
   setFolderPinned: (params: { id: number; pinned: boolean }) =>
     invoke<void>('folder_set_pinned', params),
 
-  exportDoc: (params: { docId: number; destPath: string }) => invoke<void>('export_doc', params),
+  exportDoc: (params: { docId: number; destPath: string; withAssets?: boolean }) =>
+    invoke<void>('export_doc', params),
   exportDocs: (params: { ids: number[]; destPath: string }) => invoke<void>('export_docs', params),
   exportFolder: (params: { folderId: number; destPath: string }) =>
     invoke<void>('export_folder', params),
@@ -341,8 +344,12 @@ export const api = {
   moveNotes: (params: { ids: number[]; folderId: number | null }) => docApi.move(params),
 
   // ---- Export ----
-  exportNoteTo: (params: { noteId: number; destPath: string }) =>
-    docApi.exportDoc({ docId: params.noteId, destPath: params.destPath }),
+  exportNoteTo: (params: { noteId: number; destPath: string; withAssets?: boolean }) =>
+    docApi.exportDoc({
+      docId: params.noteId,
+      destPath: params.destPath,
+      withAssets: params.withAssets,
+    }),
   exportNotesTo: (params: { ids: number[]; destPath: string }) =>
     docApi.exportDocs({ ids: params.ids, destPath: params.destPath }),
   exportFolderTo: (params: { folderId: number; destPath: string }) =>
@@ -554,6 +561,15 @@ export const api = {
     await docApi.delete([id])
     await docApi.purge([id])
   },
+}
+
+/**
+ * 图片资产 API：字节存入应用私有目录，前端只拿 id 或 base64。
+ */
+export const assetApi = {
+  import: (input: { data: string; source?: 'note' | 'chat' | 'import' }) =>
+    invoke<AssetInfo>('asset_import', { input }),
+  data: (id: number) => invoke<AssetData>('asset_data', { id }),
 }
 
 /**

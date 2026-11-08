@@ -7,6 +7,22 @@ export interface Folder {
   createdAt: string
 }
 
+/** Metadata of one stored image; bytes never enter the VFS. */
+export interface AssetInfo {
+  id: number
+  mime: string
+  size: number
+  width: number | null
+  height: number | null
+}
+
+/** One asset's bytes, base64-encoded for previews and chat attachments. */
+export interface AssetData {
+  id: number
+  mime: string
+  data: string
+}
+
 export interface FolderStats {
   total: number
   unclassified: number
@@ -298,6 +314,8 @@ export interface ChatMessageRecord {
   stopReason: string | null
   /** Non-null marks a user row as steering guidance for that run. */
   steerOfRun: number | null
+  /** Image assets attached to a user message; empty for other rows. */
+  imageAssetIds: number[]
   createdAt: string
 }
 
@@ -318,6 +336,8 @@ export interface NewChatMessage {
   isPartial?: boolean
   stopReason?: string | null
   steerOfRun?: number | null
+  /** Image assets attached to a user message (at most four). */
+  imageAssetIds?: number[]
 }
 
 /** Terminal and non-terminal states of one agent run. */

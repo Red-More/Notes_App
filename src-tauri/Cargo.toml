@@ -20,7 +20,7 @@ tauri-build = { version = "2.7.2", features = [] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.12.3", features = ["protocol-asset"] }
+tauri = "2.12.3"
 tauri-plugin-log = "2.10.1"
 tauri-plugin-dialog = "2.8.2"
 tauri-plugin-fs = "2.7.0"
@@ -31,18 +31,14 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # 技能包导入：WebView 上传的 zip/.skill 以 base64 传入 Rust。
 base64 = "0.22"
 # Agent LLM 代理：唯一网络出口，SSE 流式转发；rustls 便于 Android 交叉编译。
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "multipart"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 futures-util = "0.3"
 # Provider base URL validation: HTTPS-only, public host, no credentials.
 url = "2"
-# 媒体资产：内容哈希去重与十六进制文件名。
+# 图片资产：内容哈希用于去重，十六进制哈希作为磁盘文件名。
 sha2 = "0.10"
-# 实体库加盐哈希需要每次安装唯一的随机盐。
-getrandom = "0.3"
-# 可灵 API 使用 AccessKey/SecretKey 签发 HS256 JWT。
-hmac = "0.12"
 hex = "0.4"
-# 视频作业轮询需要异步 sleep；run 编排用到 select!、Notify 与测试运行时。
+# 取消与超时：select!、Notify 与测试运行时。
 tokio = { version = "1", features = ["time", "sync", "macros", "rt"] }
 
 # M2-4b：Android Keystore。凭据密文写 SharedPreferences，加密密钥由 Keystore 生成且不可导出。

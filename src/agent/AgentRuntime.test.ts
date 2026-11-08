@@ -86,6 +86,7 @@ function memoryDeps(conversation: ChatConversation) {
       isPartial: message.isPartial ?? false,
       stopReason: message.stopReason ?? null,
       steerOfRun: message.steerOfRun ?? null,
+      imageAssetIds: message.imageAssetIds ?? [],
       createdAt: stamp(),
     }
     rows.set(conversationId, [...list, record])
@@ -142,6 +143,7 @@ function memoryDeps(conversation: ChatConversation) {
     },
     loadSkills: async () => [],
     loadMcpTools: async () => [],
+    loadAsset: async () => ({ data: '', mime: 'image/png' }),
     createConversation: async (title) => ({ ...conversation, id: 2, title }),
     startRun,
     resumeRun: (conversationId, modelEntry) =>

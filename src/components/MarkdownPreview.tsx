@@ -16,6 +16,7 @@ import {
   type MermaidTheme,
 } from '../editor/mermaid'
 import { renderMarkdownPreview } from '../editor/markdown'
+import { resolveAssetImages } from '../assets'
 import { classifyHref } from '../editor/links'
 import { lineAtOffset, offsetForLine, type PreviewBlock } from '../editor/sync'
 import { copyText } from '../system/clipboard'
@@ -156,6 +157,13 @@ export const MarkdownPreview = forwardRef<MarkdownPreviewHandle, MarkdownPreview
         cancelled = true
       }
     }, [html, enhance, theme])
+
+    // Notes reference images as `asset:<id>`; swap in data URLs after commit.
+    useLayoutEffect(() => {
+      const content = contentRef.current
+      if (!content) return
+      resolveAssetImages(content)
+    }, [html])
 
     // Re-measure after every HTML change; block positions drive scroll sync.
     useLayoutEffect(() => {
