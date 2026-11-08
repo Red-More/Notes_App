@@ -1,4 +1,4 @@
-import { Channel, invoke } from '@tauri-apps/api/core'
+import { invoke } from '@tauri-apps/api/core'
 import type {
   AgentModelInfo,
   AgentRun,
@@ -21,22 +21,11 @@ import type {
   LlmParams,
   McpServerInfo,
   McpToolInfo,
-  MediaAsset,
-  MediaGcReport,
-  MediaJob,
-  MediaJobEvent,
-  MediaJobKind,
   ModelApiFormat,
-  ModelKind,
   NewChatMessage,
   Note,
   NoteVersion,
-  PrivacyAuditEntry,
-  PrivacyEntity,
-  PrivacyEntityKind,
-  PrivacyLabel,
   Schedule,
-  SensitivityLevel,
   SkillDetail,
   SkillInput,
   SkillSummary,
@@ -619,7 +608,6 @@ export const chatApi = {
     baseUrl: string
     modelId: string
     fullUrl?: boolean
-    kind?: ModelKind
     apiKey?: string
   }) => invoke<AgentModelInfo>('agent_model_save', { input }),
   deleteModel: (id: string) => invoke<void>('agent_model_delete', { id }),
@@ -644,50 +632,6 @@ export const chatApi = {
   paramsSet: (modelEntryId: string, params: LlmParams) =>
     invoke<void>('agent_params_set', { modelEntryId, params }),
   cancel: (requestId: string) => invoke<void>('agent_cancel', { requestId }),
-}
-
-/**
- * Privacy API (phase A): declared tiers, EDM entity vault, egress audit.
- * Entity plaintext never crosses this boundary; only aliases come back.
- */
-export const privacyApi = {
-  labels: () => invoke<PrivacyLabel[]>('privacy_labels_list'),
-  setLabel: (path: string, level: SensitivityLevel) =>
-    invoke<PrivacyLabel>('privacy_label_set', { path, level }),
-  deleteLabel: (path: string) => invoke<void>('privacy_label_delete', { path }),
-  entities: () => invoke<PrivacyEntity[]>('privacy_entities_list'),
-  addEntity: (kind: PrivacyEntityKind, value: string) =>
-    invoke<PrivacyEntity>('privacy_entity_add', { kind, value }),
-  deleteEntity: (alias: string) => invoke<void>('privacy_entity_delete', { alias }),
-  audit: (limit?: number) => invoke<PrivacyAuditEntry[]>('privacy_audit_list', { limit }),
-}
-
-/**
- * 媒体作业 API：提交后排入 Rust 队列，结果落在 job 或 asset 上。
- */
-export const mediaApi = {
-  /** Submit a job; `onEvent` receives status/progress through a Tauri Channel. */
-  submit: (
-    input: { kind: MediaJobKind; modelEntry: string; params?: Record<string, unknown> },
-    onEvent?: (event: MediaJobEvent) => void,
-  ) => {
-    const channel = new Channel<MediaJobEvent>()
-    if (onEvent) channel.onmessage = onEvent
-    return invoke<MediaJob>('media_job_submit', { input, onEvent: channel })
-  },
-  list: (limit?: number) => invoke<MediaJob[]>('media_job_list', { limit }),
-  get: (id: number) => invoke<MediaJob>('media_job_get', { id }),
-  cancel: (id: number) => invoke<MediaJob>('media_job_cancel', { id }),
-  asset: (id: number) => invoke<MediaAsset>('media_asset_get', { id }),
-  assetPath: (id: number) => invoke<string>('media_asset_path', { id }),
-  /** Base64 bytes for one asset; used to rebuild image context after reload. */
-  assetData: (id: number) => invoke<{ mime: string; data: string }>('media_asset_data', { id }),
-  /** Persist a WebView-supplied audio payload before an ASR job. */
-  storeAsset: (input: { mime: string; data: string }) =>
-    invoke<MediaAsset>('media_asset_store', { input }),
-  /** Reclaim assets not referenced by notes, messages or recent jobs. */
-  gcAssets: (retentionDays?: number) =>
-    invoke<MediaGcReport>('media_asset_gc', { retentionDays }),
 }
 
 /**

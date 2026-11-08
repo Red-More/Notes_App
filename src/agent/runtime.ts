@@ -5,7 +5,7 @@
 
 import { Agent } from '@earendil-works/pi-agent-core'
 import type { AgentMessage, StreamFn } from '@earendil-works/pi-agent-core'
-import type { AssistantMessage, ImageContent, Model, ToolCall, Usage } from '@earendil-works/pi-ai'
+import type { AssistantMessage, Model, ToolCall, Usage } from '@earendil-works/pi-ai'
 import { buildSystemPrompt } from './prompt'
 import { trimContext } from './context'
 import { nativeStreamFn } from './stream'
@@ -27,7 +27,6 @@ export interface AgentProfile {
   /** Optional capability hints persisted per model. */
   contextWindow?: number
   maxTokens?: number
-  supportsImages?: boolean
   reasoning?: boolean
   toolRounds?: number
 }
@@ -53,11 +52,10 @@ export function profileFromSettings(
   entryId: string | undefined,
   model: string | undefined,
 ): AgentProfile | null {
-  // Only chat entries can back the agent; media kinds stay out of the transcript.
-  const chatModels = settings.models.filter((item) => item.kind === 'chat')
+  // The requested entry wins; active is the fallback.
   const entry =
-    chatModels.find((item) => item.id === entryId) ??
-    chatModels.find((item) => item.id === settings.activeId)
+    settings.models.find((item) => item.id === entryId) ??
+    settings.models.find((item) => item.id === settings.activeId)
   if (!entry) return null
   return {
     provider: entry.id,
@@ -90,7 +88,7 @@ export function createAppModel(profile: AgentProfile): Model<string> {
     api: profile.api,
     provider: profile.provider,
     baseUrl: '',
-    input: profile.supportsImages ? ['text', 'image'] : ['text'],
+    input: ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: profile.contextWindow ?? 128000,
     maxTokens: profile.maxTokens ?? 4096,
@@ -144,43 +142,16 @@ function toAssistantMessage(record: ChatMessageRecord, profile: AgentProfile): A
   }
 }
 
-/** Parse the asset-id JSON stored on a user message; bad data becomes empty. */
-export function parseImageAssetIds(raw: string | null | undefined): number[] {
-  if (!raw) return []
-  try {
-    const parsed = JSON.parse(raw) as unknown
-    if (!Array.isArray(parsed)) return []
-    return parsed.filter((id): id is number => Number.isInteger(id) && id > 0)
-  } catch {
-    return []
-  }
-}
-
 /** 数据库记录 → pi transcript。 */
 export async function toAgentMessages(
   records: ChatMessageRecord[],
   profile: AgentProfile,
-  images: Map<number, { mime: string; data: string }> = new Map(),
 ): Promise<AgentMessage[]> {
   const messages: AgentMessage[] = []
   for (const record of records) {
     const timestamp = parseDbTime(record.createdAt).getTime()
     if (record.role === 'user') {
-      const imageIds = parseImageAssetIds(record.imageAssetIds)
-      const imageBlocks: ImageContent[] = imageIds
-        .map((id) => images.get(id))
-        .filter((image): image is { mime: string; data: string } => image !== undefined)
-        .map((image) => ({ type: 'image', data: image.data, mimeType: image.mime }))
-      const content =
-        imageBlocks.length === 0
-          ? record.content
-          : [
-              ...(record.content.trim() === ''
-                ? []
-                : [{ type: 'text' as const, text: record.content }]),
-              ...imageBlocks,
-            ]
-      messages.push({ role: 'user', content, timestamp })
+      messages.push({ role: 'user', content: record.content, timestamp })
     } else if (record.role === 'assistant') {
       // Failure/cancel bubbles are UI state, not model context.
       if (record.isError) continue

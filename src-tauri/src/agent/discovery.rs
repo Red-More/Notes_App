@@ -52,26 +52,10 @@ pub async fn fetch(
     let url = format!("{}{}", base_url, format.models_path());
     let mut request = client.get(&url).timeout(FETCH_TIMEOUT);
     request = match format {
-        ApiFormat::OpenAiChat
-        | ApiFormat::OpenAiResponses
-        | ApiFormat::OpenAiImages
-        | ApiFormat::OpenAiAudio
-        | ApiFormat::OpenAiVideos
-        | ApiFormat::OpenAiTranscriptions
-        | ApiFormat::DashScopeImage
-        | ApiFormat::DashScopeVideo
-        | ApiFormat::DashScopeTts
-        | ApiFormat::VolcVideo => request.bearer_auth(api_key),
+        ApiFormat::OpenAiChat | ApiFormat::OpenAiResponses => request.bearer_auth(api_key),
         ApiFormat::AnthropicMessages => request
             .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01"),
-        ApiFormat::ElevenLabsTts => request.header("xi-api-key", api_key),
-        // Kling has no public model-list endpoint; the model name is chosen by hand.
-        ApiFormat::KlingVideo => {
-            return Err(ToolError::invalid(
-                "可灵不支持自动发现模型，请手动填写 Model ID",
-            ));
-        }
     };
     let resp = request
         .send()
@@ -154,39 +138,13 @@ pub async fn test_connection(
             "messages": [{ "role": "user", "content": "ping" }],
             "stream": false,
         }),
-        // Media models have no chat ping; the UI disables testing for them.
-        ApiFormat::OpenAiImages
-        | ApiFormat::OpenAiAudio
-        | ApiFormat::OpenAiVideos
-        | ApiFormat::OpenAiTranscriptions
-        | ApiFormat::DashScopeImage
-        | ApiFormat::DashScopeVideo
-        | ApiFormat::DashScopeTts
-        | ApiFormat::VolcVideo
-        | ApiFormat::KlingVideo
-        | ApiFormat::ElevenLabsTts => {
-            return Err(ToolError::invalid("媒体模型暂不支持连接测试"));
-        }
     };
     let mut request = client.post(&url).timeout(FETCH_TIMEOUT).json(&body);
     request = match entry.format {
-        ApiFormat::OpenAiChat
-        | ApiFormat::OpenAiResponses
-        | ApiFormat::OpenAiImages
-        | ApiFormat::OpenAiAudio
-        | ApiFormat::OpenAiVideos
-        | ApiFormat::OpenAiTranscriptions
-        | ApiFormat::DashScopeImage
-        | ApiFormat::DashScopeVideo
-        | ApiFormat::DashScopeTts
-        | ApiFormat::VolcVideo => request.bearer_auth(api_key),
+        ApiFormat::OpenAiChat | ApiFormat::OpenAiResponses => request.bearer_auth(api_key),
         ApiFormat::AnthropicMessages => request
             .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01"),
-        ApiFormat::ElevenLabsTts => request.header("xi-api-key", api_key),
-        ApiFormat::KlingVideo => {
-            return Err(ToolError::invalid("媒体模型暂不支持连接测试"));
-        }
     };
     let started = Instant::now();
     let resp = request

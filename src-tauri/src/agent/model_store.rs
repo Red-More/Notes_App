@@ -40,36 +40,6 @@ pub enum ApiFormat {
     /// `POST <baseUrl>/messages`
     #[serde(rename = "anthropic-messages")]
     AnthropicMessages,
-    /// `POST <baseUrl>/images/generations`
-    #[serde(rename = "openai-images")]
-    OpenAiImages,
-    /// `POST <baseUrl>/audio/speech`
-    #[serde(rename = "openai-audio")]
-    OpenAiAudio,
-    /// `POST <baseUrl>/videos` followed by polling and `/videos/{id}/content`
-    #[serde(rename = "openai-videos")]
-    OpenAiVideos,
-    /// `POST <baseUrl>/audio/transcriptions`
-    #[serde(rename = "openai-transcriptions")]
-    OpenAiTranscriptions,
-    /// DashScope Wanx image synthesis (async task + poll).
-    #[serde(rename = "dashscope-image")]
-    DashScopeImage,
-    /// DashScope Wan text-to-video (async task + poll).
-    #[serde(rename = "dashscope-video")]
-    DashScopeVideo,
-    /// DashScope CosyVoice text-to-speech.
-    #[serde(rename = "dashscope-tts")]
-    DashScopeTts,
-    /// Volcano Ark Seedance video tasks.
-    #[serde(rename = "volc-video")]
-    VolcVideo,
-    /// Kling AI text-to-video (AccessKey:SecretKey JWT).
-    #[serde(rename = "kling-video")]
-    KlingVideo,
-    /// ElevenLabs text-to-speech (`xi-api-key`).
-    #[serde(rename = "elevenlabs-tts")]
-    ElevenLabsTts,
 }
 
 impl ApiFormat {
@@ -79,26 +49,7 @@ impl ApiFormat {
             Self::OpenAiChat => "openai-completions",
             Self::OpenAiResponses => "openai-responses",
             Self::AnthropicMessages => "anthropic-messages",
-            // Media entries never flow through pi-agent; these values are unused.
-            Self::OpenAiImages
-            | Self::OpenAiAudio
-            | Self::OpenAiVideos
-            | Self::OpenAiTranscriptions
-            | Self::DashScopeImage
-            | Self::DashScopeVideo
-            | Self::DashScopeTts
-            | Self::VolcVideo
-            | Self::KlingVideo
-            | Self::ElevenLabsTts => "openai-completions",
         }
-    }
-
-    /// Whether this format belongs to the chat/agent protocol family.
-    pub fn is_chat(self) -> bool {
-        matches!(
-            self,
-            Self::OpenAiChat | Self::OpenAiResponses | Self::AnthropicMessages
-        )
     }
 
     /// Path appended to a Base URL when Full URL mode is off.
@@ -109,16 +60,6 @@ impl ApiFormat {
             // Anthropic's canonical base URL ends at the host, so the version
             // prefix belongs to the appended path.
             Self::AnthropicMessages => "/v1/messages",
-            Self::OpenAiImages => "/images/generations",
-            Self::OpenAiAudio => "/audio/speech",
-            Self::OpenAiVideos => "/videos",
-            Self::OpenAiTranscriptions => "/audio/transcriptions",
-            Self::DashScopeImage => "/api/v1/services/aigc/text2image/image-synthesis",
-            Self::DashScopeVideo => "/api/v1/services/aigc/video-generation/video-synthesis",
-            Self::DashScopeTts => "/api/v1/services/aigc/multimodal-generation/generation",
-            Self::VolcVideo => "/api/v3/contents/generations/tasks",
-            Self::KlingVideo => "/v1/videos/text2video",
-            Self::ElevenLabsTts => "/v1/text-to-speech",
         }
     }
 
@@ -128,27 +69,6 @@ impl ApiFormat {
             Self::AnthropicMessages => "/v1/models",
             _ => "/models",
         }
-    }
-}
-
-/// What a model entry is used for. Only `Chat` runs today; the other kinds are
-/// configured ahead of the media pipeline and stay inactive until wired up.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ModelKind {
-    #[default]
-    Chat,
-    Image,
-    Video,
-    Tts,
-    Classify,
-    Asr,
-}
-
-impl ModelKind {
-    /// Whether this entry can currently back the chat agent.
-    pub fn is_chat(self) -> bool {
-        matches!(self, Self::Chat)
     }
 }
 
@@ -164,9 +84,6 @@ pub struct ModelEntry {
     #[serde(default)]
     pub full_url: bool,
     pub model_id: String,
-    /// Capability this entry serves; older records default to chat.
-    #[serde(default)]
-    pub kind: ModelKind,
 }
 
 /// Input for creating or editing a model entry.
@@ -184,8 +101,6 @@ pub struct ModelInput {
     pub model_id: String,
     #[serde(default)]
     pub full_url: bool,
-    #[serde(default)]
-    pub kind: ModelKind,
 }
 
 /// Model row shown in settings; never contains the API key itself.
@@ -198,18 +113,12 @@ pub struct ModelView {
     pub base_url: String,
     pub full_url: bool,
     pub model_id: String,
-    pub kind: ModelKind,
     /// Capability hints mirrored from `LlmParams` so the list can show them.
     pub context_window_input: Option<u32>,
     pub context_window_output: Option<u32>,
-    pub supports_images: Option<bool>,
     /// Optional USD prices mirrored from `LlmParams`.
     pub input_price: Option<f64>,
     pub output_price: Option<f64>,
-    pub image_price: Option<f64>,
-    pub video_second_price: Option<f64>,
-    pub tts_kchar_price: Option<f64>,
-    pub asr_minute_price: Option<f64>,
     pub configured: bool,
 }
 
@@ -263,37 +172,22 @@ pub fn view(conn: &Connection, entry: ModelEntry, configured: bool) -> ModelView
         base_url: entry.base_url,
         full_url: entry.full_url,
         model_id: entry.model_id,
-        kind: entry.kind,
         context_window_input: params.context_window_input,
         context_window_output: params.context_window_output,
-        supports_images: params.supports_images,
         input_price: params.input_price,
         output_price: params.output_price,
-        image_price: params.image_price,
-        video_second_price: params.video_second_price,
-        tts_kchar_price: params.tts_kchar_price,
-        asr_minute_price: params.asr_minute_price,
         configured,
     }
 }
 
-/// Only chat entries may back the chat agent. Heal stale or non-chat pointers.
+/// Heal stale active pointers after edits or deletions.
 fn heal_active(conn: &Connection, models: &[ModelEntry]) -> Result<Option<String>, ToolError> {
     let stored = read_setting(conn, KEY_ACTIVE)?;
     let active = stored
         .as_deref()
-        .filter(|id| {
-            models
-                .iter()
-                .any(|item| item.id == *id && item.kind.is_chat())
-        })
+        .filter(|id| models.iter().any(|item| item.id == *id))
         .map(str::to_string)
-        .or_else(|| {
-            models
-                .iter()
-                .find(|item| item.kind.is_chat())
-                .map(|item| item.id.clone())
-        });
+        .or_else(|| models.first().map(|item| item.id.clone()));
     if active.as_deref() != stored.as_deref() {
         match &active {
             Some(id) => write_setting(conn, KEY_ACTIVE, id)?,
@@ -304,10 +198,7 @@ fn heal_active(conn: &Connection, models: &[ModelEntry]) -> Result<Option<String
 }
 
 pub fn set_active(conn: &Connection, id: &str) -> Result<(), ToolError> {
-    let entry = resolve(conn, id)?;
-    if !entry.kind.is_chat() {
-        return Err(ToolError::invalid("只有对话模型可以设为当前模型"));
-    }
+    resolve(conn, id)?;
     write_setting(conn, KEY_ACTIVE, id)
 }
 
@@ -325,7 +216,6 @@ pub fn save(conn: &Connection, input: ModelInput) -> Result<ModelEntry, ToolErro
         )
     };
     let model_id = validate_model_id(&input.model_id)?;
-    validate_format_for_kind(input.kind, input.format)?;
     let base_url = normalize_anthropic_base(
         validate_base_url(&input.base_url)?,
         input.format,
@@ -348,7 +238,6 @@ pub fn save(conn: &Connection, input: ModelInput) -> Result<ModelEntry, ToolErro
         base_url,
         full_url: input.full_url,
         model_id,
-        kind: input.kind,
     };
     let mut next = all;
     match next.iter_mut().find(|item| item.id == id) {
@@ -467,48 +356,6 @@ fn validate_label(raw: &str) -> Result<String, ToolError> {
         return Err(ToolError::invalid("显示名称包含控制字符"));
     }
     Ok(label.to_string())
-}
-
-fn validate_format_for_kind(kind: ModelKind, format: ApiFormat) -> Result<(), ToolError> {
-    match kind {
-        ModelKind::Chat | ModelKind::Classify if !format.is_chat() => {
-            Err(ToolError::invalid("对话与分类模型必须使用对话协议"))
-        }
-        ModelKind::Image
-            if !matches!(format, ApiFormat::OpenAiImages | ApiFormat::DashScopeImage) =>
-        {
-            Err(ToolError::invalid(
-                "图像模型必须使用 OpenAI Images 或 DashScope 协议",
-            ))
-        }
-        ModelKind::Tts
-            if !matches!(
-                format,
-                ApiFormat::OpenAiAudio | ApiFormat::DashScopeTts | ApiFormat::ElevenLabsTts
-            ) =>
-        {
-            Err(ToolError::invalid(
-                "语音模型必须使用 OpenAI Audio、DashScope 或 ElevenLabs 协议",
-            ))
-        }
-        ModelKind::Video
-            if !matches!(
-                format,
-                ApiFormat::OpenAiVideos
-                    | ApiFormat::DashScopeVideo
-                    | ApiFormat::VolcVideo
-                    | ApiFormat::KlingVideo
-            ) =>
-        {
-            Err(ToolError::invalid(
-                "视频模型必须使用 OpenAI Videos、DashScope、火山或可灵协议",
-            ))
-        }
-        ModelKind::Asr if format != ApiFormat::OpenAiTranscriptions => Err(ToolError::invalid(
-            "转写模型必须使用 OpenAI Transcriptions 协议",
-        )),
-        _ => Ok(()),
-    }
 }
 
 fn validate_model_id(raw: &str) -> Result<String, ToolError> {

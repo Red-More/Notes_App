@@ -287,8 +287,6 @@ export interface ChatMessageRecord {
   thinking: string | null
   /** Provider signature required to replay Anthropic thinking blocks. */
   thinkingSignature: string | null
-  /** JSON array of media asset ids attached to this user message. */
-  imageAssetIds: string | null
   /** Agent run that owns/produced this row. */
   runId: number | null
   /** JSON arguments of a tool call, kept so history can restore the card. */
@@ -314,7 +312,6 @@ export interface NewChatMessage {
   usage?: MessageUsage | null
   thinking?: string | null
   thinkingSignature?: string | null
-  imageAssetIds?: string | null
   runId?: number | null
   toolArgs?: string | null
   toolDurationMs?: number | null
@@ -374,24 +371,7 @@ export interface AgentRunStart {
 }
 
 /** Wire protocol used by one user-defined model entry. */
-export type ModelApiFormat =
-  | 'openai-chat'
-  | 'openai-responses'
-  | 'anthropic-messages'
-  | 'openai-images'
-  | 'openai-audio'
-  | 'openai-videos'
-  | 'openai-transcriptions'
-  // Vendor-native media protocols (6.4.6).
-  | 'dashscope-image'
-  | 'dashscope-video'
-  | 'dashscope-tts'
-  | 'volc-video'
-  | 'kling-video'
-  | 'elevenlabs-tts'
-
-/** Capability a model entry is configured for; only `chat` runs today. */
-export type ModelKind = 'chat' | 'image' | 'video' | 'tts' | 'classify' | 'asr'
+export type ModelApiFormat = 'openai-chat' | 'openai-responses' | 'anthropic-messages'
 
 /** One user-added model; never contains the API key itself. */
 export interface AgentModelInfo {
@@ -402,18 +382,12 @@ export interface AgentModelInfo {
   /** True when the URL is the complete endpoint (no path appended). */
   fullUrl: boolean
   modelId: string
-  kind: ModelKind
   /** Capability hints mirrored from the per-model params. */
   contextWindowInput?: number
   contextWindowOutput?: number
-  supportsImages?: boolean
   /** Optional USD prices mirrored into the capability matrix. */
   inputPrice?: number
   outputPrice?: number
-  imagePrice?: number
-  videoSecondPrice?: number
-  ttsKcharPrice?: number
-  asrMinutePrice?: number
   configured: boolean
 }
 
@@ -421,44 +395,6 @@ export interface AgentModelInfo {
 export interface AgentSettings {
   activeId: string | null
   models: AgentModelInfo[]
-}
-
-/** Data tier: 0 = S0, 1 = S1, 2 = S2. */
-export type SensitivityLevel = 0 | 1 | 2
-
-/** One declared path-prefix rule; longest prefix wins. */
-export interface PrivacyLabel {
-  pathPrefix: string
-  level: SensitivityLevel
-  source: string
-  updatedAt: string
-}
-
-/** Entity kinds supported by the EDM vault. */
-export type PrivacyEntityKind =
-  | 'person'
-  | 'organization'
-  | 'address'
-  | 'phone'
-  | 'email'
-  | 'account'
-
-/** Vault row: the plaintext value is never returned to the WebView. */
-export interface PrivacyEntity {
-  alias: string
-  kind: PrivacyEntityKind
-  createdAt: string
-}
-
-/** One egress decision; counts only, never document text. */
-export interface PrivacyAuditEntry {
-  id: number
-  createdAt: string
-  target: string
-  purpose: string
-  entityKinds: string
-  bytes: number
-  decision: 'allow' | 'block'
 }
 
 /** Layered per-model generation parameters persisted by Rust. */
@@ -478,17 +414,12 @@ export interface LlmParams {
   contextWindowInput?: number
   contextWindowOutput?: number
   toolRounds?: number
-  supportsImages?: boolean
   thinkingMode?: 'default' | 'on' | 'off'
   /** Prompt-cache preference; unset sends no cache hints. */
   cacheRetention?: 'none' | 'short' | 'long'
   /** Optional USD prices; metadata only, never sent in request bodies. */
   inputPrice?: number
   outputPrice?: number
-  imagePrice?: number
-  videoSecondPrice?: number
-  ttsKcharPrice?: number
-  asrMinutePrice?: number
 }
 
 export interface ConnectionTestResult {
@@ -516,57 +447,4 @@ export interface McpToolInfo {
   qualified: string
   description: string
   inputSchema: Record<string, unknown>
-}
-
-/** Background media job; decoupled from a chat run. */
-export type MediaJobKind = 'image' | 'video' | 'tts' | 'classify' | 'asr'
-export type MediaJobStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
-
-export interface MediaJob {
-  id: number
-  kind: MediaJobKind
-  modelEntry: string
-  status: MediaJobStatus
-  progress: number
-  assetId?: number | null
-  error?: string | null
-  /** JSON answer for classification jobs. */
-  result?: string | null
-  /** Billable units (images / seconds / kchar / minutes) for successful jobs. */
-  units?: number | null
-  /** USD cost derived from the model entry's prices. */
-  costUsd?: number | null
-  createdAt: string
-  updatedAt: string
-}
-
-/** Result of reclaiming unreferenced media assets. */
-export interface MediaGcReport {
-  removed: number
-  freedBytes: number
-  kept: number
-}
-
-/** Progress snapshot pushed by Rust over a Tauri Channel. */
-export interface MediaJobEvent {
-  jobId: number
-  status: MediaJobStatus
-  progress: number
-  assetId?: number | null
-  error?: string | null
-  units?: number | null
-  costUsd?: number | null
-}
-
-/** Stored media file; the binary lives under app data, not in SQLite. */
-export interface MediaAsset {
-  id: number
-  sha256: string
-  mime: string
-  size: number
-  width?: number | null
-  height?: number | null
-  durationMs?: number | null
-  sourceJob?: number | null
-  createdAt: string
 }

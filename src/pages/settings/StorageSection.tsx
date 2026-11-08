@@ -1,18 +1,10 @@
-import { useState } from 'react'
 import { api } from '../../api'
-import { IconFolder, IconImage, IconSearch } from '../../components/Icons'
+import { IconFolder, IconSearch } from '../../components/Icons'
 import { toast } from '../../toast'
-import MediaUsageSection from './MediaUsageSection'
-import {
-  SettingsExpandableRow,
-  SettingsGroup,
-  SettingsRow,
-  SaveStatus,
-} from './SettingsPrimitives'
+import { SettingsGroup, SettingsRow, SaveStatus } from './SettingsPrimitives'
 import { useSettingSave } from './useSettingSave'
 
 export default function StorageSection() {
-  const [mediaOpen, setMediaOpen] = useState(false)
   const rebuild = useSettingSave()
 
   const rebuildIndex = () => {
@@ -24,19 +16,6 @@ export default function StorageSection() {
 
   return (
     <SettingsGroup id="settings-storage" title="存储与数据" hint="清理操作不可撤销，请谨慎执行">
-      <SettingsExpandableRow
-        icon={<IconImage size={20} />}
-        title="媒体缓存"
-        subtitle="图片、视频与语音产物；可回收未引用文件"
-        value="查看与清理"
-        open={mediaOpen}
-        onToggle={() => setMediaOpen((open) => !open)}
-      >
-        <div className="settings-embed">
-          <MediaUsageSection />
-        </div>
-      </SettingsExpandableRow>
-
       <SettingsRow
         icon={<IconSearch size={20} />}
         title="重建检索索引"

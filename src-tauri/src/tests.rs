@@ -5,16 +5,11 @@
 use rusqlite::params;
 use serde_json::Value;
 
-use crate::agent::model_store::{self, ApiFormat, ModelEntry, ModelInput, ModelKind};
+use crate::agent::model_store::{self, ApiFormat, ModelEntry, ModelInput};
 use crate::agent::params::{self, LlmParams};
 use crate::agent::{conversations, discovery, llm, runs, secrets};
 use crate::db;
 use crate::docs::{self, types::DocFields, versions};
-use crate::media::{assets, jobs};
-use crate::privacy::entity::EntityKind;
-use crate::privacy::policy::Level;
-use crate::privacy::recognizers::DetectedKind;
-use crate::privacy::{egress, entity, policy, recognizers};
 use crate::skills::{self, SkillInput};
 use crate::vfs::acl::Principal;
 use crate::vfs::cap_gate;
@@ -34,8 +29,6 @@ fn test_vfs() -> VirtualFs {
          ('/life', 'allow-write', NULL, datetime('now','localtime'));",
     )
     .expect("seed permissive test acl");
-    // Mirror the production startup order: seeds live in the business layer.
-    policy::seed_defaults(&conn).expect("seed privacy defaults");
     VirtualFs::new(conn)
 }
 
@@ -1208,7 +1201,6 @@ fn add_model(vfs: &VirtualFs, label: &str, model_id: &str) -> ModelEntry {
             base_url: "https://api.example.com/v1".into(),
             model_id: model_id.into(),
             full_url: false,
-            kind: ModelKind::Chat,
         },
     )
     .expect("model should be created")
@@ -1226,7 +1218,7 @@ fn put_setting(vfs: &VirtualFs, key: &str, value: &str) {
 }
 
 #[test]
-fn schema_creates_agent_and_media_tables() {
+fn schema_creates_agent_tables() {
     let vfs = test_vfs();
     let conn = vfs.conn();
     let version: i64 = conn
@@ -1243,12 +1235,6 @@ fn schema_creates_agent_and_media_tables() {
         "agent_runs",
         "agent_events",
         "settings",
-        "media_jobs",
-        "media_assets",
-        "sensitivity_labels",
-        "doc_classification",
-        "entity_vault",
-        "egress_audit",
     ] {
         let count: i64 = conn
             .query_row(
@@ -1288,7 +1274,6 @@ fn conversation_lifecycle_persists_messages() {
                 usage: None,
                 thinking: None,
                 thinking_signature: None,
-                image_asset_ids: Some("[7]".into()),
                 ..Default::default()
             },
             conversations::NewMessage {
@@ -1310,7 +1295,6 @@ fn conversation_lifecycle_persists_messages() {
                 }),
                 thinking: Some("先确认日期再写入".into()),
                 thinking_signature: Some("sig-1".into()),
-                image_asset_ids: None,
                 ..Default::default()
             },
         ],
@@ -1321,7 +1305,6 @@ fn conversation_lifecycle_persists_messages() {
     let messages = conversations::messages(&vfs, conv.id).unwrap();
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0].role, "user");
-    assert_eq!(messages[0].image_asset_ids.as_deref(), Some("[7]"));
     assert!(messages[1].tool_calls.is_some());
     let usage = messages[1]
         .usage
@@ -1367,7 +1350,6 @@ fn truncate_after_keeps_the_user_turn_for_retry() {
                 usage: None,
                 thinking: None,
                 thinking_signature: None,
-                image_asset_ids: None,
                 ..Default::default()
             },
             conversations::NewMessage {
@@ -1380,7 +1362,6 @@ fn truncate_after_keeps_the_user_turn_for_retry() {
                 usage: None,
                 thinking: None,
                 thinking_signature: None,
-                image_asset_ids: None,
                 ..Default::default()
             },
         ],
@@ -1412,7 +1393,6 @@ fn conversation_rejects_unknown_roles_and_bad_titles() {
             usage: None,
             thinking: None,
             thinking_signature: None,
-            image_asset_ids: None,
             ..Default::default()
         }],
     );
@@ -1651,7 +1631,6 @@ fn model_registry_starts_empty_and_persists_crud() {
             base_url: "https://api.example.com/v1".into(),
             model_id: "demo-model-2".into(),
             full_url: true,
-            kind: ModelKind::Chat,
         },
     )
     .unwrap();
@@ -1691,266 +1670,6 @@ fn model_registry_starts_empty_and_persists_crud() {
 }
 
 #[test]
-fn model_kind_gates_chat_activation() {
-    let vfs = test_vfs();
-    let image = model_store::save(
-        vfs.conn(),
-        ModelInput {
-            id: String::new(),
-            label: "图像模型".into(),
-            format: ApiFormat::OpenAiImages,
-            base_url: "https://api.example.com/v1".into(),
-            model_id: "image-demo".into(),
-            full_url: false,
-            kind: ModelKind::Image,
-        },
-    )
-    .unwrap();
-    assert!(
-        model_store::set_active(vfs.conn(), &image.id).is_err(),
-        "media entries cannot back the chat agent"
-    );
-    assert!(
-        model_store::settings(vfs.conn(), &[])
-            .unwrap()
-            .active_id
-            .is_none(),
-        "a media-only registry has no active chat model"
-    );
-
-    let chat = add_model(&vfs, "对话模型", "chat-demo");
-    let settings = model_store::settings(vfs.conn(), &[]).unwrap();
-    assert_eq!(settings.active_id.as_deref(), Some(chat.id.as_str()));
-    assert_eq!(settings.models[0].kind, ModelKind::Image);
-    assert_eq!(settings.models[1].kind, ModelKind::Chat);
-
-    // Turning the active chat entry into a media kind must heal the pointer.
-    model_store::save(
-        vfs.conn(),
-        ModelInput {
-            id: chat.id.clone(),
-            label: "对话模型".into(),
-            format: ApiFormat::OpenAiImages,
-            base_url: "https://api.example.com/v1".into(),
-            model_id: "chat-demo".into(),
-            full_url: false,
-            kind: ModelKind::Image,
-        },
-    )
-    .unwrap();
-    assert!(model_store::settings(vfs.conn(), &[])
-        .unwrap()
-        .active_id
-        .is_none());
-}
-
-#[test]
-fn media_jobs_persist_cancel_and_recover() {
-    let vfs = test_vfs();
-    let image = model_store::save(
-        vfs.conn(),
-        ModelInput {
-            id: String::new(),
-            label: "图像模型".into(),
-            format: ApiFormat::OpenAiImages,
-            base_url: "https://api.example.com/v1".into(),
-            model_id: "image-demo".into(),
-            full_url: false,
-            kind: ModelKind::Image,
-        },
-    )
-    .unwrap();
-    let job = jobs::submit(
-        vfs.conn(),
-        jobs::NewJob {
-            kind: jobs::JobKind::Image,
-            model_entry: image.id.clone(),
-            params: serde_json::json!({"prompt": "封面"}),
-        },
-    )
-    .unwrap();
-    assert_eq!(job.status, jobs::JobStatus::Pending);
-    assert_eq!(job.progress, 0);
-    assert_eq!(jobs::list(vfs.conn(), 10).unwrap().len(), 1);
-
-    // A chat entry cannot back an image job.
-    let chat = add_model(&vfs, "对话模型", "chat-demo");
-    assert!(jobs::submit(
-        vfs.conn(),
-        jobs::NewJob {
-            kind: jobs::JobKind::Image,
-            model_entry: chat.id,
-            params: Value::Null,
-        },
-    )
-    .is_err());
-
-    let running = jobs::mark_running(vfs.conn(), job.id).unwrap();
-    assert_eq!(running.status, jobs::JobStatus::Running);
-    jobs::set_progress(vfs.conn(), job.id, 40).unwrap();
-    assert_eq!(jobs::get(vfs.conn(), job.id).unwrap().progress, 40);
-
-    // A process restart cannot resume a running job.
-    assert_eq!(jobs::recover(vfs.conn()).unwrap(), 1);
-    let failed = jobs::get(vfs.conn(), job.id).unwrap();
-    assert_eq!(failed.status, jobs::JobStatus::Failed);
-    assert!(failed.error.is_some());
-
-    let second = jobs::submit(
-        vfs.conn(),
-        jobs::NewJob {
-            kind: jobs::JobKind::Image,
-            model_entry: image.id.clone(),
-            params: Value::Null,
-        },
-    )
-    .unwrap();
-    let cancelled = jobs::cancel(vfs.conn(), second.id).unwrap();
-    assert_eq!(cancelled.status, jobs::JobStatus::Cancelled);
-    assert!(jobs::cancel(vfs.conn(), second.id).is_err());
-
-    let third = jobs::submit(
-        vfs.conn(),
-        jobs::NewJob {
-            kind: jobs::JobKind::Image,
-            model_entry: image.id,
-            params: Value::Null,
-        },
-    )
-    .unwrap();
-    jobs::mark_running(vfs.conn(), third.id).unwrap();
-    let done = jobs::finish(
-        vfs.conn(),
-        third.id,
-        jobs::JobStatus::Succeeded,
-        None,
-        None,
-        None,
-        Some(jobs::Usage {
-            units: 1.0,
-            cost_usd: 0.04,
-        }),
-    )
-    .unwrap();
-    assert_eq!(done.status, jobs::JobStatus::Succeeded);
-    assert_eq!(done.progress, 100);
-    assert_eq!(done.units, Some(1.0));
-    assert_eq!(done.cost_usd, Some(0.04));
-    // Terminal jobs are never touched by restart recovery.
-    assert_eq!(jobs::recover(vfs.conn()).unwrap(), 0);
-}
-
-#[test]
-fn asr_jobs_use_transcription_models() {
-    let vfs = test_vfs();
-    let asr = model_store::save(
-        vfs.conn(),
-        ModelInput {
-            id: String::new(),
-            label: "转写模型".into(),
-            format: ApiFormat::OpenAiTranscriptions,
-            base_url: "https://api.example.com/v1".into(),
-            model_id: "whisper-demo".into(),
-            full_url: false,
-            kind: ModelKind::Asr,
-        },
-    )
-    .unwrap();
-    let job = jobs::submit(
-        vfs.conn(),
-        jobs::NewJob {
-            kind: jobs::JobKind::Asr,
-            model_entry: asr.id,
-            params: serde_json::json!({"assetId": 1}),
-        },
-    )
-    .unwrap();
-    assert_eq!(job.kind, jobs::JobKind::Asr);
-    assert_eq!(job.status, jobs::JobStatus::Pending);
-}
-
-#[test]
-fn media_assets_dedupe_by_content_hash() {
-    let vfs = test_vfs();
-    let dir = std::env::temp_dir().join(format!("notes-media-{}", std::process::id()));
-    let bytes = b"fake-png-bytes";
-    let first = assets::store(
-        vfs.conn(),
-        &dir,
-        bytes,
-        "image/png",
-        assets::AssetMeta::default(),
-    )
-    .unwrap();
-    let second = assets::store(
-        vfs.conn(),
-        &dir,
-        bytes,
-        "image/png",
-        assets::AssetMeta::default(),
-    )
-    .unwrap();
-    assert_eq!(first.id, second.id, "identical bytes share one asset row");
-    assert_eq!(first.sha256, second.sha256);
-    let file = assets::path(&dir, &first);
-    assert!(file.exists());
-    assert_eq!(std::fs::read(&file).unwrap(), bytes);
-    assert!(assets::store(
-        vfs.conn(),
-        &dir,
-        b"",
-        "image/png",
-        assets::AssetMeta::default()
-    )
-    .is_err());
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn asset_gc_keeps_chat_attachments_until_unreferenced() {
-    let vfs = test_vfs();
-    let dir = std::env::temp_dir().join(format!("notes-gc-{}", std::process::id()));
-    let asset = assets::store(
-        vfs.conn(),
-        &dir,
-        b"gc-image",
-        "image/png",
-        assets::AssetMeta::default(),
-    )
-    .unwrap();
-    let entry = add_model(&vfs, "GC 模型", "gc-model");
-    let conv = conversations::create(&vfs, None, entry.id.clone(), entry.model_id.clone()).unwrap();
-    conversations::append(
-        &vfs,
-        conv.id,
-        vec![conversations::NewMessage {
-            role: "user".into(),
-            content: "看图".into(),
-            tool_calls: None,
-            tool_call_id: None,
-            tool_name: None,
-            is_error: false,
-            usage: None,
-            thinking: None,
-            thinking_signature: None,
-            image_asset_ids: Some(format!("[{}]", asset.id)),
-            ..Default::default()
-        }],
-    )
-    .unwrap();
-
-    let kept = assets::gc(vfs.conn(), &dir, 30).unwrap();
-    assert_eq!(kept.removed, 0, "attached images must survive GC");
-    assert_eq!(kept.kept, 1);
-
-    conversations::delete(&vfs, conv.id).unwrap();
-    let removed = assets::gc(vfs.conn(), &dir, 30).unwrap();
-    assert_eq!(removed.removed, 1, "orphan images are reclaimed");
-    assert!(!assets::path(&dir, &asset).exists());
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
 fn model_registry_validates_base_url_and_labels() {
     let vfs = test_vfs();
     let invalid = [
@@ -1973,25 +1692,10 @@ fn model_registry_validates_base_url_and_labels() {
                 base_url: base_url.into(),
                 model_id: "demo".into(),
                 full_url: false,
-                kind: ModelKind::Chat,
             },
         );
         assert!(result.is_err(), "{base_url} must be rejected");
     }
-
-    assert!(model_store::save(
-        vfs.conn(),
-        ModelInput {
-            id: String::new(),
-            label: "错配协议".into(),
-            format: ApiFormat::OpenAiChat,
-            base_url: "https://api.example.com/v1".into(),
-            model_id: "image-demo".into(),
-            full_url: false,
-            kind: ModelKind::Image,
-        }
-    )
-    .is_err());
 
     let no_model = model_store::save(
         vfs.conn(),
@@ -2002,7 +1706,6 @@ fn model_registry_validates_base_url_and_labels() {
             base_url: "https://api.example.com/v1".into(),
             model_id: String::new(),
             full_url: false,
-            kind: ModelKind::Chat,
         },
     );
     assert!(no_model.is_err(), "Model ID is required");
@@ -2021,7 +1724,6 @@ fn model_registry_validates_base_url_and_labels() {
             base_url: "https://api.example.com/v1".into(),
             model_id: "display-fallback".into(),
             full_url: false,
-            kind: ModelKind::Chat,
         },
     )
     .is_err());
@@ -2045,26 +1747,6 @@ fn model_endpoints_cover_all_formats() {
             "https://api.example.com",
             "/v1/messages",
         ),
-        (
-            ApiFormat::OpenAiImages,
-            "https://api.example.com/v1",
-            "/images/generations",
-        ),
-        (
-            ApiFormat::OpenAiAudio,
-            "https://api.example.com/v1",
-            "/audio/speech",
-        ),
-        (
-            ApiFormat::OpenAiVideos,
-            "https://api.example.com/v1",
-            "/videos",
-        ),
-        (
-            ApiFormat::OpenAiTranscriptions,
-            "https://api.example.com/v1",
-            "/audio/transcriptions",
-        ),
     ] {
         let entry = ModelEntry {
             id: "custom_1".into(),
@@ -2073,7 +1755,6 @@ fn model_endpoints_cover_all_formats() {
             base_url: base_url.into(),
             full_url: false,
             model_id: "demo-model".into(),
-            kind: ModelKind::Chat,
         };
         assert_eq!(model_store::endpoint(&entry), format!("{base_url}{suffix}"));
         let full = ModelEntry {
@@ -2100,7 +1781,6 @@ fn anthropic_base_url_normalizes_legacy_v1_suffix() {
             base_url: "https://api.example.com/v1".into(),
             model_id: "claude-demo".into(),
             full_url: false,
-            kind: ModelKind::Chat,
         },
     )
     .unwrap();
@@ -2119,7 +1799,6 @@ fn anthropic_base_url_normalizes_legacy_v1_suffix() {
             base_url: "https://api.example.com/v1/messages".into(),
             model_id: "claude-demo".into(),
             full_url: true,
-            kind: ModelKind::Chat,
         },
     )
     .unwrap();
@@ -2243,7 +1922,6 @@ fn test_entry(id: &str, model_id: &str) -> ModelEntry {
         base_url: "https://api.example.com/v1".into(),
         full_url: false,
         model_id: model_id.into(),
-        kind: ModelKind::Chat,
     }
 }
 
@@ -2462,15 +2140,10 @@ fn llm_params_roundtrip_and_validation() {
         context_window_input: Some(8192),
         context_window_output: Some(1024),
         tool_rounds: Some(500),
-        supports_images: Some(false),
         thinking_mode: Some(params::ThinkingMode::Default),
         cache_retention: Some(params::CacheRetention::Long),
         input_price: Some(0.5),
         output_price: Some(1.5),
-        image_price: None,
-        video_second_price: None,
-        tts_kchar_price: None,
-        asr_minute_price: None,
     };
     params::save(vfs.conn(), "custom_1", &valid).unwrap();
     let loaded = params::get(vfs.conn(), "custom_1");
@@ -2481,7 +2154,7 @@ fn llm_params_roundtrip_and_validation() {
     invalid.temperature = Some(3.0);
     assert!(params::save(vfs.conn(), "custom_1", &invalid).is_err());
     let mut invalid = valid.clone();
-    invalid.image_price = Some(-1.0);
+    invalid.input_price = Some(-1.0);
     assert!(params::save(vfs.conn(), "custom_1", &invalid).is_err());
     let mut invalid = valid.clone();
     invalid.timeout_seconds = Some(1);
@@ -3366,233 +3039,3 @@ fn thousand_document_search_performance() {
 }
 
 // ---------------------------------------------------------------------------
-// Phase A: privacy core (labels, recognizers, EDM vault, egress gate)
-// ---------------------------------------------------------------------------
-
-fn privacy_store(tag: &str) -> (std::path::PathBuf, secrets::SecretStore) {
-    let dir = std::env::temp_dir().join(format!("lifeos-privacy-{}-{}", std::process::id(), tag));
-    let _ = std::fs::remove_dir_all(&dir);
-    let store = secrets::SecretStore::new(dir.join("agent-secrets.json"));
-    (dir, store)
-}
-
-fn privacy_messages(tool_path: Option<&str>, text: &str) -> Vec<Value> {
-    let mut messages = vec![serde_json::json!({ "role": "user", "content": text })];
-    if let Some(path) = tool_path {
-        messages.push(serde_json::json!({
-            "role": "assistant",
-            "content": [{
-                "type": "toolCall",
-                "id": "call-1",
-                "name": "fs_read",
-                "arguments": { "path": path }
-            }]
-        }));
-        messages.push(serde_json::json!({
-            "role": "toolResult",
-            "toolCallId": "call-1",
-            "content": [{ "type": "text", "text": "doc body" }]
-        }));
-    }
-    messages
-}
-
-#[test]
-fn privacy_recognizers_validate_checksums_and_normalize_variants() {
-    let text = "身份证11010519491231002X，手机１３８００１３８０００，邮箱 a.b@example.com，卡号 4111 1111 1111 1111";
-    let spans = recognizers::scan(text);
-    assert!(spans.iter().any(|s| s.kind == DetectedKind::GovtId));
-    assert!(spans.iter().any(|s| s.kind == DetectedKind::Phone));
-    assert!(spans.iter().any(|s| s.kind == DetectedKind::Email));
-    assert!(spans.iter().any(|s| s.kind == DetectedKind::BankCard));
-
-    // A single wrong check digit must not be treated as a government ID.
-    let bad = recognizers::scan("110105194912310021");
-    assert!(!bad.iter().any(|s| s.kind == DetectedKind::GovtId));
-
-    assert_eq!(
-        recognizers::normalize_value(DetectedKind::Phone, "138-0013-8000"),
-        "13800138000"
-    );
-    assert_eq!(
-        recognizers::normalize_value(DetectedKind::Phone, "+86 138 0013 8000"),
-        "13800138000"
-    );
-    assert_eq!(recognizers::normalize_generic("张 三"), "张三");
-}
-
-#[test]
-fn privacy_labels_apply_longest_prefix_and_keep_defaults() {
-    let (dir, store) = privacy_store("labels");
-    let vfs = test_vfs();
-    let snapshot = policy::Snapshot::load(vfs.conn(), &store).unwrap();
-    assert_eq!(
-        snapshot.declared_level("/life/diary/2026-11-01.md"),
-        Level::S0
-    );
-    assert_eq!(snapshot.declared_level("/life/notes/a/b.md"), Level::S1);
-    assert_eq!(snapshot.declared_level("/life/random.md"), Level::S1);
-
-    policy::set_label(vfs.conn(), "/life/notes", 2).unwrap();
-    policy::set_label(vfs.conn(), "/life/notes/secret.md", 0).unwrap();
-    let snapshot = policy::Snapshot::load(vfs.conn(), &store).unwrap();
-    assert_eq!(snapshot.declared_level("/life/notes/a.md"), Level::S2);
-    assert_eq!(snapshot.declared_level("/life/notes/secret.md"), Level::S0);
-
-    assert!(
-        policy::delete_label(vfs.conn(), "/life/diary").is_err(),
-        "built-in S0 labels must not be deletable"
-    );
-    policy::delete_label(vfs.conn(), "/life/notes/secret.md").unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn privacy_egress_blocks_s0_paths_and_s1_text() {
-    let (dir, store) = privacy_store("egress-block");
-    let vfs = test_vfs();
-    let snapshot = policy::Snapshot::load(vfs.conn(), &store).unwrap();
-
-    let s0 = egress::guard(
-        &privacy_messages(Some("/life/diary/2026-11-01.md"), "帮我总结这篇日记"),
-        &snapshot,
-    );
-    assert!(s0.blocked(), "S0 document must never reach the cloud");
-    assert_eq!(s0.code.as_deref(), Some("s0"));
-    assert!(s0.paths.iter().any(|p| p == "/life/diary/2026-11-01.md"));
-
-    let s1 = egress::guard(
-        &privacy_messages(None, "我的手机号是 138 0013 8000"),
-        &snapshot,
-    );
-    assert!(s1.blocked(), "un-redacted S1 must be blocked in phase A");
-    assert_eq!(s1.code.as_deref(), Some("s1_unredacted"));
-    assert_eq!(s1.entity_kinds.get("phone"), Some(&1));
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn privacy_egress_allows_s2_and_records_audit() {
-    let (dir, store) = privacy_store("egress-allow");
-    let vfs = test_vfs();
-    policy::set_label(vfs.conn(), "/life/notes", 2).unwrap();
-    let snapshot = policy::Snapshot::load(vfs.conn(), &store).unwrap();
-
-    let ok = egress::guard(
-        &privacy_messages(Some("/life/notes/a.md"), "请润色这段话"),
-        &snapshot,
-    );
-    assert!(!ok.blocked());
-    assert_eq!(ok.decision, "allow");
-    egress::record_audit(vfs.conn(), "entry-1", "chat", &ok).unwrap();
-    let rows = egress::list_audit(vfs.conn(), 5).unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].decision, "allow");
-    assert_eq!(rows[0].target, "entry-1");
-
-    // A plain question with no document path and no entities stays S2.
-    let plain = egress::guard(&privacy_messages(None, "今天天气怎么样"), &snapshot);
-    assert!(!plain.blocked());
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn privacy_media_gate_blocks_entities_only() {
-    let (dir, store) = privacy_store("egress-media");
-    let vfs = test_vfs();
-    let snapshot = policy::Snapshot::load(vfs.conn(), &store).unwrap();
-
-    // A prompt without sensitive entities must still reach the vendor.
-    let plain = egress::guard_text("画一只橘猫坐在窗台上", &snapshot);
-    assert!(!plain.blocked());
-    assert_eq!(plain.decision, "allow");
-
-    // Both `text` (tts/classify) and `prompt` (image/video) are covered.
-    let params = serde_json::json!({ "text": "画一只橘猫", "prompt": "海边日落" });
-    assert_eq!(jobs::egress_text(&params), "画一只橘猫\n海边日落");
-
-    // Recognizable entities in a media prompt are blocked before upload.
-    let sensitive = egress::guard_text("把这段话发给 a.b@example.com", &snapshot);
-    assert!(sensitive.blocked());
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn privacy_entity_vault_matches_normalized_values() {
-    let (dir, store) = privacy_store("entity");
-    let vfs = test_vfs();
-    let record = entity::add(vfs.conn(), &store, EntityKind::Person, "张 三").unwrap();
-    assert_eq!(record.alias, "PERSON_01");
-
-    // The database only stores a salted hash, never the plaintext.
-    let hash: String = vfs
-        .conn()
-        .query_row(
-            "SELECT norm_hash FROM entity_vault WHERE alias = 'PERSON_01'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert!(!hash.contains('张'));
-
-    let snapshot = policy::Snapshot::load(vfs.conn(), &store).unwrap();
-    let hit = egress::guard(&privacy_messages(None, "今天和张三一起吃饭"), &snapshot);
-    assert!(hit.blocked());
-    assert_eq!(hit.entity_kinds.get("person"), Some(&1));
-
-    entity::remove(vfs.conn(), &store, "PERSON_01").unwrap();
-    let snapshot = policy::Snapshot::load(vfs.conn(), &store).unwrap();
-    let miss = egress::guard(&privacy_messages(None, "今天和张三一起吃饭"), &snapshot);
-    assert!(!miss.blocked());
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn privacy_egress_scopes_glob_and_grep_arguments() {
-    let (dir, store) = privacy_store("scope");
-    let vfs = test_vfs();
-    policy::set_label(vfs.conn(), "/life/notes", 2).unwrap();
-    let snapshot = policy::Snapshot::load(vfs.conn(), &store).unwrap();
-
-    let tool_call = |name: &str, arguments: Value| {
-        vec![
-            serde_json::json!({ "role": "user", "content": "帮我找一下" }),
-            serde_json::json!({
-                "role": "assistant",
-                "content": [{ "type": "toolCall", "id": "call-1", "name": name, "arguments": arguments }]
-            }),
-        ]
-    };
-
-    // A relative glob is anchored at `root`; it must not fall back to /life.
-    let glob = egress::guard(
-        &tool_call(
-            "fs_glob",
-            serde_json::json!({ "pattern": "*.md", "root": "/life/notes" }),
-        ),
-        &snapshot,
-    );
-    assert!(!glob.blocked());
-
-    // `fs_grep.pattern` is search text, not a path.
-    let grep = egress::guard(
-        &tool_call(
-            "fs_grep",
-            serde_json::json!({ "pattern": "会议", "path": "/life/notes" }),
-        ),
-        &snapshot,
-    );
-    assert!(!grep.blocked());
-
-    // Grep without a path can reach every S0 document, so it stays blocked.
-    let broad = egress::guard(
-        &tool_call("fs_grep", serde_json::json!({ "pattern": "会议" })),
-        &snapshot,
-    );
-    assert!(broad.blocked());
-    assert!(broad.paths.iter().any(|p| p == "/life"));
-    let _ = std::fs::remove_dir_all(&dir);
-}
-

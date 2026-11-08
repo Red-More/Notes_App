@@ -12,12 +12,9 @@ use tauri::State;
 use serde::Deserialize;
 
 use crate::agent::discovery::ConnectionTest;
-use crate::agent::model_store::{
-    self, AgentSettings, ApiFormat, ModelEntry, ModelInput, ModelKind, ModelView,
-};
+use crate::agent::model_store::{self, AgentSettings, ApiFormat, ModelEntry, ModelInput, ModelView};
 use crate::agent::params::{self, LlmParams};
 use crate::agent::{conversations, discovery, llm, runs, AgentState};
-use crate::privacy;
 use crate::vfs::error::ToolError;
 use crate::vfs::VfsState;
 
@@ -211,8 +208,6 @@ pub struct ModelSaveInput {
     #[serde(default)]
     pub full_url: bool,
     #[serde(default)]
-    pub kind: ModelKind,
-    #[serde(default)]
     pub api_key: Option<String>,
 }
 
@@ -238,7 +233,6 @@ pub fn agent_model_save(
             base_url: input.base_url,
             model_id: input.model_id,
             full_url: input.full_url,
-            kind: input.kind,
         },
     )?;
     if let Some(key) = new_key {
@@ -289,31 +283,15 @@ pub async fn agent_stream(
     mut request: llm::ProxyRequest,
     on_event: Channel<llm::StreamEvent>,
 ) -> Result<(), ToolError> {
-    // Trim first: the egress gate must judge exactly what would be sent.
     request.context.messages = llm::trim_messages(&request.context.messages);
 
-    let (entry, params, snapshot) = {
+    let (entry, params) = {
         let vfs = crate::lock(&vfs_state.0);
         model_store::cleanup_legacy(vfs.conn(), &state.secrets);
         let entry = model_store::resolve(vfs.conn(), &request.model.provider)?;
-        // Only chat entries can stream into the agent; media kinds stay inactive.
-        if !entry.kind.is_chat() {
-            return Err(ToolError::invalid("该模型条目不是对话模型"));
-        }
         let params = params::get(vfs.conn(), &entry.id);
-        // Labels + decrypted EDM values; loading here keeps the lock short.
-        let snapshot = privacy::policy::Snapshot::load(vfs.conn(), &state.secrets)?;
-        (entry, params, snapshot)
+        (entry, params)
     };
-
-    // The single egress gate: S0 and un-redacted S1 never reach the network.
-    let decision = privacy::egress::guard(&request.context.messages, &snapshot);
-    {
-        let vfs = crate::lock(&vfs_state.0);
-        if let Err(e) = privacy::egress::record_audit(vfs.conn(), &entry.id, "chat", &decision) {
-            log::warn!("egress audit write failed: {e}");
-        }
-    }
 
     let request_id = request.request_id.clone();
     let cancel = state.register_cancel(&request_id);
@@ -322,21 +300,6 @@ pub async fn agent_stream(
             log::warn!("agent stream channel closed: {e}");
         }
     };
-
-    if decision.blocked() {
-        let message = decision
-            .message
-            .clone()
-            .unwrap_or_else(|| "隐私拦截：本次请求不允许发送到云端。".into());
-        emit(llm::StreamEvent::Start);
-        emit(llm::StreamEvent::Error {
-            reason: "error".into(),
-            error_message: message,
-            usage: llm::Usage::default(),
-        });
-        state.clear_cancel(&request_id);
-        return Ok(());
-    }
 
     let result = llm::run(state.inner(), request, &entry, &params, cancel, &emit).await;
     state.clear_cancel(&request_id);
@@ -424,7 +387,6 @@ pub async fn agent_test_connection(
         ),
         full_url: input.full_url,
         model_id: input.model_id.trim().to_string(),
-        kind: ModelKind::Chat,
     };
     if entry.model_id.is_empty() {
         return Err(ToolError::invalid("请先填写 Model ID"));

@@ -10,7 +10,7 @@ describe('error classification', () => {
     expect(classifyMessage('HTTP 429 rate limit')).toBe('rate_limited')
     expect(classifyMessage('request timed out')).toBe('timeout')
     expect(classifyMessage('fetch failed: connection reset')).toBe('network')
-    expect(classifyMessage('隐私策略拦截')).toBe('privacy_blocked')
+    expect(classifyMessage('模型返回格式无法解析')).toBe('protocol_changed')
     expect(classifyMessage('invalid JSON: unexpected token')).toBe('protocol_changed')
     expect(classifyMessage('HTTP 400 rejected')).toBe('provider_rejected')
     expect(classifyMessage('boom')).toBe('internal')

@@ -695,20 +695,6 @@ pub async fn run(
         (ApiFormat::AnthropicMessages, false) => {
             anthropic_json(state, &key, &prepared, &cancel, emit).await
         }
-        // Media entries are executed by the media worker, never the chat loop.
-        (
-            ApiFormat::OpenAiImages
-            | ApiFormat::OpenAiAudio
-            | ApiFormat::OpenAiVideos
-            | ApiFormat::OpenAiTranscriptions
-            | ApiFormat::DashScopeImage
-            | ApiFormat::DashScopeVideo
-            | ApiFormat::DashScopeTts
-            | ApiFormat::VolcVideo
-            | ApiFormat::KlingVideo
-            | ApiFormat::ElevenLabsTts,
-            _,
-        ) => Err("该模型条目不是对话协议".to_string()),
     };
 
     if let Err(message) = result {
@@ -729,18 +715,8 @@ pub async fn run(
 // HTTP / SSE 基础设施
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn send_json(
-    state: &AgentState,
-    url: &str,
-    headers: &[(&str, String)],
-    body: &Value,
-    timeout: Option<std::time::Duration>,
-) -> Result<reqwest::Response, String> {
-    send_json_until(state, url, headers, body, timeout, None).await
-}
-
-/// Cancellation-aware variant. Both the request and the error-body read race
-/// against the token, so a cancel never waits for the read timeout (P0-5).
+/// Cancellation-aware request builder. Both the request and the error-body read
+/// race against the token, so a cancel never waits for the read timeout (P0-5).
 pub(crate) async fn send_json_until(
     state: &AgentState,
     url: &str,
@@ -2213,12 +2189,6 @@ fn emit_raw_tool_block(emit: Emit<'_>, index: usize, id: String, name: String, a
         content_index: index,
         tool_call: ToolCallPayload::new(id, name, args),
     });
-}
-
-pub(crate) async fn read_json_response(resp: reqwest::Response) -> Result<Value, String> {
-    resp.json::<Value>()
-        .await
-        .map_err(|e| format!("响应不是合法 JSON：{e}"))
 }
 
 /// Cancellation-aware JSON body read; the body wait races the token.

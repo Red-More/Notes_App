@@ -80,7 +80,6 @@ function memoryDeps(conversation: ChatConversation) {
       usage: message.usage ?? null,
       thinking: message.thinking ?? null,
       thinkingSignature: message.thinkingSignature ?? null,
-      imageAssetIds: message.imageAssetIds ?? null,
       runId: message.runId ?? null,
       toolArgs: message.toolArgs ?? null,
       toolDurationMs: message.toolDurationMs ?? null,
@@ -130,7 +129,6 @@ function memoryDeps(conversation: ChatConversation) {
 
   const deps: AgentRuntimeDeps = {
     loadMessages: async (conversationId) => [...(rows.get(conversationId) ?? [])],
-    loadImages: async () => new Map(),
     append: async (conversationId, messages) => {
       writes.push({ conversationId, messages })
       for (const message of messages) insert(conversationId, message)
@@ -329,8 +327,8 @@ describe('AgentRuntime', () => {
     const { runtime, store } = runtimeWith(instantStream(() => replies[call++] ?? '空'))
 
     await runtime.open(conversation(), profile)
-    await runtime.prompt({ text: '第一问', attachments: [] })
-    await runtime.prompt({ text: '第二问', attachments: [] })
+    await runtime.prompt({ text: '第一问' })
+    await runtime.prompt({ text: '第二问' })
 
     const items = runtime.snapshot().items
     expect(items.map((item) => `${item.kind}:${item.text}`)).toEqual([
@@ -355,7 +353,7 @@ describe('AgentRuntime', () => {
     const { runtime, store } = runtimeWith(streamFn)
 
     await runtime.open(conversation(), profile)
-    const pending = runtime.prompt({ text: '写一段', attachments: [] })
+    const pending = runtime.prompt({ text: '写一段' })
 
     await waitFor(() => runs.length === 1)
     await waitFor(() => runtime.snapshot().items.some((item) => item.kind === 'assistant'))
@@ -390,7 +388,7 @@ describe('AgentRuntime', () => {
     const { runtime, store } = runtimeWith(streamFn)
 
     await runtime.open(conversation(), profile)
-    const pending = runtime.prompt({ text: '写一段', attachments: [] })
+    const pending = runtime.prompt({ text: '写一段' })
     await waitFor(() => runs.length === 1)
     await waitFor(() => runtime.snapshot().items.some((item) => item.kind === 'assistant'))
     runs[0].delta('切页前', '切页前')
@@ -421,7 +419,7 @@ describe('AgentRuntime', () => {
     const { runtime } = runtimeWith(streamFn)
 
     await runtime.open(conversation(), profile)
-    const pending = runtime.prompt({ text: '问', attachments: [] })
+    const pending = runtime.prompt({ text: '问' })
     await waitFor(() => runs.length === 1)
     await waitFor(() => runtime.snapshot().items.some((item) => item.kind === 'assistant'))
     runs[0].fail('HTTP 429 rate limit exceeded')
@@ -440,7 +438,7 @@ describe('AgentRuntime', () => {
     const { runtime, store } = runtimeWith(streamFn)
 
     await runtime.open(conversation(), profile)
-    const pending = runtime.prompt({ text: '第一问', attachments: [] })
+    const pending = runtime.prompt({ text: '第一问' })
     await waitFor(() => runs.length === 1)
     await waitFor(() => runtime.snapshot().items.some((item) => item.kind === 'assistant'))
     runs[0].delta('半句', '半句')
@@ -469,7 +467,7 @@ describe('AgentRuntime', () => {
     const { runtime, store } = runtimeWith(streamFn)
 
     await runtime.open(conversation(), profile)
-    const pending = runtime.prompt({ text: '写一段', attachments: [] })
+    const pending = runtime.prompt({ text: '写一段' })
     await waitFor(() => runs.length === 1)
     await waitFor(() => runtime.snapshot().items.some((item) => item.kind === 'assistant'))
     runs[0].delta('半句', '半句')
@@ -524,7 +522,7 @@ describe('AgentRuntime', () => {
       schedule: (flush) => flush(),
     })
     await runtime.open(conversation(), profile)
-    await runtime.prompt({ text: parity.prompt, attachments: [] })
+    await runtime.prompt({ text: parity.prompt })
 
     expect(shape(store)).toEqual(
       parity.expectedMessages.map((item) => ({

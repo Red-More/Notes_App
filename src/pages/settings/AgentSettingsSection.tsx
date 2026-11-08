@@ -1,12 +1,6 @@
 import { useEffect, useState } from 'react'
 import { chatApi } from '../../api'
-import type {
-  AgentModelInfo,
-  AgentSettings,
-  LlmParams,
-  ModelApiFormat,
-  ModelKind,
-} from '../../types'
+import type { AgentModelInfo, AgentSettings, LlmParams, ModelApiFormat } from '../../types'
 import { toast } from '../../toast'
 import { friendlyError } from '../../utils'
 import { ConfirmDialog, Modal } from '../../components/ui'
@@ -16,50 +10,7 @@ const FORMAT_OPTIONS: Array<{ key: ModelApiFormat; label: string }> = [
   { key: 'openai-chat', label: 'OpenAI Chat Completions' },
   { key: 'openai-responses', label: 'OpenAI Responses API' },
   { key: 'anthropic-messages', label: 'Anthropic Messages' },
-  { key: 'openai-images', label: 'OpenAI Images' },
-  { key: 'openai-audio', label: 'OpenAI Audio' },
-  { key: 'openai-videos', label: 'OpenAI Videos' },
-  { key: 'openai-transcriptions', label: 'OpenAI Transcriptions' },
-  { key: 'dashscope-image', label: 'DashScope 图像（万相）' },
-  { key: 'dashscope-video', label: 'DashScope 视频（通义万相）' },
-  { key: 'dashscope-tts', label: 'DashScope 语音合成' },
-  { key: 'volc-video', label: '火山方舟 Seedance 视频' },
-  { key: 'kling-video', label: '可灵 Kling 视频' },
-  { key: 'elevenlabs-tts', label: 'ElevenLabs 语音合成' },
 ]
-
-const CHAT_FORMATS: ModelApiFormat[] = ['openai-chat', 'openai-responses', 'anthropic-messages']
-
-/** Only formats the selected capability can actually execute today. */
-function formatOptionsFor(kind: ModelKind): Array<{ key: ModelApiFormat; label: string }> {
-  const allowed =
-    kind === 'image'
-      ? ['openai-images', 'dashscope-image']
-      : kind === 'tts'
-        ? ['openai-audio', 'dashscope-tts', 'elevenlabs-tts']
-        : kind === 'video'
-          ? ['openai-videos', 'dashscope-video', 'volc-video', 'kling-video']
-          : kind === 'asr'
-            ? ['openai-transcriptions']
-            : CHAT_FORMATS
-  return FORMAT_OPTIONS.filter((item) => allowed.includes(item.key))
-}
-
-/** Capability groups shown in the model list; only chat runs today. */
-const KIND_OPTIONS: Array<{ key: ModelKind; label: string }> = [
-  { key: 'chat', label: '对话模型' },
-  { key: 'image', label: '图像生成' },
-  { key: 'video', label: '视频生成' },
-  { key: 'tts', label: '文字转语音' },
-  { key: 'classify', label: '分类模型' },
-  { key: 'asr', label: '语音转写' },
-]
-
-const KIND_ORDER: ModelKind[] = KIND_OPTIONS.map((item) => item.key)
-
-function kindLabel(kind: ModelKind): string {
-  return KIND_OPTIONS.find((item) => item.key === kind)?.label ?? kind
-}
 
 /** Condensed capability hint for one model row. */
 function capabilityLabel(entry: AgentModelInfo): string {
@@ -68,7 +19,7 @@ function capabilityLabel(entry: AgentModelInfo): string {
       ? `上下文 ${entry.contextWindowInput / 1000000}M`
       : `上下文 ${Math.round(entry.contextWindowInput / 1000)}k`
     : '上下文未声明'
-  return `${window} · ${entry.supportsImages ? '图片输入' : '纯文本'}`
+  return `纯文本 · ${window}`
 }
 
 /** Base URL suggestions only; the app never ships preset models. */
@@ -102,56 +53,6 @@ const URL_PRESETS: Array<{ label: string; baseUrl: string; format: ModelApiForma
     baseUrl: 'https://api.anthropic.com',
     format: 'anthropic-messages',
   },
-  {
-    label: 'OpenAI（Images）',
-    baseUrl: 'https://api.openai.com/v1',
-    format: 'openai-images',
-  },
-  {
-    label: 'OpenAI（Audio）',
-    baseUrl: 'https://api.openai.com/v1',
-    format: 'openai-audio',
-  },
-  {
-    label: 'OpenAI（Videos）',
-    baseUrl: 'https://api.openai.com/v1',
-    format: 'openai-videos',
-  },
-  {
-    label: 'OpenAI（Transcriptions）',
-    baseUrl: 'https://api.openai.com/v1',
-    format: 'openai-transcriptions',
-  },
-  {
-    label: 'DashScope 图像（万相）',
-    baseUrl: 'https://dashscope.aliyuncs.com',
-    format: 'dashscope-image',
-  },
-  {
-    label: 'DashScope 视频（通义万相）',
-    baseUrl: 'https://dashscope.aliyuncs.com',
-    format: 'dashscope-video',
-  },
-  {
-    label: 'DashScope 语音合成',
-    baseUrl: 'https://dashscope.aliyuncs.com',
-    format: 'dashscope-tts',
-  },
-  {
-    label: '火山方舟 Seedance',
-    baseUrl: 'https://ark.cn-beijing.volces.com',
-    format: 'volc-video',
-  },
-  {
-    label: '可灵 Kling',
-    baseUrl: 'https://api.klingai.com',
-    format: 'kling-video',
-  },
-  {
-    label: 'ElevenLabs',
-    baseUrl: 'https://api.elevenlabs.io',
-    format: 'elevenlabs-tts',
-  },
 ]
 
 const THINKING_OPTIONS: Array<{ key: NonNullable<LlmParams['thinkingMode']>; label: string }> = [
@@ -166,11 +67,6 @@ const CACHE_OPTIONS: Array<{ key: NonNullable<LlmParams['cacheRetention']>; labe
   { key: 'long', label: '长期' },
 ]
 
-const IMAGE_OPTIONS = [
-  { key: 'no', label: '不支持' },
-  { key: 'yes', label: '支持' },
-]
-
 const INPUT_WINDOW_CHIPS = [128000, 256000, 512000, 1000000]
 const OUTPUT_WINDOW_CHIPS = [4000, 8000, 16000, 32768]
 
@@ -182,7 +78,6 @@ interface Draft {
   id: string
   label: string
   format: ModelApiFormat
-  kind: ModelKind
   baseUrl: string
   modelId: string
   fullUrl: boolean
@@ -201,7 +96,6 @@ function emptyDraft(): Draft {
     id: '',
     label: '',
     format: 'openai-chat',
-    kind: 'chat',
     baseUrl: '',
     modelId: '',
     fullUrl: false,
@@ -227,26 +121,6 @@ function endpointHint(format: ModelApiFormat, fullUrl: boolean): string {
         return '直接使用该完整地址，不再拼接路径；请确保地址包含 /v1/responses。'
       case 'anthropic-messages':
         return '直接使用该完整地址，不再拼接路径（示例 https://api.anthropic.com/v1/messages）。'
-      case 'openai-images':
-        return '直接使用该完整地址，不再拼接路径（示例 https://api.openai.com/v1/images/generations）。'
-      case 'openai-audio':
-        return '直接使用该完整地址，不再拼接路径（示例 https://api.openai.com/v1/audio/speech）。'
-      case 'openai-videos':
-        return '直接使用该完整地址，不再拼接路径（示例 https://api.openai.com/v1/videos）。'
-      case 'openai-transcriptions':
-        return '直接使用该完整地址，不再拼接路径（示例 https://api.openai.com/v1/audio/transcriptions）。'
-      case 'dashscope-image':
-        return '直接使用该完整地址（示例 https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis）。'
-      case 'dashscope-video':
-        return '直接使用该完整地址（示例 https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis）。'
-      case 'dashscope-tts':
-        return '直接使用该完整地址（示例 https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation）。'
-      case 'volc-video':
-        return '直接使用该完整地址（示例 https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks）。'
-      case 'kling-video':
-        return '直接使用该完整地址（示例 https://api.klingai.com/v1/videos/text2video）。'
-      case 'elevenlabs-tts':
-        return '直接使用该完整地址（示例 https://api.elevenlabs.io/v1/text-to-speech）。'
       default:
         return '直接使用该完整地址，不再拼接路径（示例 https://api.openai.com/v1/chat/completions）。'
     }
@@ -256,26 +130,6 @@ function endpointHint(format: ModelApiFormat, fullUrl: boolean): string {
       return '不要以 / 结尾；系统会拼接 /responses。'
     case 'anthropic-messages':
       return '不要以 / 结尾；系统会拼接 /v1/messages。'
-    case 'openai-images':
-      return '不要以 / 结尾；系统会拼接 /images/generations。'
-    case 'openai-audio':
-      return '不要以 / 结尾；系统会拼接 /audio/speech。'
-    case 'openai-videos':
-      return '不要以 / 结尾；系统会拼接 /videos，并轮询任务状态。'
-    case 'openai-transcriptions':
-      return '不要以 / 结尾；系统会拼接 /audio/transcriptions（multipart 上传）。'
-    case 'dashscope-image':
-      return '不要以 / 结尾；系统会拼接万相图像异步接口并轮询任务。'
-    case 'dashscope-video':
-      return '不要以 / 结尾；系统会拼接万相视频异步接口并轮询任务。'
-    case 'dashscope-tts':
-      return '不要以 / 结尾；系统会拼接 DashScope 多模态语音合成接口。'
-    case 'volc-video':
-      return '不要以 / 结尾；系统会拼接 /api/v3/contents/generations/tasks 并轮询任务。'
-    case 'kling-video':
-      return '不要以 / 结尾；系统会拼接 /v1/videos/text2video，密钥需填写 AccessKey:SecretKey。'
-    case 'elevenlabs-tts':
-      return '不要以 / 结尾；系统会拼接 /v1/text-to-speech/{voiceId}。'
     default:
       return '不要以 / 结尾；系统会拼接 /chat/completions。'
   }
@@ -288,46 +142,13 @@ function endpointPlaceholder(format: ModelApiFormat, fullUrl: boolean): string {
         return 'https://api.openai.com/v1/responses'
       case 'anthropic-messages':
         return 'https://api.anthropic.com/v1/messages'
-      case 'openai-images':
-        return 'https://api.openai.com/v1/images/generations'
-      case 'openai-audio':
-        return 'https://api.openai.com/v1/audio/speech'
-      case 'openai-videos':
-        return 'https://api.openai.com/v1/videos'
-      case 'openai-transcriptions':
-        return 'https://api.openai.com/v1/audio/transcriptions'
-      case 'dashscope-image':
-        return 'https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis'
-      case 'dashscope-video':
-        return 'https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis'
-      case 'dashscope-tts':
-        return 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation'
-      case 'volc-video':
-        return 'https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks'
-      case 'kling-video':
-        return 'https://api.klingai.com/v1/videos/text2video'
-      case 'elevenlabs-tts':
-        return 'https://api.elevenlabs.io/v1/text-to-speech'
       default:
         return 'https://api.openai.com/v1/chat/completions'
     }
   }
-  switch (format) {
-    case 'dashscope-image':
-    case 'dashscope-video':
-    case 'dashscope-tts':
-      return 'https://dashscope.aliyuncs.com'
-    case 'volc-video':
-      return 'https://ark.cn-beijing.volces.com'
-    case 'kling-video':
-      return 'https://api.klingai.com'
-    case 'elevenlabs-tts':
-      return 'https://api.elevenlabs.io'
-    default:
-      return format === 'anthropic-messages'
-        ? 'https://api.anthropic.com'
-        : 'https://api.openai.com/v1'
-  }
+  return format === 'anthropic-messages'
+    ? 'https://api.anthropic.com'
+    : 'https://api.openai.com/v1'
 }
 
 function parseJsonObject(text: string, field: string): Record<string, unknown> | null {
@@ -475,15 +296,6 @@ function ParamsEditor(props: {
       </div>
 
       <div className="form-field">
-        <span className="form-label">图片输入支持</span>
-        <ChipRow
-          items={IMAGE_OPTIONS}
-          value={params.supportsImages ? 'yes' : 'no'}
-          onChange={(key) => patchParams({ supportsImages: key === 'yes' })}
-        />
-      </div>
-
-      <div className="form-field">
         <span className="form-label">思考模式</span>
         <ChipRow
           items={THINKING_OPTIONS}
@@ -492,82 +304,36 @@ function ParamsEditor(props: {
         />
       </div>
 
-      {draft.kind === 'chat' && (
-        <div className="form-field">
-          <span className="form-label">提示缓存</span>
-          <ChipRow
-            items={CACHE_OPTIONS}
-            value={params.cacheRetention ?? 'none'}
-            onChange={(cacheRetention) => patchParams({ cacheRetention })}
-          />
-          <p className="settings-note">
-            短期使用协议原生 cache_control；长期追加 1h / 24h TTL。仅在支持的协议与网关上生效。
-          </p>
-        </div>
-      )}
+      <div className="form-field">
+        <span className="form-label">提示缓存</span>
+        <ChipRow
+          items={CACHE_OPTIONS}
+          value={params.cacheRetention ?? 'none'}
+          onChange={(cacheRetention) => patchParams({ cacheRetention })}
+        />
+        <p className="settings-note">
+          短期使用协议原生 cache_control；长期追加 1h / 24h TTL。仅在支持的协议与网关上生效。
+        </p>
+      </div>
 
       <div className="form-field">
         <span className="form-label">价格（USD，可选）</span>
-        {(draft.kind === 'chat' || draft.kind === 'classify') && (
-          <>
-            <NumberField
-              label="输入 / 百万 token"
-              value={params.inputPrice}
-              min={0}
-              max={1000000}
-              placeholder="留空表示未配置"
-              onChange={(inputPrice) => patchParams({ inputPrice })}
-            />
-            <NumberField
-              label="输出 / 百万 token"
-              value={params.outputPrice}
-              min={0}
-              max={1000000}
-              placeholder="留空表示未配置"
-              onChange={(outputPrice) => patchParams({ outputPrice })}
-            />
-          </>
-        )}
-        {draft.kind === 'image' && (
-          <NumberField
-            label="每张图片"
-            value={params.imagePrice}
-            min={0}
-            max={1000000}
-            placeholder="留空表示未配置"
-            onChange={(imagePrice) => patchParams({ imagePrice })}
-          />
-        )}
-        {draft.kind === 'video' && (
-          <NumberField
-            label="每秒视频"
-            value={params.videoSecondPrice}
-            min={0}
-            max={1000000}
-            placeholder="留空表示未配置"
-            onChange={(videoSecondPrice) => patchParams({ videoSecondPrice })}
-          />
-        )}
-        {draft.kind === 'tts' && (
-          <NumberField
-            label="每千字符"
-            value={params.ttsKcharPrice}
-            min={0}
-            max={1000000}
-            placeholder="留空表示未配置"
-            onChange={(ttsKcharPrice) => patchParams({ ttsKcharPrice })}
-          />
-        )}
-        {draft.kind === 'asr' && (
-          <NumberField
-            label="每分钟音频"
-            value={params.asrMinutePrice}
-            min={0}
-            max={1000000}
-            placeholder="留空表示未配置"
-            onChange={(asrMinutePrice) => patchParams({ asrMinutePrice })}
-          />
-        )}
+        <NumberField
+          label="输入 / 百万 token"
+          value={params.inputPrice}
+          min={0}
+          max={1000000}
+          placeholder="留空表示未配置"
+          onChange={(inputPrice) => patchParams({ inputPrice })}
+        />
+        <NumberField
+          label="输出 / 百万 token"
+          value={params.outputPrice}
+          min={0}
+          max={1000000}
+          placeholder="留空表示未配置"
+          onChange={(outputPrice) => patchParams({ outputPrice })}
+        />
         <p className="settings-note">价格只用于成本统计，不会写入请求体。</p>
       </div>
 
@@ -651,7 +417,6 @@ export default function AgentSettingsSection() {
         id: entry.id,
         label: entry.label,
         format: entry.format,
-        kind: entry.kind,
         baseUrl: entry.baseUrl,
         modelId: entry.modelId,
         fullUrl: entry.fullUrl,
@@ -721,10 +486,6 @@ export default function AgentSettingsSection() {
 
   const testDraft = async () => {
     if (!draft) return
-    if (draft.kind !== 'chat') {
-      toast('媒体与分类模型暂不支持连接测试')
-      return
-    }
     const modelId = draft.modelId.trim()
     if (!draft.baseUrl.trim() || !modelId) {
       toast('请先填写请求地址与 Model ID')
@@ -784,7 +545,6 @@ export default function AgentSettingsSection() {
         baseUrl: draft.baseUrl.trim(),
         modelId,
         fullUrl: draft.fullUrl,
-        kind: draft.kind,
         apiKey: draft.apiKey.trim() || undefined,
       })
       await chatApi.paramsSet(saved.id, params)
@@ -812,10 +572,6 @@ export default function AgentSettingsSection() {
   }
 
   const testSaved = async (entry: AgentModelInfo) => {
-    if (entry.kind !== 'chat') {
-      toast('媒体与分类模型暂不支持连接测试')
-      return
-    }
     setBusy(true)
     try {
       const result = await chatApi.testConnection({
@@ -868,26 +624,17 @@ export default function AgentSettingsSection() {
       </div>
 
       {settings && settings.models.length === 0 && (
-        <p className="settings-note">
-          列表为空。添加对话模型后即可开始聊天；图像/视频/语音/分类模型可先添加，接入后启用。
-        </p>
+        <p className="settings-note">列表为空。添加对话模型后即可开始聊天。</p>
       )}
 
-      {KIND_ORDER.map((kind) => {
-        const group = settings?.models.filter((entry) => entry.kind === kind) ?? []
-        if (group.length === 0) return null
+      {settings?.models.map((entry) => {
+        const active = settings.activeId === entry.id
         return (
-          <div key={kind} className="model-group">
-            <div className="model-group-title">{kindLabel(kind)}</div>
-            {group.map((entry) => {
-              const active = kind === 'chat' && settings?.activeId === entry.id
-              return (
                 <div key={entry.id} className={`model-row ${active ? 'active' : ''}`}>
                   <div className="model-info">
                     <div className="model-title">
                       {entry.label}
                       {active && <span className="model-badge">使用中</span>}
-                      {kind !== 'chat' && <span className="model-badge">可用</span>}
                     </div>
                     <div className="model-meta">
                       {entry.modelId} · {formatLabel(entry.format)}
@@ -904,7 +651,7 @@ export default function AgentSettingsSection() {
                     <button
                       type="button"
                       className="restore-default"
-                      disabled={busy || active || kind !== 'chat'}
+                      disabled={busy || active}
                       onClick={() => void activate(entry)}
                     >
                       使用
@@ -912,7 +659,7 @@ export default function AgentSettingsSection() {
                     <button
                       type="button"
                       className="restore-default"
-                      disabled={busy || kind !== 'chat'}
+                      disabled={busy}
                       onClick={() => void testSaved(entry)}
                     >
                       测试
@@ -935,9 +682,6 @@ export default function AgentSettingsSection() {
                     </button>
                   </div>
                 </div>
-              )
-            })}
-          </div>
         )
       })}
 
@@ -953,7 +697,7 @@ export default function AgentSettingsSection() {
               <button
                 type="button"
                 className="btn btn-plain"
-                disabled={busy || draft.kind !== 'chat'}
+                disabled={busy}
                 onClick={() => void testDraft()}
               >
                 测试连接
@@ -976,44 +720,12 @@ export default function AgentSettingsSection() {
               value={draft.format}
               onChange={(e) => patchDraft({ format: e.target.value as ModelApiFormat })}
             >
-              {formatOptionsFor(draft.kind).map((item) => (
+              {FORMAT_OPTIONS.map((item) => (
                 <option key={item.key} value={item.key}>
                   {item.label}
                 </option>
               ))}
             </select>
-          </div>
-
-          <div className="form-field">
-            <span className="form-label">模型能力（Model Kind）</span>
-            <select
-              className="form-input"
-              value={draft.kind}
-              onChange={(e) => {
-                const kind = e.target.value as ModelKind
-                patchDraft({
-                  kind,
-                  format: formatOptionsFor(kind)[0].key,
-                  models: [],
-                  modelsError: '',
-                })
-              }}
-            >
-              {KIND_OPTIONS.map((item) => (
-                <option key={item.key} value={item.key}>
-                  {item.label}
-                </option>
-              ))}
-            </select>
-            {draft.kind !== 'chat' && (
-              <p className="settings-note">
-                {draft.kind === 'video'
-                  ? '视频使用 OpenAI Videos 兼容协议：提交后轮询任务，完成后下载到资产库。'
-                  : draft.kind === 'asr'
-                    ? '语音转写使用 OpenAI Transcriptions 兼容协议：上传音频后返回文本。'
-                    : '该能力已可执行：图像走 Images 协议，语音走 Audio 协议，分类走 Chat 协议。'}
-              </p>
-            )}
           </div>
 
           <div className="form-field">

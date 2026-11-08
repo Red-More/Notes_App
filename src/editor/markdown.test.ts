@@ -27,16 +27,6 @@ describe('renderMarkdownPreview', () => {
     expect(html).not.toContain('href="javascript:')
   })
 
-  it('allows generated media from the local asset origin only', () => {
-    const html = renderMarkdownPreview('![插图](http://asset.localhost/media/a.png)')
-    expect(html).toContain('<img src="http://asset.localhost/media/a.png"')
-    const native = renderMarkdownPreview('![插图](asset://localhost/media/a.png)')
-    expect(native).toContain('<img src="asset://localhost/media/a.png"')
-    expect(renderMarkdownPreview('![x](data:text/html;base64,PHNjcmlwdD4=')).not.toContain(
-      '<img',
-    )
-  })
-
   it('autolinks bare URLs', () => {
     const html = renderMarkdownPreview('访问 https://example.com 查看')
     expect(html).toContain('<a href="https://example.com"')

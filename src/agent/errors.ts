@@ -12,7 +12,6 @@ export type ErrorCode =
   | 'network'
   | 'provider_rejected'
   | 'protocol_changed'
-  | 'privacy_blocked'
   | 'tool_conflict'
   | 'tool_path_escape'
   | 'tool_permission_denied'
@@ -40,7 +39,6 @@ export const ERROR_COPY: Record<ErrorCode, string> = {
   network: '网络连接失败，请检查网络后重试',
   provider_rejected: '模型服务拒绝了本次请求',
   protocol_changed: '模型返回格式无法解析，请检查模型配置',
-  privacy_blocked: '隐私策略拦截：本次内容不允许发送到云端',
   tool_conflict: '文档状态已变化，请重新读取后再试',
   tool_path_escape: '路径越权：只能访问已授权目录',
   tool_permission_denied: '该路径未授权给 AI，请在设置中授权该文件夹',
@@ -128,7 +126,6 @@ export function classifyMessage(message: string | null | undefined): ErrorCode {
   if (/HTTP\s*429|rate limit|too many requests|过于频繁/i.test(text)) return 'rate_limited'
   if (/timeout|timed out|超时/i.test(text)) return 'timeout'
   if (/network|网络|fetch|conn|dns|连接失败|error sending request/i.test(text)) return 'network'
-  if (/隐私|privacy|egress.*block|拦截/i.test(text)) return 'privacy_blocked'
   if (/解析|parse|unexpected token|invalid json|格式无法/i.test(text)) return 'protocol_changed'
   if (/HTTP\s*4\d\d|rejected|拒绝/i.test(text)) return 'provider_rejected'
   return 'internal'

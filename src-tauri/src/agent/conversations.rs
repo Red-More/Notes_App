@@ -52,8 +52,6 @@ pub struct ChatMessage {
     /// Reasoning text and provider signature, when the model exposed them.
     pub thinking: Option<String>,
     pub thinking_signature: Option<String>,
-    /// JSON array of media asset ids attached to this user message.
-    pub image_asset_ids: Option<String>,
     /// Agent run that owns/produced this row.
     pub run_id: Option<i64>,
     /// JSON arguments of a tool call, kept so history can restore the card.
@@ -89,8 +87,6 @@ pub struct NewMessage {
     pub thinking: Option<String>,
     #[serde(default)]
     pub thinking_signature: Option<String>,
-    #[serde(default)]
-    pub image_asset_ids: Option<String>,
     #[serde(default)]
     pub run_id: Option<i64>,
     #[serde(default)]
@@ -230,7 +226,7 @@ pub fn delete(vfs: &VirtualFs, id: i64) -> Result<(), ToolError> {
 /// Columns selected for every `ChatMessage` read; keep in sync with `row_to_message`.
 const MESSAGE_COLUMNS: &str = "id, role, content, tool_calls, tool_call_id, tool_name, is_error,
     created_at, usage_input, usage_output, usage_total, usage_cache_read, usage_cache_write,
-    thinking, thinking_signature, image_asset_ids, run_id, tool_args, tool_duration_ms,
+    thinking, thinking_signature, run_id, tool_args, tool_duration_ms,
     is_partial, stop_reason, steer_of_run";
 
 /// 读取一条会话的消息，按 id 升序。
@@ -305,10 +301,10 @@ pub fn insert_message(
         "INSERT INTO messages
              (conversation_id, role, content, tool_calls, tool_call_id, tool_name, is_error,
               usage_input, usage_output, usage_total, usage_cache_read, usage_cache_write,
-              thinking, thinking_signature, image_asset_ids, run_id, tool_args,
+              thinking, thinking_signature, run_id, tool_args,
               tool_duration_ms, is_partial, stop_reason, steer_of_run, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                 ?17, ?18, ?19, ?20, ?21, ?22)",
+                 ?17, ?18, ?19, ?20, ?21)",
         params![
             conversation_id,
             item.role,
@@ -324,7 +320,6 @@ pub fn insert_message(
             item.usage.map(|usage| usage.cache_write),
             item.thinking,
             item.thinking_signature,
-            item.image_asset_ids,
             item.run_id,
             item.tool_args,
             item.tool_duration_ms,
@@ -345,7 +340,6 @@ pub fn insert_message(
         usage: item.usage,
         thinking: item.thinking,
         thinking_signature: item.thinking_signature,
-        image_asset_ids: item.image_asset_ids,
         run_id: item.run_id,
         tool_args: item.tool_args,
         tool_duration_ms: item.tool_duration_ms,
@@ -417,13 +411,12 @@ fn row_to_message(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
         }),
         thinking: r.get(13)?,
         thinking_signature: r.get(14)?,
-        image_asset_ids: r.get(15)?,
-        run_id: r.get(16)?,
-        tool_args: r.get(17)?,
-        tool_duration_ms: r.get(18)?,
-        is_partial: r.get::<_, Option<i64>>(19)?.unwrap_or(0) != 0,
-        stop_reason: r.get(20)?,
-        steer_of_run: r.get(21)?,
+        run_id: r.get(15)?,
+        tool_args: r.get(16)?,
+        tool_duration_ms: r.get(17)?,
+        is_partial: r.get::<_, Option<i64>>(18)?.unwrap_or(0) != 0,
+        stop_reason: r.get(19)?,
+        steer_of_run: r.get(20)?,
         created_at: r.get(7)?,
     })
 }

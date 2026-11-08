@@ -7,7 +7,7 @@
 import type { AgentEvent } from '@earendil-works/pi-agent-core'
 import type { ChatMessageRecord, MessageUsage } from '../types'
 import { classifyFailure, errorText, type ErrorCode } from './errors'
-import { extractAssistant, parseImageAssetIds } from './runtime'
+import { extractAssistant } from './runtime'
 
 export interface Bubble {
   id: string
@@ -23,9 +23,6 @@ export interface Bubble {
   /** Reasoning text streamed before the visible answer. */
   thinking?: string | null
   thinkingSignature?: string | null
-  /** Data URLs of images attached to a user turn. */
-  images?: string[]
-  imageAssetIds?: number[]
   /** Paths touched by this reply, cached when the reply settles. */
   changes?: string[]
 }
@@ -42,8 +39,6 @@ export interface ToolCard {
 }
 
 export type Item = Bubble | ToolCard
-
-export type ImageData = { mime: string; data: string }
 
 interface StreamBuffer {
   id: string
@@ -198,24 +193,14 @@ function upsertToolCard(items: Item[], id: string, toolName: string, args: strin
 }
 
 /** Persisted records → items. Runs once per conversation load. */
-export function projectHistory(
-  records: ChatMessageRecord[],
-  images: Map<number, ImageData>,
-): Item[] {
+export function projectHistory(records: ChatMessageRecord[]): Item[] {
   const items: Item[] = []
   for (const record of records) {
     if (record.role === 'user') {
-      const ids = parseImageAssetIds(record.imageAssetIds)
-      const dataUrls = ids
-        .map((id) => images.get(id))
-        .filter((image): image is ImageData => image !== undefined)
-        .map((image) => `data:${image.mime};base64,${image.data}`)
       items.push({
         id: `m-${record.id}`,
         kind: 'user',
         text: record.content,
-        images: dataUrls.length > 0 ? dataUrls : undefined,
-        imageAssetIds: ids.length > 0 ? ids : undefined,
       })
     } else if (record.role === 'assistant') {
       if (record.content.trim() === '') continue
@@ -263,11 +248,10 @@ export function partialLength(partial: string | null): number {
 /** Reference projection: records + events → items. Used by tests and tools. */
 export function project(input: {
   records: ChatMessageRecord[]
-  images: Map<number, ImageData>
   events: AgentEvent[]
   pendingInitialUser?: boolean
 }): Item[] {
-  let view = createView(projectHistory(input.records, input.images))
+  let view = createView(projectHistory(input.records))
   if (input.pendingInitialUser) view = beginPrompt(view)
   for (const event of input.events) {
     view = flushBuffer(reduceEvent(view, event).view)

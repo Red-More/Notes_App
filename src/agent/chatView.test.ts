@@ -65,7 +65,6 @@ function record(partial: Partial<ChatMessageRecord> & { id: number }): ChatMessa
     usage: null,
     thinking: null,
     thinkingSignature: null,
-    imageAssetIds: null,
     runId: null,
     toolArgs: null,
     toolDurationMs: null,
@@ -143,19 +142,18 @@ describe('tool cards', () => {
 })
 
 describe('history projection', () => {
-  it('folds records and images without inventing rows', () => {
+  it('folds records without inventing rows', () => {
     const records: ChatMessageRecord[] = [
-      record({ id: 1, role: 'user', content: '看图', imageAssetIds: '[7]' }),
+      record({ id: 1, role: 'user', content: '看图' }),
       record({ id: 2, role: 'assistant', content: '' }),
       record({ id: 3, role: 'assistant', content: '这是图' }),
       record({ id: 4, role: 'tool', content: '读取完成', toolName: 'fs_read' }),
     ]
-    const images = new Map([[7, { mime: 'image/jpeg', data: 'AAAA' }]])
 
-    const items = project({ records, images, events: [] })
+    const items = project({ records, events: [] })
 
     expect(items.map((item) => item.kind)).toEqual(['user', 'assistant', 'tool'])
-    expect(items[0].kind === 'user' && items[0].images).toEqual(['data:image/jpeg;base64,AAAA'])
+    expect(items[0].kind === 'user' && items[0].text).toBe('看图')
     expect(items[1].kind === 'assistant' && items[1].text).toBe('这是图')
     expect(items[2].kind === 'tool' && items[2].status).toBe('done')
   })
@@ -174,7 +172,7 @@ describe('history projection', () => {
       record({ id: 3, role: 'assistant', content: '改好了' }),
     ]
 
-    const items = project({ records, images: new Map(), events: [] })
+    const items = project({ records, events: [] })
     const card = items.find((item) => item.kind === 'tool')
     expect(card?.kind === 'tool' && card.args).toBe('{"path":"/life/a.md"}')
     expect(card?.kind === 'tool' && card.durationMs).toBe(1200)

@@ -15,7 +15,7 @@
 use rusqlite::{params, Connection};
 
 /// Version stamped on databases created by this module.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Virtual file system root, kept in sync with `vfs::cap_gate::ROOT`.
 const ROOT: &str = "/life";
@@ -195,7 +195,6 @@ CREATE TABLE messages (
     usage_cache_write  INTEGER,
     thinking           TEXT,
     thinking_signature TEXT,
-    image_asset_ids    TEXT,                  -- JSON array of asset ids
     run_id             INTEGER,               -- agent run that produced/owns this row
     tool_args          TEXT,                  -- JSON arguments for tool rows
     tool_duration_ms   INTEGER,               -- wall-clock tool duration
@@ -252,80 +251,6 @@ CREATE TABLE settings (
     value      TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-
--- Media jobs, decoupled from the agent run lifecycle.
-CREATE TABLE media_jobs (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind        TEXT NOT NULL CHECK (kind IN ('image', 'video', 'tts', 'classify', 'asr')),
-    model_entry TEXT NOT NULL,
-    params      TEXT NOT NULL DEFAULT '{}',
-    status      TEXT NOT NULL DEFAULT 'pending'
-                CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
-    progress    INTEGER NOT NULL DEFAULT 0,
-    asset_id    INTEGER,
-    error       TEXT,
-    result      TEXT,
-    created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL,
-    units       REAL,
-    cost_usd    REAL
-);
-CREATE INDEX idx_media_jobs_status ON media_jobs(status, id);
-CREATE INDEX idx_media_jobs_model ON media_jobs(model_entry);
-
--- Asset metadata; bytes are stored on disk.
-CREATE TABLE media_assets (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    sha256      TEXT NOT NULL UNIQUE,
-    mime        TEXT NOT NULL,
-    size        INTEGER NOT NULL,
-    width       INTEGER,
-    height      INTEGER,
-    duration_ms INTEGER,
-    source_job  INTEGER,
-    created_at  TEXT NOT NULL
-);
-CREATE INDEX idx_media_assets_created ON media_assets(created_at DESC);
-
--- Declared sensitivity: longest path prefix wins.
-CREATE TABLE sensitivity_labels (
-    path_prefix TEXT PRIMARY KEY,
-    level       INTEGER NOT NULL CHECK (level IN (0, 1, 2)),
-    source      TEXT NOT NULL DEFAULT 'user',  -- user | default | rule
-    updated_at  TEXT NOT NULL
-);
-
--- Classification cache keyed by inode; invalidated by rev or content hash.
-CREATE TABLE doc_classification (
-    inode          INTEGER PRIMARY KEY,
-    rev            INTEGER NOT NULL,
-    content_hash   TEXT NOT NULL,
-    level          INTEGER NOT NULL,
-    spans          TEXT NOT NULL,              -- JSON: type/start/end/score/source
-    engine_version TEXT NOT NULL,
-    updated_at     TEXT NOT NULL,
-    FOREIGN KEY (inode) REFERENCES inodes(inode) ON DELETE CASCADE
-);
-
--- Entity vault: aliases and hashes only, plaintext stays in the secret store.
-CREATE TABLE entity_vault (
-    alias      TEXT PRIMARY KEY,
-    kind       TEXT NOT NULL,
-    norm_hash  TEXT NOT NULL UNIQUE,
-    created_at TEXT NOT NULL
-);
-
--- Egress audit: decisions and counts, never document text.
-CREATE TABLE egress_audit (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    created_at   TEXT NOT NULL,
-    target       TEXT NOT NULL,
-    purpose      TEXT NOT NULL,
-    entity_kinds TEXT NOT NULL,               -- JSON: kind -> count
-    bytes        INTEGER NOT NULL,
-    decision     TEXT NOT NULL                -- allow | block
-);
-CREATE INDEX idx_egress_created ON egress_audit(created_at DESC);
 ";
 
 /// True when the database was created by this build.

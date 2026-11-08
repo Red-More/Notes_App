@@ -4,10 +4,10 @@
 //! 不使用 `dangerouslySetInnerHTML`，模型输出不经过任何 HTML 解析。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { api, chatApi, mediaApi } from '../../api'
+import { api, chatApi } from '../../api'
 import type { AgentProfile } from '../../agent/runtime'
 import { profileFromSettings } from '../../agent/runtime'
-import { AgentRuntime, type Attachment } from '../../agent/AgentRuntime'
+import { AgentRuntime } from '../../agent/AgentRuntime'
 import { createRuntimeDeps } from '../../agent/runtimeDeps'
 import { documentPath, partialLength, type Item, type ToolCard } from '../../agent/chatView'
 import type {
@@ -16,9 +16,7 @@ import type {
   ChatConversation,
   MessageUsage,
 } from '../../types'
-import { friendlyError, normalizeImage } from '../../utils'
-import { open as openDialog } from '@tauri-apps/plugin-dialog'
-import { readFile } from '@tauri-apps/plugin-fs'
+import { friendlyError } from '../../utils'
 import { toast } from '../../toast'
 import { Modal } from '../../components/ui'
 import PageHeader from '../../components/PageHeader'
@@ -27,7 +25,6 @@ import {
   IconChat,
   IconEdit,
   IconEye,
-  IconImage,
   IconInfo,
   IconNote,
   IconPlus,
@@ -47,18 +44,6 @@ interface DocPreview {
   path: string
   html: string
 }
-
-/** Best-effort MIME for a picked file; normalizeImage re-encodes to JPEG anyway. */
-function imageMime(path: string): string {
-  const ext = path.split('.').pop()?.toLowerCase() ?? ''
-  if (ext === 'png') return 'image/png'
-  if (ext === 'webp') return 'image/webp'
-  if (ext === 'gif') return 'image/gif'
-  return 'image/jpeg'
-}
-
-const MAX_ATTACHMENTS = 4
-const MAX_INPUT_IMAGE_BYTES = 20 * 1024 * 1024
 
 /** Remove the YAML frontmatter so previews match what the editor renders. */
 function stripFrontmatter(text: string): string {
@@ -182,7 +167,6 @@ async function withCapabilities(profile: AgentProfile): Promise<AgentProfile> {
       ...profile,
       contextWindow: params.contextWindowInput,
       maxTokens: params.contextWindowOutput ?? params.maxTokens,
-      supportsImages: params.supportsImages ?? false,
       reasoning: params.thinkingMode === 'on',
       toolRounds: params.toolRounds,
     }
@@ -207,7 +191,6 @@ export default function ChatPage({ isActive }: Props) {
   const [loading, setLoading] = useState(true)
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set())
   const [expandedThinking, setExpandedThinking] = useState<Set<string>>(new Set())
-  const [attachments, setAttachments] = useState<Attachment[]>([])
   // While a run is active, the composer enqueues instead of prompting.
   const [queueMode, setQueueMode] = useState<'steer' | 'followUp'>('steer')
   const [queuedCount, setQueuedCount] = useState(0)
@@ -384,18 +367,17 @@ export default function ChatPage({ isActive }: Props) {
   }, [])
 
   const submitPrompt = useCallback(
-    async (text: string, files: Attachment[] = []) => {
-      if ((!text && files.length === 0) || streaming) return
+    async (text: string) => {
+      if (!text || streaming) return
       if (!conversationRef.current) {
         toast('会话尚未就绪')
         return
       }
       setInput('')
-      setAttachments([])
-      void ensureTitle(text || '图片')
+      void ensureTitle(text)
       try {
         // The runtime persists the user turn, runs the loop and writes results.
-        await runtime.prompt({ text, attachments: files })
+        await runtime.prompt({ text })
       } catch (e) {
         // Rejected before anything was written: keep the draft for a retry.
         setInput((prev) => prev || text)
@@ -406,8 +388,8 @@ export default function ChatPage({ isActive }: Props) {
   )
 
   const send = useCallback(() => {
-    void submitPrompt(input.trim(), attachments)
-  }, [attachments, input, submitPrompt])
+    void submitPrompt(input.trim())
+  }, [input, submitPrompt])
 
   /** Enqueue guidance while a run is active; the agent injects it at the next boundary. */
   const queueMessage = useCallback(() => {
@@ -584,56 +566,6 @@ export default function ChatPage({ isActive }: Props) {
     : '未添加模型'
   const hasModel = settings?.activeId != null
 
-  const pickImages = useCallback(async () => {
-    if (!activeModel?.supportsImages) {
-      toast('当前模型未开启图片输入，请在设置 → AI 助理中启用')
-      return
-    }
-    try {
-      const picked = await openDialog({
-        multiple: true,
-        filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif'] }],
-      })
-      const paths = typeof picked === 'string' ? [picked] : Array.isArray(picked) ? picked : []
-      if (paths.length === 0) return
-      let next = attachments
-      for (const path of paths) {
-        if (next.length >= MAX_ATTACHMENTS) {
-          toast(`一次最多附带 ${MAX_ATTACHMENTS} 张图片`)
-          break
-        }
-        const bytes = await readFile(path)
-        if (bytes.length > MAX_INPUT_IMAGE_BYTES) {
-          toast('图片超过 20MB，请先压缩')
-          continue
-        }
-        const normalized = await normalizeImage(bytes, imageMime(path))
-        if (!normalized.data) {
-          toast('图片处理失败')
-          continue
-        }
-        // Assets are deduplicated by content hash, so re-picking is free.
-        const asset = await mediaApi.storeAsset({ mime: normalized.mime, data: normalized.data })
-        next = [
-          ...next,
-          {
-            assetId: asset.id,
-            mime: normalized.mime,
-            data: normalized.data,
-            dataUrl: normalized.dataUrl,
-          },
-        ]
-      }
-      setAttachments(next)
-    } catch (e) {
-      toast(friendlyError(e))
-    }
-  }, [activeModel, attachments])
-
-  const removeAttachment = useCallback((assetId: number) => {
-    setAttachments((prev) => prev.filter((file) => file.assetId !== assetId))
-  }, [])
-
   // Rough token estimate (CJK ~1 char/token, ASCII ~3 chars/token).
   const contextChars = items.reduce(
     (sum, item) => sum + item.text.length + (item.kind === 'tool' ? item.args.length : 0),
@@ -727,18 +659,9 @@ export default function ChatPage({ isActive }: Props) {
                           )}
                         </div>
                       )}
-                      {item.kind === 'user' && item.images && item.images.length > 0 && (
-                        <div className="chat-bubble-images">
-                          {item.images.map((src, imageIndex) => (
-                            <img key={imageIndex} src={src} alt="附图" />
-                          ))}
-                        </div>
-                      )}
-                      {(!item.images || item.images.length === 0 || item.text) && (
-                        <div
-                          className={`chat-bubble ${item.kind} ${item.isError ? 'error' : ''}`}
-                        >
-                          {item.text || (item.streaming ? '…' : '')}
+                      {item.kind === 'user' && (
+                        <div className={`chat-bubble ${item.kind} ${item.isError ? 'error' : ''}`}>
+                          {item.text}
                         </div>
                       )}
                       {item.kind === 'assistant' && !item.streaming && (
@@ -825,23 +748,6 @@ export default function ChatPage({ isActive }: Props) {
             ，点击继续
           </button>
         )}
-        {attachments.length > 0 && (
-          <div className="chat-attachments">
-            {attachments.map((file) => (
-              <div className="chat-attachment" key={file.assetId}>
-                <img src={file.dataUrl} alt="待发送图片" />
-                <button
-                  type="button"
-                  className="chat-attachment-remove"
-                  aria-label="移除图片"
-                  onClick={() => removeAttachment(file.assetId)}
-                >
-                  ×
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
         <div className="chat-composer-row">
           <textarea
             className="chat-input"
@@ -869,15 +775,6 @@ export default function ChatPage({ isActive }: Props) {
               {queuedCount > 0 ? ` ${queuedCount}` : ''}
             </button>
           )}
-          <button
-            type="button"
-            className="chat-attach"
-            aria-label="添加图片"
-            disabled={!hasModel || streaming}
-            onClick={() => void pickImages()}
-          >
-            <IconImage size={20} />
-          </button>
           {streaming ? (
             <>
               <button
@@ -898,7 +795,7 @@ export default function ChatPage({ isActive }: Props) {
               type="button"
               className="chat-send"
               aria-label="发送"
-              disabled={(input.trim() === '' && attachments.length === 0) || !hasModel}
+              disabled={input.trim() === '' || !hasModel}
               onClick={() => void send()}
             >
               <IconSend size={20} />

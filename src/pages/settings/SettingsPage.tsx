@@ -5,7 +5,6 @@ import AppearanceSection from './AppearanceSection'
 import AboutSection from './AboutSection'
 import EditorSection from './EditorSection'
 import NotificationSection from './NotificationSection'
-import PrivacyGroup from './PrivacyGroup'
 import StorageSection from './StorageSection'
 
 interface Props {
@@ -15,7 +14,6 @@ interface Props {
 const QUICK_NAV = [
   { id: 'settings-account', label: '账号' },
   { id: 'settings-notifications', label: '通知' },
-  { id: 'settings-privacy', label: '隐私' },
   { id: 'settings-appearance', label: '外观' },
   { id: 'settings-editor', label: '编辑' },
   { id: 'settings-ai', label: 'AI' },
@@ -56,7 +54,6 @@ export default function SettingsPage({ onBack }: Props) {
 
         <AccountSection />
         <NotificationSection />
-        <PrivacyGroup />
         <AppearanceSection />
         <EditorSection />
         <AiSection />

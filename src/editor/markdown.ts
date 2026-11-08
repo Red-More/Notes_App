@@ -183,13 +183,6 @@ function createMarkdownRenderer(): MarkdownItInstance {
     breaks: false,
     highlight: highlightCode,
   })
-  // Generated media lives in the Tauri asset scope, not on the public web.
-  // markdown-it blocks unknown schemes, so allow only the asset origins here.
-  const baseValidateLink = md.validateLink.bind(md)
-  md.validateLink = (url) =>
-    url.startsWith('asset://') ||
-    url.startsWith('http://asset.localhost/') ||
-    baseValidateLink(url)
   md.use(taskLists, { enabled: false, label: true, labelAfter: true })
   // Non-GFM extensions: footnotes, definition lists, abbreviations, highlight,
   // sub/superscript, inserted text and emoji shortcodes.

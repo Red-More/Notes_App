@@ -6,7 +6,6 @@
 
 import type { Agent } from '@earendil-works/pi-agent-core'
 import type { AgentMessage, AgentEvent, StreamFn } from '@earendil-works/pi-agent-core'
-import type { ImageContent } from '@earendil-works/pi-ai'
 import type {
   AgentRun,
   AgentRunStart,
@@ -32,30 +31,19 @@ import {
   reduceEvent,
   type Bubble,
   type ChatView,
-  type ImageData,
   type Item,
   type ViewEffect,
 } from './chatView'
 
 export type RuntimeStatus = 'idle' | 'running' | 'cancelling'
 
-/** One image staged in the composer. */
-export interface Attachment {
-  assetId: number
-  mime: string
-  data: string
-  dataUrl: string
-}
-
 export interface PromptInput {
   text: string
-  attachments: Attachment[]
 }
 
 /** Everything the runtime needs from the outside; fakeable in tests. */
 export interface AgentRuntimeDeps {
   loadMessages(conversationId: number): Promise<ChatMessageRecord[]>
-  loadImages(records: ChatMessageRecord[]): Promise<Map<number, ImageData>>
   append(conversationId: number, messages: NewChatMessage[]): Promise<unknown>
   truncate(conversationId: number, messageId: number): Promise<void>
   loadSkills(): Promise<SkillSummary[]>
@@ -135,7 +123,6 @@ export class AgentRuntime {
   private conversation: ChatConversation | null = null
   private profile: AgentProfile | null = null
   private skillsIndex = ''
-  private images: Map<number, ImageData> = new Map()
 
   private view: ChatView = createView([])
   private status: RuntimeStatus = 'idle'
@@ -186,8 +173,7 @@ export class AgentRuntime {
     this.steering = []
 
     const records = await this.deps.loadMessages(conversation.id)
-    this.images = await this.deps.loadImages(records).catch(() => new Map())
-    this.view = createView(projectHistory(records, this.images))
+    this.view = createView(projectHistory(records))
     // Restore the ledger view: queued work and the interrupted banner survive
     // page switches because they are read from SQLite, not memory.
     const runState = await this.deps.loadRunState(conversation.id).catch(
@@ -216,7 +202,7 @@ export class AgentRuntime {
   ): Promise<Agent> {
     return createAgent(
       profile,
-      await toAgentMessages(records, profile, this.images),
+      await toAgentMessages(records, profile),
       this.skillsIndex,
       skills,
       mcpTools,
@@ -237,26 +223,23 @@ export class AgentRuntime {
     await this.drainRunWrites()
 
     const text = input.text.trim()
-    if (text === '' && input.attachments.length === 0) return
-    const imageIds = input.attachments.map((file) => file.assetId)
-    const dataUrls = input.attachments.map((file) => file.dataUrl)
+    if (text === '') return
 
     // The ledger insert and the user message share one transaction.
     const started = await this.startRun(conversation, 'prompt', {
       role: 'user',
       content: text,
-      imageAssetIds: imageIds.length > 0 ? JSON.stringify(imageIds) : null,
     })
     if (started.run.status !== 'running') {
       this.queue.push({ run: started.run, userMessage: started.message })
-      this.addUserItem(started, text, imageIds, dataUrls)
+      this.addUserItem(started, text)
       this.emit()
       return
     }
     this.beginRun(started)
-    this.addUserItem(started, text, imageIds, dataUrls)
+    this.addUserItem(started, text)
     this.emit()
-    await this.runTurn(text, input.attachments)
+    await this.runTurn(text)
   }
 
   /** Inject guidance at the next turn boundary, persisted with its run marker. */
@@ -286,15 +269,15 @@ export class AgentRuntime {
     })
     if (started.run.status !== 'running') {
       this.queue.push({ run: started.run, userMessage: started.message })
-      this.addUserItem(started, message, [], [])
+      this.addUserItem(started, message)
       this.emit()
       return
     }
     // No executor was active, so the queued message starts immediately.
     this.beginRun(started)
-    this.addUserItem(started, message, [], [])
+    this.addUserItem(started, message)
     this.emit()
-    await this.runTurn(message, [])
+    await this.runTurn(message)
   }
 
   private startRun(
@@ -318,12 +301,7 @@ export class AgentRuntime {
   }
 
   /** Append the optimistic user bubble; its row id comes from the ledger insert. */
-  private addUserItem(
-    started: AgentRunStart,
-    text: string,
-    imageIds: number[],
-    dataUrls: string[],
-  ): void {
+  private addUserItem(started: AgentRunStart, text: string): void {
     const generated = started.message
       ? { view: this.view, id: `m-${started.message.id}` }
       : nextItemId(this.view, 'u')
@@ -335,24 +313,16 @@ export class AgentRuntime {
           id: generated.id,
           kind: 'user',
           text,
-          images: dataUrls.length > 0 ? dataUrls : undefined,
-          imageAssetIds: imageIds.length > 0 ? imageIds : undefined,
         },
       ],
     }
   }
 
-  private async runTurn(text: string, attachments: Attachment[]): Promise<void> {
+  private async runTurn(text: string): Promise<void> {
     const agent = this.agent
     if (!agent) return
-    const images: ImageContent[] = attachments.map((file) => ({
-      type: 'image',
-      data: file.data,
-      mimeType: file.mime,
-    }))
     try {
-      if (images.length > 0) await agent.prompt(text || '请描述这些图片。', images)
-      else await agent.prompt(text)
+      await agent.prompt(text)
     } catch (error) {
       this.handleThrown(error)
     } finally {
@@ -440,7 +410,7 @@ export class AgentRuntime {
 
     const kept = records.slice(0, userIndex + 1)
     this.teardownAgent()
-    this.view = createView(projectHistory(kept, this.images))
+    this.view = createView(projectHistory(kept))
     this.lastError = null
     this.status = 'running'
     this.view.settled = false
@@ -493,10 +463,9 @@ export class AgentRuntime {
     const resumeFrom = started.run.resumeFromMessageId
     if (resumeFrom !== null) await this.deps.truncate(conversation.id, resumeFrom)
     const records = await this.deps.loadMessages(conversation.id)
-    this.images = await this.deps.loadImages(records).catch(() => new Map())
 
     this.teardownAgent()
-    this.view = createView(projectHistory(records, this.images))
+    this.view = createView(projectHistory(records))
     this.view.settled = false
     this.status = 'running'
     this.emit()
@@ -548,7 +517,6 @@ export class AgentRuntime {
           usage: record.usage,
           thinking: record.thinking,
           thinkingSignature: record.thinkingSignature,
-          imageAssetIds: record.imageAssetIds,
           toolArgs: record.toolArgs,
           toolDurationMs: record.toolDurationMs,
           isPartial: record.isPartial,
@@ -891,7 +859,7 @@ export class AgentRuntime {
       this.view = beginPrompt(this.view)
       this.status = 'running'
       this.emit()
-      await this.runTurn(text, [])
+      await this.runTurn(text)
     } finally {
       this.pumping = false
       this.settleAfterRun()
