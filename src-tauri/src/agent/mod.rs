@@ -6,6 +6,7 @@
 //! - API Key 存在 Keystore（Android）或 0600 私有文件（桌面），不进 SQLite、不进 JS、不进日志。
 //! - 会话与消息落 `life.db`；模型可见工具为 5 个 `fs_*` + 1 个技能元工具 `load_skill`。
 
+pub mod agent_loop;
 pub mod cancel;
 pub mod conversations;
 pub mod discovery;
@@ -16,6 +17,7 @@ pub mod params;
 pub mod runs;
 pub mod secrets;
 pub mod supervisor;
+pub mod tools;
 
 use std::collections::HashMap;
 use std::sync::Mutex;

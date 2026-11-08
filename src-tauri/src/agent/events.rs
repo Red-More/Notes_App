@@ -12,6 +12,8 @@ use crate::vfs::error::ToolError;
 
 pub const STATE: &str = "state";
 pub const ASSISTANT: &str = "assistant";
+/// One persisted `role=tool` row; payload is the full message.
+pub const TOOL: &str = "tool";
 pub const ERROR: &str = "error";
 pub const END: &str = "end";
 
