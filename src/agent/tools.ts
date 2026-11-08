@@ -309,7 +309,14 @@ export function createTools(
     execute: async (_toolCallId, params) => {
       const input = params as { pattern: string; root?: string; caseSensitive?: boolean }
       assertReadableGlob(input.pattern, input.root)
-      const outcome = await runTool(() => api.fsGlob(input))
+      // Rebuild the request explicitly so model-supplied extras never reach the command.
+      const outcome = await runTool(() =>
+        api.fsGlob({
+          pattern: input.pattern,
+          root: input.root,
+          caseSensitive: input.caseSensitive,
+        }),
+      )
       if (!outcome.ok) return toolFailure(outcome.text)
       const entries = outcome.value
       return { content: [{ type: 'text', text: renderGlob(entries) }], details: entries }
@@ -350,7 +357,16 @@ export function createTools(
         contextLines?: number
       }
       if (input.path) assertReadable(input.path)
-      const outcome = await runTool(() => api.fsGrep(input))
+      // Rebuild the request explicitly so model-supplied extras never reach the command.
+      const outcome = await runTool(() =>
+        api.fsGrep({
+          pattern: input.pattern,
+          path: input.path,
+          type: input.type,
+          maxResults: input.maxResults,
+          contextLines: input.contextLines,
+        }),
+      )
       if (!outcome.ok) return toolFailure(outcome.text)
       const result = outcome.value
       return { content: [{ type: 'text', text: renderGrep(result) }], details: result }

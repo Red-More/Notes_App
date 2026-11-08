@@ -4,7 +4,7 @@
 //! - 只认规范化后的 `/life/...` 路径，不感知真实文件系统；
 //! - 读写全部走 `inodes` + `blobs`，写操作追加 rev、永不覆盖；
 //! - write/edit 在单事务内同时维护 `meta` 镜像；
-//! - 不感知模型/Agent，5 个 Tauri command 只是薄封装。
+//! - 不感知模型/Agent，Tauri command 只是薄封装（身份由命令面传入）。
 //!
 //! 并发模型：`VfsState` 用 `Mutex<VirtualFs>` 串行化所有操作，write/edit
 //! 天然不会被并发插入；`edit` 仍保留 expect_rev 乐观锁，用于检测“读旧版本后

@@ -258,8 +258,6 @@ export const api = {
     startLine?: number
     endLine?: number
     includeMeta?: boolean
-    /** UI reads bypass the Agent folder ACL. */
-    principal?: 'user' | 'agent'
   }) => invoke<VfsReadResult>('fs_read', params),
   fsWrite: (params: {
     path: string
@@ -278,7 +276,6 @@ export const api = {
     pattern: string
     root?: string
     caseSensitive?: boolean
-    principal?: 'user' | 'agent'
   }) => invoke<VfsGlobEntry[]>('fs_glob', params),
   fsGrep: (params: {
     pattern: string
@@ -286,8 +283,12 @@ export const api = {
     type?: string
     maxResults?: number
     contextLines?: number
-    principal?: 'user' | 'agent'
   }) => invoke<VfsGrepResponse>('fs_grep', params),
+  // 界面面命令：身份在 Rust 侧固定为 User，前端不声明 principal。
+  userRead: (params: { path: string; includeMeta?: boolean }) =>
+    invoke<VfsReadResult>('user_read', params),
+  userSearch: (params: { pattern: string; type?: string; maxResults?: number }) =>
+    invoke<VfsGrepResponse>('user_search', params),
 
   // ---- Notes (doc kind = note) ----
   listNotes: async (params: { folderId?: number; unclassified?: boolean; sort?: NoteSort }) => {
@@ -300,15 +301,14 @@ export const api = {
     return docs.map(docToNote)
   },
   /**
-   * M1-6：笔记搜索统一走 `fs_grep`（FTS5 + LIKE 回退），不再依赖 doc_list 的 instr。
-   * grep 的命中路径直接作为 doc_list 的过滤条件，避免拉取全量列表再按 path 筛选。
+   * M1-6：笔记搜索统一走界面面 `user_search`（FTS5 + LIKE 回退），不再依赖 doc_list 的 instr。
+   * 命中路径直接作为 doc_list 的过滤条件，避免拉取全量列表再按 path 筛选。
    */
   searchNotes: async (params: { search: string; folderId?: number; unclassified?: boolean }) => {
-    const hits = await api.fsGrep({
+    const hits = await api.userSearch({
       pattern: params.search,
       type: 'note',
       maxResults: 200,
-      principal: 'user',
     })
     const paths = hits.hits.map((hit) => hit.path)
     const docs = paths.length

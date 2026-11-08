@@ -42,16 +42,6 @@ pub enum Principal {
     Agent,
 }
 
-impl Principal {
-    /// 命令层解析：缺省按 Agent 处理，确保未显式声明的调用仍被约束。
-    pub fn parse(raw: Option<&str>) -> Self {
-        match raw.map(str::trim) {
-            Some("user") => Self::User,
-            _ => Self::Agent,
-        }
-    }
-}
-
 /// 统一的访问判定钩子。
 pub fn ensure_allowed(
     conn: &Connection,
