@@ -54,7 +54,7 @@ pub fn run() {
                 Ok(_) => {}
                 Err(e) => log::warn!("search index stats failed: {e}"),
             }
-            // 首次启动写入 6 个内置技能；已种过则不再补，避免卸载后复活。
+            // 首次启动写入 4 个内置技能；已种过则不再补，避免卸载后复活。
             let mut vault = VirtualFs::new(conn);
             // 媒体作业不跨进程续跑：上次运行中的作业标记失败，排队中的保留。
             if let Err(e) = media::jobs::recover(vault.conn()) {

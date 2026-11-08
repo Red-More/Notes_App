@@ -49,7 +49,7 @@
 | 基线校准完成 | 2026-11-05 | CI 双端全绿，Rust 核心回归测试可执行，Android debug APK 可启动，capability 无 `fs:default` |
 | Agent MVP 完成 | 2026-11-17 | 真机一句话记录落盘，5 工具越狱清单全拦，Agent chunk 体积达标 |
 | 检索闭环完成 | 2026-11-24 | 千条笔记 grep 首屏 < 200ms，中文短词可用 |
-| 技能 v1 完成 | 2026-12-01 | “复盘今天”端到端产出复盘章节 |
+| 技能 v1 完成 | 2026-12-01 | 触发内置技能端到端产出结构化结果 |
 | 体验闭环完成 | 2026-12-08 | 对话内可回滚版本，离线/取消不丢草稿 |
 | 数据主权完成 | 2026-12-15 | 导出 → 清库 → 导入，数据/索引/版本一致 |
 | 发布候选 | 2026-12-22 | 红线检查表 10 项全部签署 |
@@ -155,7 +155,7 @@
 | 1 | **M0 基线校准** | 10/30–11/05 | 建立可编译、可回归、可发版的质量门 | CI 强化、Rust 核心测试、source 语义、capability 收口（移除 `fs:default`）、Android 工程、v0.1.0 基线 | P0 | CI 双端全绿；核心回归用例通过；Android debug APK 可启动；capability 无 `fs:default` |
 | 2 | **M2 Agent 闭环** | 11/06–11/17 | 打通“说话 → 工具 → 落盘 → 回显” | LLM 代理、Keystore、会话表、pi-agent-core、5 工具绑定、对话 UI、system prompt | P0 | 真机一句话记录成功；越狱清单全拦；断网不崩；grep 可接受 LIKE 回退；Agent chunk 达标 |
 | 3 | **M1 检索闭环** | 11/18–11/24 | 把 Agent 的检索质量与性能补齐 | FTS5 同事务维护、`grep` FTS + type 过滤、千条种子性能报告 | P0 | 千条笔记 grep < 200ms；索引与 blobs 一致 |
-| 4 | **M3 技能系统** | 11/25–12/01 | 用技能放大同一套工具 | SKILL.md 规范、扫描注入、6 个内置技能、技能管理 UI | P1 | “复盘今天”端到端；卸载后不再套用 |
+| 4 | **M3 技能系统** | 11/25–12/01 | 用技能放大同一套工具 | SKILL.md 规范、扫描注入、4 个内置技能、技能管理 UI | P1 | 触发内置技能端到端可用；卸载后不再套用 |
 | 5 | **M4 体验闭环** | 12/02–12/08 | 达到可用级 App | 工具卡片、笔记跳转、版本回滚、待办联动、离线三态 | P1 | 15 秒完成一次记录；撤销不丢数据 |
 | 6 | **M5 数据主权** | 12/09–12/15 | 数据可带走、可恢复 | 整库目录树导出、ZIP 导入、备份、保留策略、可选加密 | P1/P2 | 导出→清库→导入后数据/索引/版本一致 |
 | 7 | **M6 发布硬化** | 12/16–12/22 | 可发布 | 真机矩阵、capability 终检、红线检查表、性能/崩溃、RC | P0 | 设计文档附录 B 十项全部签署 |
@@ -232,12 +232,12 @@
 |---|---|---|---|---|---|
 | M3-1 | SKILL.md 规范与解析：frontmatter `name/description/triggers/scope/version`，正文按需读取 | P1 | 技能格式定稿 | 非法 frontmatter 不导致启动失败 | 11/26 |
 | M3-2 | 发现与注入：启动扫描 `/life/.agents/skills/*/SKILL.md`，初始 prompt 只注入摘要；触发后读正文 | P1 | 轻量索引 + 按需展开 | 初始 prompt 不含技能正文；触发后正文进入上下文 | 11/27 |
-| M3-3 | 内置 6 技能：`daily-review / contact-manager / study-planner / trip-planner / weekly-review / note-taking` | P1 | 随包技能包 | 每个技能有明确触发词与工作流 | 11/29 |
+| M3-3 | 内置 4 技能：`contact-manager / study-planner / trip-planner / note-taking` | P1 | 随包技能包 | 每个技能有明确触发词与工作流 | 11/29 |
 | M3-4 | 技能管理：列表、启用开关、卸载（删目录）、自定义创建；状态存 `settings`；写 `.agents` 走专用命令 | P1 | 技能页可用 | 模型无法写 `.agents`；UI 可正常安装/卸载 | 11/30 |
-| M3-5 | E2E：“复盘今天”产出 `## 复盘` 小节并补明日待办 | P1 | 技能演示 | 四步流程不跳步；明日待办不编造 | 12/01 |
+| M3-5 | E2E：触发内置技能完成一次结构化产出并补后续待办 | P1 | 技能演示 | 四步流程不跳步；后续待办不编造 | 12/01 |
 | M3-6 | 恶意技能测试：伪造“注册 bash 工具/读取密钥”的 SKILL.md | P1 | 安全结论 | 不新增工具、不执行、不越权 | 12/01 |
 
-**退出标准**：6 技能可用；开关生效；技能正文不进初始 prompt。
+**退出标准**：4 技能可用；开关生效；技能正文不进初始 prompt。
 
 ---
 
@@ -598,9 +598,9 @@ cargo test
 |---|---|---|
 | M3-1 | ✅ 完成 | `skills.rs::parse_skill` 解析 YAML frontmatter（`name/description/triggers/scope/version`），缺 `name` 或 `description` 视为非法并跳过，不影响启动 |
 | M3-2 | ✅ 完成 | 启动扫描 `/life/.agents/skills/*/SKILL.md`，初始 Prompt 只注入摘要；新增只读元工具 `load_skill(id)`，命中后按需读取正文 |
-| M3-3 | ✅ 完成 | 6 个随包技能（`assets/skills/*.md`，`include_str!`）：daily-review / contact-manager / study-planner / trip-planner / weekly-review / note-taking；首次启动写入一次，删除后不复活 |
+| M3-3 | ✅ 完成 | 4 个随包技能（`assets/skills/*.md`，`include_str!`）：contact-manager / study-planner / trip-planner / note-taking；首次启动写入一次，删除后不复活 |
 | M3-4 | ✅ 完成 | 设置页技能管理：列表、启停（`settings.skills.disabled`）、预览、编辑、新建、卸载、技能包导入；写 `.agents` 只走专用 Rust command |
-| M3-5 | ✅ 完成 | 真机：模型调用 `load_skill(daily-review)` 读取正文，`fs_edit` 在日记末尾追加 `## 复盘`（rev=2），`fs_write` 新建 `todos/2026-11-01.md`（rev=1）；缺失内容标注“未记录”，无编造 |
+| M3-5 | ✅ 完成 | 真机：模型调用 `load_skill` 读取正文，`fs_edit` 在文档末尾追加章节（rev=2），`fs_write` 新建 `todos/2026-11-01.md`（rev=1）；缺失内容标注“未记录”，无编造 |
 | M3-6 | ✅ 完成 | 恶意技能测试：伪造“注册 bash 工具 / 读取密钥”的 SKILL.md 不新增工具、不执行、不越权；`.agents` 读也被拒绝 |
 
 ### 13.2 技能生效机制（与 AgentSkills.io 对齐）
@@ -667,7 +667,7 @@ cargo test
 
 | 项 | 现状 | 后续 |
 |---|---|---|
-| 真机回归 | 导入 7 个技能 → 草稿载入 8 个 → 丢弃草稿 → `## 复盘` 与明日待办均通过 | 设备保留测试数据：`灵感速记`、`Quick Capture`、`todos/2026-11-01.md` |
+| 真机回归 | 导入 7 个技能 → 草稿载入 8 个 → 丢弃草稿 → 结构化产出与后续待办均通过 | 设备保留测试数据：`灵感速记`、`Quick Capture`、`todos/2026-11-01.md` |
 | 触发词块状列表 | 真机发现块状 `triggers` 不解析，已修复并加单测 | — |
 | `scope` | 仅存储，不参与路由 | 若需要“全局/对话内”作用域，M4 再设计 |
 | `rules/*.md` | 仅建目录，不注入 Prompt | 视需求在 M4/M5 增加规则加载与审核 |

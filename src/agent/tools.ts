@@ -379,7 +379,7 @@ export function createTools(
     description:
       '按需读取一个已启用技能的完整指令。参数 name 使用技能索引中的 id 或名称；命中技能触发词后应先调用它，再按正文步骤执行。',
     parameters: Type.Object({
-      name: Type.String({ description: '技能索引中的 id 或名称，例如 daily-review' }),
+      name: Type.String({ description: '技能索引中的 id 或名称，例如 contact-manager' }),
     }),
     prepareArguments: (raw) => {
       const args = argsObject(raw)

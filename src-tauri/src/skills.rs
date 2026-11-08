@@ -37,11 +37,7 @@ const MAX_PACKAGE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SKILL_FILE_BYTES: u64 = 128 * 1024;
 
 /// 随包内置技能：id 与正文。正文含 frontmatter，首次启动原样写入。
-const BUILTINS: [(&str, &str); 6] = [
-    (
-        "daily-review",
-        include_str!("../assets/skills/daily-review.md"),
-    ),
+const BUILTINS: [(&str, &str); 4] = [
     (
         "contact-manager",
         include_str!("../assets/skills/contact-manager.md"),
@@ -53,10 +49,6 @@ const BUILTINS: [(&str, &str); 6] = [
     (
         "trip-planner",
         include_str!("../assets/skills/trip-planner.md"),
-    ),
-    (
-        "weekly-review",
-        include_str!("../assets/skills/weekly-review.md"),
     ),
     (
         "note-taking",

@@ -142,7 +142,7 @@ adb shell am start -n com.mynotes.desktop.debug/com.mynotes.desktop.MainActivity
 
 ### 5.3 后续阶段
 
-- **M3 技能系统**：SKILL.md 解析、启动扫描 `/life/.agents/skills`、初始 prompt 只注入摘要、6 个内置技能、技能管理走专用命令（非 `fs_write`）。
+- **M3 技能系统**：SKILL.md 解析、启动扫描 `/life/.agents/skills`、初始 prompt 只注入摘要、4 个内置技能、技能管理走专用命令（非 `fs_write`）。
 - **M4 体验闭环**：工具卡片、对话跳转文档、版本回滚、待办联动、离线三态。
 - **M5 数据主权**：整库导出/导入、备份、保留策略、可选 sqlcipher。
 - **M6 发布硬化**：真机矩阵、capability 终检、附录 B 十项签署、RC。

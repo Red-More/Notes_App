@@ -18,12 +18,12 @@ function skill(partial: Partial<SkillSummary> & Pick<SkillSummary, 'id' | 'name'
 describe('skills index', () => {
   it('injects only enabled metadata into the prompt index', () => {
     const index = buildSkillsIndex([
-      skill({ id: 'daily-review', name: '每日复盘', triggers: ['复盘今天'], builtin: true }),
+      skill({ id: 'note-taking', name: '笔记整理', triggers: ['记笔记'], builtin: true }),
       skill({ id: 'off', name: '停用技能', enabled: false, triggers: ['停用触发'] }),
     ])
-    expect(index).toContain('每日复盘')
-    expect(index).toContain('daily-review')
-    expect(index).toContain('复盘今天')
+    expect(index).toContain('笔记整理')
+    expect(index).toContain('note-taking')
+    expect(index).toContain('记笔记')
     expect(index).not.toContain('停用技能')
     expect(index).not.toContain('停用触发')
   })
@@ -35,8 +35,8 @@ describe('skills index', () => {
 
 describe('trigger input', () => {
   it('splits mixed separators and ignores empty entries', () => {
-    const result = parseTriggerInput('复盘今天, 今天总结，日复盘、')
-    expect(result.triggers).toEqual(['复盘今天', '今天总结', '日复盘'])
+    const result = parseTriggerInput('记笔记, 整理笔记，知识整理、')
+    expect(result.triggers).toEqual(['记笔记', '整理笔记', '知识整理'])
     expect(result.issues.some((issue) => issue.message.includes('空触发词'))).toBe(true)
   })
 
@@ -46,8 +46,8 @@ describe('trigger input', () => {
   })
 
   it('dedupes case-insensitively and reports it', () => {
-    const result = parseTriggerInput('RUST, rust, 复盘')
-    expect(result.triggers).toEqual(['RUST', '复盘'])
+    const result = parseTriggerInput('RUST, rust, 笔记')
+    expect(result.triggers).toEqual(['RUST', '笔记'])
     expect(result.issues.some((issue) => issue.message.includes('已自动去重'))).toBe(true)
   })
 

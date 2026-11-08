@@ -2632,7 +2632,7 @@ fn fts_recalls_two_character_chinese_words() {
     let mut cases = Vec::new();
     for (kind, title, body, term) in [
         ("diary", "今日饮食", "今天吃了拉面，很满足", "拉面"),
-        ("note", "学习记录", "复盘今天的日语学习", "日语"),
+        ("note", "学习记录", "今天学了日语", "日语"),
         ("contact", "张三", "电话 13800000000", "张三"),
         ("note", "项目复盘", "预算可能要砍 20%", "预算"),
     ] {
@@ -2910,19 +2910,19 @@ fn builtin_skills_seed_once_and_do_not_resurrect() {
     let mut vfs = test_vfs();
     skills::seed_builtins(&mut vfs).expect("builtin skills should seed");
     let list = skills::list(&vfs).unwrap();
-    assert_eq!(list.len(), 6, "six builtin skills are expected");
+    assert_eq!(list.len(), 4, "four builtin skills are expected");
     assert!(list.iter().all(|skill| skill.builtin && skill.enabled));
-    let daily = list
+    let contact = list
         .iter()
-        .find(|skill| skill.id == "daily-review")
-        .expect("daily-review should exist");
-    assert!(daily.triggers.iter().any(|trigger| trigger == "复盘今天"));
+        .find(|skill| skill.id == "contact-manager")
+        .expect("contact-manager should exist");
+    assert!(contact.triggers.iter().any(|trigger| trigger == "联系人"));
 
     skills::delete(&mut vfs, "note-taking").unwrap();
     skills::seed_builtins(&mut vfs).expect("reseed must be a no-op");
     assert_eq!(
         skills::list(&vfs).unwrap().len(),
-        5,
+        3,
         "uninstalled builtin must not resurrect"
     );
 }
@@ -3124,14 +3124,14 @@ fn trigger_input_is_normalized_and_validated() {
         trigger_input(
             "dedupe",
             "去重技能",
-            vec![" 复盘今天 ".into(), "复盘今天".into(), "今天总结".into()],
+            vec![" 记笔记 ".into(), "记笔记".into(), "整理笔记".into()],
         ),
     )
     .unwrap();
     let detail = skills::read(&vfs, &saved.id).unwrap();
     assert_eq!(
         detail.summary.triggers,
-        vec!["复盘今天".to_string(), "今天总结".to_string()],
+        vec!["记笔记".to_string(), "整理笔记".to_string()],
         "triggers are trimmed and deduplicated"
     );
 

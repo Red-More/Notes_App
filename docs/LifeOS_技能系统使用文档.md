@@ -10,12 +10,10 @@
 - 命中时：模型调用 `load_skill` 读取完整正文，再按正文步骤操作。
 - 边界：技能正文永远是普通文本；它不能新增工具、不能执行代码、不能读取密钥。
 
-内置 6 个技能，首次启动自动写入，之后删除不会自动恢复：
+内置 4 个技能，首次启动自动写入，之后删除不会自动恢复：
 
 | id | 名称 | 触发词示例 |
 |---|---|---|
-| `daily-review` | 每日复盘 | 复盘今天、今天总结、回顾今天、日复盘 |
-| `weekly-review` | 周复盘 | 周复盘、这周总结、本周回顾、一周总结 |
 | `contact-manager` | 联系人管家 | 联系人、人脉、加个联系人、查电话、联系方式 |
 | `study-planner` | 学习计划 | 学习计划、复习计划、备考、学习安排 |
 | `trip-planner` | 行程规划 | 出差、旅行、行程规划、出行安排 |
@@ -28,15 +26,15 @@
 在对话里直接说触发场景，例如：
 
 ```text
-复盘今天
+帮我加个联系人
 ```
 
 模型的执行链路：
 
-1. 在【技能索引】看到 `每日复盘（id: daily-review）`；
-2. 调用 `load_skill("daily-review")` 读取正文；
-3. 按正文步骤读取日记与待办；
-4. 在当天日记末尾追加 `## 复盘`，并新建明日待办。
+1. 在【技能索引】看到 `联系人管家（id: contact-manager）`；
+2. 调用 `load_skill("contact-manager")` 读取正文；
+3. 按正文步骤核对姓名、电话、公司与标签；
+4. 在 `/life/contacts/` 下新建或更新联系人档案。
 
 ### 2.2 新建自定义技能
 
@@ -115,13 +113,13 @@ version: "1.0"
 解析兼容两种 `triggers` 写法：
 
 ```yaml
-triggers: ["复盘今天", "今天总结"]   # 内联数组（UI 保存时使用）
+triggers: ["记笔记", "整理笔记"]   # 内联数组（UI 保存时使用）
 ```
 
 ```yaml
 triggers:                            # 块状列表（模型与外部技能包常用）
-  - 复盘今天
-  - 今天总结
+  - 记笔记
+  - 整理笔记
 ```
 
 缺少 `name` 或 `description` 的文件会被视为非法技能：列表跳过、启动不报错，并在日志中记录路径。
@@ -236,7 +234,7 @@ Rust（[skills.rs](file:///c:/Users/16412/Documents/Github_Repositories/Notes_Ap
 
 | 函数 | 作用 |
 |---|---|
-| `seed_builtins` | 首次写入 6 个内置技能 |
+| `seed_builtins` | 首次写入 4 个内置技能 |
 | `list / read / save / set_enabled / delete` | 技能 CRUD 与启停 |
 | `import_package` | 解析 `.zip` / `.skill` 并安装 |
 | `triggers_from / normalize_triggers` | 两种 YAML 触发词解析与校验 |

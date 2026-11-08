@@ -88,7 +88,7 @@
 |---|---|
 | 格式 | `SKILL.md` + frontmatter（name, description, version） |
 | 加载方式 | 启动时扫描 `/life/.agents/skills/`，注入匹配的技能到 system prompt |
-| 内置技能 | `daily-review`, `contact-manager`, `study-planner`, `trip-planner`, `weekly-review` |
+| 内置技能 | `contact-manager`, `study-planner`, `trip-planner`, `note-taking` |
 | 用户自定义 | 允许用户创建自己的 SKILL.md |
 | 安全 | 技能只注入 prompt，不执行代码 |
 
@@ -249,11 +249,10 @@ CREATE TABLE messages (
   inbox/           # 快速捕获，未分类的临时记录
   .agents/
     skills/        # 技能目录
-      daily-review/SKILL.md
       contact-manager/SKILL.md
       study-planner/SKILL.md
       trip-planner/SKILL.md
-      weekly-review/SKILL.md
+      note-taking/SKILL.md
 ```
 
 ---
