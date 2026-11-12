@@ -754,6 +754,54 @@ textarea {
   min-height: calc(61px + var(--safe-top));
 }
 
+/* The quick-syntax bar is positioned against the page, not the viewport. */
+.note-editor-page {
+  position: relative;
+}
+
+/* Floating Markdown shortcut row, pinned above the soft keyboard while editing. */
+.quick-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  touch-action: manipulation;
+}
+
+.quick-bar::-webkit-scrollbar {
+  display: none;
+}
+
+.quick-bar-btn {
+  flex: 0 0 auto;
+  min-width: 44px;
+  height: 40px;
+  padding: 0 10px;
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  touch-action: manipulation;
+}
+
+.quick-bar-btn:active {
+  background: var(--accent-weak);
+  color: var(--accent-deep);
+}
+
 /* Selection topbar: cancel / live count / select-all. Fixed 40px side columns
    keep the count optically centered at any viewport width. */
 .editor-topbar.selection-topbar {
@@ -1721,6 +1769,46 @@ body.split-resizing {
 .dialog-overlay {
   align-items: center;
   background: rgba(15, 16, 20, 0.5);
+}
+
+/* ============ Image viewer ============ */
+/* Tap a picture in a note to inspect it full screen; the backdrop closes it. */
+.image-zoom-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(16px + var(--safe-top)) 12px calc(16px + var(--safe-bottom));
+  background: rgba(8, 9, 12, 0.92);
+  animation: fade-in 0.15s ease;
+}
+
+.image-zoom-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.image-zoom-close {
+  position: absolute;
+  top: calc(8px + var(--safe-top));
+  right: 10px;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.image-zoom-close:active {
+  background: rgba(255, 255, 255, 0.26);
 }
 
 .dialog {

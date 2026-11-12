@@ -28,6 +28,8 @@ import {
   type LayoutPrefs,
 } from '../../editor/layout'
 import SplitHandle from '../../components/SplitHandle'
+import ImageZoom from '../../components/ImageZoom'
+import { subscribeImageZoom, type ZoomImage } from '../../system/imageZoom'
 import {
   MarkdownEditor,
   type MarkdownEditorHandle,
@@ -73,6 +75,33 @@ const keepFieldFocus = (e: React.PointerEvent<HTMLButtonElement>) => e.preventDe
 /** How long a programmatic scroll suppresses the other pane's scroll events. */
 const SYNC_GUARD_MS = 160
 
+/** Quick-syntax actions offered by the bar above the soft keyboard. */
+type QuickAction =
+  | 'heading'
+  | 'bold'
+  | 'italic'
+  | 'list'
+  | 'task'
+  | 'quote'
+  | 'code'
+  | 'link'
+  | 'image'
+
+const QUICK_ACTIONS: Array<{ action: QuickAction; label: string }> = [
+  { action: 'heading', label: '标题' },
+  { action: 'bold', label: '加粗' },
+  { action: 'italic', label: '斜体' },
+  { action: 'list', label: '列表' },
+  { action: 'task', label: '待办' },
+  { action: 'quote', label: '引用' },
+  { action: 'code', label: '代码' },
+  { action: 'link', label: '链接' },
+  { action: 'image', label: '图片' },
+]
+
+/** Space reserved below the editor content so the quick bar never covers text. */
+const QUICK_BAR_SPACE = 60
+
 function hhmm(ts: number): string {
   const d = new Date(ts)
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
@@ -102,6 +131,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   const [deleteVersionConfirm, setDeleteVersionConfirm] = useState<NoteVersion | null>(null)
 
   const [folderModalOpen, setFolderModalOpen] = useState(false)
+  const [zoomImage, setZoomImage] = useState<ZoomImage | null>(null)
 
   // Layout config is persisted, so the split mode / ratio survives reloads.
   const [layout, setLayout] = useState<LayoutPrefs>(() => getLayoutPrefs())
@@ -182,6 +212,10 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
 
   // Skip saving a brand-new note that only contains whitespace.
   const isBlank = !title.trim() && !content.trim()
+
+  // Pictures rendered inside the preview and the CodeMirror widgets ask for the
+  // enlarged viewer through a window event (they are outside this React tree).
+  useEffect(() => subscribeImageZoom(setZoomImage), [])
 
   /** Persist current edits; resolves false only when the write failed. */
   const doSave = useCallback(async () => {
@@ -340,15 +374,38 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     }
   }, [])
 
-  /** Pasting an image from the clipboard stores it and inserts its reference. */
-  const handleEditorPaste = (event: React.ClipboardEvent<HTMLDivElement>) => {
-    const files = Array.from(event.clipboardData.items)
-      .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
-      .map((item) => item.getAsFile())
-      .filter((file): file is File => file != null)
-    if (files.length === 0) return
-    event.preventDefault()
-    void insertImages(files)
+  /** Apply one quick-syntax button from the bar above the keyboard. */
+  const handleQuickAction = (action: QuickAction) => {
+    const editor = editorRef.current
+    switch (action) {
+      case 'heading':
+        editor?.toggleLinePrefix('# ')
+        break
+      case 'bold':
+        editor?.toggleInline('**')
+        break
+      case 'italic':
+        editor?.toggleInline('*')
+        break
+      case 'list':
+        editor?.toggleLinePrefix('- ')
+        break
+      case 'task':
+        editor?.toggleLinePrefix('- [ ] ')
+        break
+      case 'quote':
+        editor?.toggleLinePrefix('> ')
+        break
+      case 'code':
+        editor?.insertAtCursor('```\n\n```', 4)
+        break
+      case 'link':
+        editor?.insertLink()
+        break
+      case 'image':
+        fileInputRef.current?.click()
+        break
+    }
   }
 
   // ---- Keyboard-aware editing viewport ----
@@ -841,7 +898,9 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
             ref={bodyRef}
             style={
               kbInset
-                ? { paddingBottom: `calc(${kbInset}px + var(--safe-bottom))` }
+                ? {
+                    paddingBottom: `calc(${kbInset}px + var(--safe-bottom) + ${QUICK_BAR_SPACE}px)`,
+                  }
                 : undefined
             }
           >
@@ -896,7 +955,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
                       {wordCount}字
                     </span>
                   </div>
-                  <div className="markdown-editor-host" onFocus={enterEditing} onPaste={handleEditorPaste}>
+                  <div className="markdown-editor-host" onFocus={enterEditing}>
                     <MarkdownEditor
                       ref={editorRef}
                       value={content}
@@ -905,6 +964,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
                       onChange={setContent}
                       onHistoryChange={handleHistoryChange}
                       onScrollLine={handleEditorScroll}
+                      onPasteImages={insertImages}
                     />
                   </div>
                 </div>
@@ -931,6 +991,28 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
               </div>
             )}
           </div>
+
+          {/* Quick syntax bar: only while the soft keyboard is up, pinned above it. */}
+          {editing && kbInset > 0 && (
+            <div
+              className="quick-bar"
+              style={{ bottom: `calc(${kbInset}px + var(--safe-bottom))` }}
+              role="toolbar"
+              aria-label="快捷语法"
+            >
+              {QUICK_ACTIONS.map((item) => (
+                <button
+                  key={item.action}
+                  type="button"
+                  className="quick-bar-btn"
+                  onClick={() => handleQuickAction(item.action)}
+                  onPointerDown={keepFieldFocus}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          )}
         </>
       )}
 
@@ -1101,6 +1183,9 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
           void insertImages(files)
         }}
       />
+
+      {/* Full-screen viewer for a tapped note picture. */}
+      {zoomImage && <ImageZoom image={zoomImage} onClose={() => setZoomImage(null)} />}
 
       {restoreConfirm && (
         <ConfirmDialog

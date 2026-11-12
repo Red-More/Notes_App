@@ -61,6 +61,12 @@ import { findUnclosedFence } from '../editor/diagnostics'
 import { insertMarkdownLink, toggleInlineMarker } from '../editor/commands'
 import { indentUnitFor, type EditorPrefs } from '../editor/prefs'
 import { assetDataUrl } from '../assets'
+import { requestImageZoom } from '../system/imageZoom'
+import {
+  clipboardImageFromNative,
+  hasTextPayload,
+  imageFilesFromTransfer,
+} from '../system/clipboardImages'
 
 export interface MarkdownEditorHandle {
   focus: () => void
@@ -72,7 +78,13 @@ export interface MarkdownEditorHandle {
   /** Move the selection to a line and center it (preview click-to-source). */
   revealLine: (line: number) => void
   /** Insert text at the caret (used by image insertion) and keep focus. */
-  insertAtCursor: (text: string) => void
+  insertAtCursor: (text: string, caretOffset?: number) => void
+  /** Wrap or unwrap the selection with an inline marker (quick bar). */
+  toggleInline: (marker: string) => void
+  /** Insert a Markdown link around the selection (quick bar). */
+  insertLink: () => void
+  /** Toggle a line prefix such as `# `, `- ` or `> ` on the selected lines. */
+  toggleLinePrefix: (prefix: string) => void
   /** 1-based line at the top of the editor viewport. */
   getTopLine: () => number
 }
@@ -84,6 +96,7 @@ interface MarkdownEditorProps {
   onChange: (value: string) => void
   onHistoryChange: (canUndo: boolean, canRedo: boolean) => void
   onScrollLine: (line: number) => void
+  onPasteImages: (files: File[]) => void
 }
 
 type CallbackRef<T> = { current: T }
@@ -92,6 +105,7 @@ interface EditorRefs {
   onChange: CallbackRef<(value: string) => void>
   onHistory: CallbackRef<(canUndo: boolean, canRedo: boolean) => void>
   onScroll: CallbackRef<(line: number) => void>
+  onPasteImages: CallbackRef<(files: File[]) => void>
   history: CallbackRef<{ undo: number; redo: number }>
 }
 
@@ -244,9 +258,37 @@ function linePosition(view: EditorView, line: number): number {
 }
 
 /**
+ * Toggle `prefix` at the start of every selected line. Collapsed selections
+ * act on the current line; a selection ending exactly at a line start does not
+ * include that line.
+ */
+function toggleLinePrefix(view: EditorView, prefix: string): void {
+  const { state } = view
+  const selection = state.selection.main
+  const firstNumber = state.doc.lineAt(selection.from).number
+  let lastNumber = state.doc.lineAt(selection.to).number
+  if (selection.to === state.doc.line(lastNumber).from && lastNumber > firstNumber) {
+    lastNumber -= 1
+  }
+  const numbers: number[] = []
+  for (let number = firstNumber; number <= lastNumber; number += 1) numbers.push(number)
+
+  const allPrefixed = numbers.every((number) => state.doc.line(number).text.startsWith(prefix))
+  const changes = numbers.map((number) => {
+    const line = state.doc.line(number)
+    return allPrefixed
+      ? { from: line.from, to: line.from + prefix.length, insert: '' }
+      : { from: line.from, insert: prefix }
+  })
+  view.dispatch({ changes, userEvent: 'input.format' })
+  view.focus()
+}
+
+/**
  * Renders `![alt](asset:<id>)` as an inline picture while keeping the Markdown
  * source untouched. Clicking the picture selects the exact source range so the
- * user can delete it; cursor movement, selection and history stay native.
+ * user can delete it, and double-clicking opens the enlarged viewer; cursor
+ * movement, selection and history stay native.
  */
 const ASSET_IMAGE_RE = /!\[([^\]]*)\]\(asset:(\d+)\)/g
 
@@ -276,7 +318,7 @@ class AssetImageWidget extends WidgetType {
   toDOM(view: EditorView): HTMLElement {
     const wrap = document.createElement('span')
     wrap.className = 'cm-asset-image'
-    wrap.title = '点击选中图片源码'
+    wrap.title = '单击选中源码，双击放大'
     const image = document.createElement('img')
     image.alt = this.alt || '图片'
     image.loading = 'lazy'
@@ -285,10 +327,17 @@ class AssetImageWidget extends WidgetType {
       view.dispatch({ selection: { anchor: this.from, head: this.to } })
       view.focus()
     })
+    // The source URL is resolved asynchronously, so keep it for the zoom event.
+    let zoomSrc: string | null = null
+    image.addEventListener('dblclick', (event) => {
+      event.preventDefault()
+      if (zoomSrc) requestImageZoom({ src: zoomSrc, alt: this.alt })
+    })
     void assetDataUrl(this.id).then((url) => {
       if (!wrap.isConnected) return
       if (url) {
         image.src = url
+        zoomSrc = url
       } else {
         wrap.classList.add('asset-missing')
         wrap.textContent = '图片缺失'
@@ -389,6 +438,38 @@ function buildExtensions(prefs: EditorPrefs, refs: EditorRefs) {
     ),
     markdown({ codeLanguages: languages }),
     assetImagePlugin,
+    // Pictures arrive as files on desktop and as base64 <img> markup on some
+    // mobile WebViews; the Android shell covers clips the page cannot read.
+    EditorView.domEventHandlers({
+      paste: (event) => {
+        const files = imageFilesFromTransfer(event.clipboardData)
+        if (files.length > 0) {
+          event.preventDefault()
+          refs.onPasteImages.current(files)
+          return true
+        }
+        // Text pastes keep their default behavior, so the native clipboard is
+        // only consulted when the transfer carried nothing pasteable.
+        if (hasTextPayload(event.clipboardData)) return false
+        const image = clipboardImageFromNative()
+        if (!image) return false
+        event.preventDefault()
+        refs.onPasteImages.current([image])
+        return true
+      },
+      // Mobile IMEs may deliver the picture through beforeinput only, with the
+      // paste event suppressed entirely.
+      beforeinput: (event) => {
+        if (event.inputType !== 'insertFromPaste' && event.inputType !== 'insertFromDrop') {
+          return false
+        }
+        const files = imageFilesFromTransfer(event.dataTransfer)
+        if (files.length === 0) return false
+        event.preventDefault()
+        refs.onPasteImages.current(files)
+        return true
+      },
+    }),
     indentationMarkers({
       thickness: 1,
       activeThickness: 2,
@@ -427,13 +508,17 @@ function buildExtensions(prefs: EditorPrefs, refs: EditorRefs) {
 }
 
 export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorProps>(
-  function MarkdownEditor({ value, prefs, kbInset, onChange, onHistoryChange, onScrollLine }, ref) {
+  function MarkdownEditor(
+    { value, prefs, kbInset, onChange, onHistoryChange, onScrollLine, onPasteImages },
+    ref,
+  ) {
     const hostRef = useRef<HTMLDivElement>(null)
     const viewRef = useRef<EditorView | null>(null)
     const valueRef = useRef(value)
     const onChangeRef = useRef(onChange)
     const onHistoryRef = useRef(onHistoryChange)
     const onScrollRef = useRef(onScrollLine)
+    const onPasteImagesRef = useRef(onPasteImages)
     const historyRef = useRef({ undo: -1, redo: -1 })
 
     useEffect(() => {
@@ -452,6 +537,10 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
       onScrollRef.current = onScrollLine
     }, [onScrollLine])
 
+    useEffect(() => {
+      onPasteImagesRef.current = onPasteImages
+    }, [onPasteImages])
+
     // Create the view once per editor session; prefs are read per session.
     useEffect(() => {
       const host = hostRef.current
@@ -460,6 +549,7 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
         onChange: onChangeRef,
         onHistory: onHistoryRef,
         onScroll: onScrollRef,
+        onPasteImages: onPasteImagesRef,
         history: historyRef,
       })
       const state = EditorState.create({ doc: valueRef.current, extensions })
@@ -495,6 +585,7 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
         onChange: onChangeRef,
         onHistory: onHistoryRef,
         onScroll: onScrollRef,
+        onPasteImages: onPasteImagesRef,
         history: historyRef,
       })
       view.setState(EditorState.create({ doc: value, extensions }))
@@ -546,16 +637,29 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
             effects: EditorView.scrollIntoView(pos, { y: 'center' }),
           })
         },
-        insertAtCursor: (text) => {
+        insertAtCursor: (text, caretOffset) => {
           const view = viewRef.current
           if (!view) return
           const { from, to } = view.state.selection.main
+          const caret = from + (caretOffset ?? text.length)
           view.dispatch({
             changes: { from, to, insert: text },
-            selection: { anchor: from + text.length },
-            effects: EditorView.scrollIntoView(from + text.length, { y: 'nearest' }),
+            selection: { anchor: caret },
+            effects: EditorView.scrollIntoView(caret, { y: 'nearest' }),
           })
           view.focus()
+        },
+        toggleInline: (marker) => {
+          const view = viewRef.current
+          if (view) toggleInlineMarker(marker)(view)
+        },
+        insertLink: () => {
+          const view = viewRef.current
+          if (view) insertMarkdownLink(view)
+        },
+        toggleLinePrefix: (prefix) => {
+          const view = viewRef.current
+          if (view) toggleLinePrefix(view, prefix)
         },
         getTopLine: () => {
           const view = viewRef.current

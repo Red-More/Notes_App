@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ToastHost } from './components/ui'
 import ReminderScheduler from './components/ReminderScheduler'
 import { IconCalendar, IconChat, IconNote, IconTodo, IconUsers } from './components/Icons'
@@ -89,7 +89,20 @@ function App() {
     setIndex(idx)
   }, [])
 
+  // The pager unmounts while an overlay (editor / folders) is open, so the
+  // freshly mounted track starts at translateX(0) and would show the first page
+  // (chat) even though the active tab is still "notes". Layout effect so the
+  // position is restored before the first paint and no flash is visible.
+  useLayoutEffect(() => {
+    const tr = trackRef.current
+    if (!tr) return
+    tr.style.transition = 'none'
+    tr.style.transform = `translateX(${-indexRef.current * 100}%)`
+  }, [overlay])
+
   // ---- Horizontal paging gestures (touch + mouse drag) ----
+  // `overlay` is a dependency only as a remount signal: closing an overlay
+  // creates a new pager element, so the listeners must move with it.
   // The track has no touch-action restriction: the browser handles vertical
   // panning natively (list scrolling / pull-to-refresh) and horizontal moves
   // on overflow elements (chips rows) natively; only horizontal-dominant
@@ -273,7 +286,7 @@ function App() {
         document.body.style.userSelect = savedUserSelect
       }
     }
-  }, [goTo])
+  }, [goTo, overlay])
 
   // ---- Keyboard paging (accessibility: TalkBack / VoiceOver paging actions) ----
   const onPagerKey = (e: React.KeyboardEvent) => {

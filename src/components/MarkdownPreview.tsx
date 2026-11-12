@@ -21,6 +21,7 @@ import { classifyHref } from '../editor/links'
 import { lineAtOffset, offsetForLine, type PreviewBlock } from '../editor/sync'
 import { copyText } from '../system/clipboard'
 import { openExternal } from '../system/openExternal'
+import { requestImageZoom } from '../system/imageZoom'
 import { toast } from '../toast'
 import { ConfirmDialog } from './ui'
 import { IconExternalLink } from './Icons'
@@ -215,6 +216,17 @@ export const MarkdownPreview = forwardRef<MarkdownPreviewHandle, MarkdownPreview
 
     const handleClick = (event: React.MouseEvent<HTMLDivElement>) => {
       const target = event.target as HTMLElement
+
+      // A tapped picture opens the enlarged viewer. This wins over a link
+      // wrapping the image, which would otherwise navigate the webview.
+      const image = target.closest<HTMLImageElement>('img')
+      if (image) {
+        event.preventDefault()
+        const src = image.currentSrc || image.src
+        if (src) requestImageZoom({ src, alt: image.alt })
+        return
+      }
+
       const link = target.closest<HTMLAnchorElement>('a')
 
       // Never let a link navigate the app webview away. In-page anchors
