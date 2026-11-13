@@ -111,6 +111,7 @@ pub fn run() {
             commands::doc::doc_set_pinned,
             commands::doc::doc_move,
             commands::folder::folder_list,
+            commands::folder::folder_path,
             commands::folder::folder_create,
             commands::folder::folder_rename,
             commands::folder::folder_rename_default,

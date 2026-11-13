@@ -54,9 +54,14 @@ pub struct DocVersion {
 pub struct Folder {
     pub id: i64,
     pub name: String,
+    /// 虚拟路径；下级层级由路径前缀表达。
+    pub path: String,
     pub is_pinned: i64,
     pub sort_order: i64,
+    /// 直接位于该文件夹内的笔记数。
     pub note_count: i64,
+    /// 是否存在直接子文件夹，供选择器决定是否继续下钻。
+    pub has_children: bool,
     pub created_at: String,
 }
 
@@ -67,6 +72,20 @@ pub struct FolderStats {
     pub unclassified: i64,
     pub default_folder_name: String,
     pub folders: Vec<Folder>,
+    /// 当前作用域显示名；根作用域为默认文件夹名。
+    pub scope_name: String,
+    /// 当前作用域的虚拟路径。
+    pub scope_path: String,
+}
+
+/// 文件夹面包屑节点；根节点的 `id` 为 `None`。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderCrumb {
+    pub id: Option<i64>,
+    pub name: String,
+    /// 虚拟路径，用于前端按路径判断命名空间。
+    pub path: String,
 }
 
 /// 交叉索引查询结果：轻量引用，供“人物/地点/日期”聚合列表使用。

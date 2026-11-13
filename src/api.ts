@@ -19,6 +19,7 @@ import type {
   DocSaveReceipt,
   DocVersion,
   Folder,
+  FolderCrumb,
   FolderStats,
   LlmParams,
   McpServerInfo,
@@ -27,7 +28,6 @@ import type {
   NewChatMessage,
   Note,
   NoteVersion,
-  RootDir,
   SkillDetail,
   SkillInput,
   SkillSummary,
@@ -95,8 +95,12 @@ export const docApi = {
   setPinned: (params: { ids: number[]; pinned: boolean }) => invoke<void>('doc_set_pinned', params),
   move: (params: { ids: number[]; folderId: number | null }) => invoke<void>('doc_move', params),
 
-  listFolders: () => invoke<FolderStats>('folder_list'),
-  createFolder: (name: string) => invoke<Folder>('folder_create', { name }),
+  listFolders: (parentId: number | null = null, root: string | null = null) =>
+    invoke<FolderStats>('folder_list', { parentId, root }),
+  folderPath: (id: number | null = null, root: string | null = null) =>
+    invoke<FolderCrumb[]>('folder_path', { id, root }),
+  createFolder: (name: string, parentId: number | null = null) =>
+    invoke<Folder>('folder_create', { name, parentId }),
   renameFolder: (params: { id: number; name: string }) => invoke<void>('folder_rename', params),
   renameDefaultFolder: (name: string) => invoke<void>('folder_rename_default', { name }),
   deleteFolder: (id: number) => invoke<void>('folder_delete', { id }),
@@ -391,9 +395,12 @@ export const api = {
   },
 
   // ---- Folders ----
-  listFolders: () => docApi.listFolders(),
-  rootDirs: () => invoke<RootDir[]>('root_dirs'),
-  createFolder: (name: string) => docApi.createFolder(name),
+  listFolders: (parentId: number | null = null, root: string | null = null) =>
+    docApi.listFolders(parentId, root),
+  folderPath: (id: number | null = null, root: string | null = null) =>
+    docApi.folderPath(id, root),
+  createFolder: (name: string, parentId: number | null = null) =>
+    docApi.createFolder(name, parentId),
   renameFolder: (params: { id: number; name: string }) => docApi.renameFolder(params),
   renameDefaultFolder: (name: string) => docApi.renameDefaultFolder(name),
   deleteFolder: (id: number) => docApi.deleteFolder(id),

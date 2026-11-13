@@ -1,4 +1,4 @@
-import type { ReactNode, Ref } from 'react'
+import type { MouseEvent, ReactNode, Ref } from 'react'
 import { IconSearch } from './Icons'
 
 export interface PageHeaderAction {
@@ -12,6 +12,10 @@ interface PageHeaderProps {
   action?: PageHeaderAction
   /** Multiple right-side actions; when provided, `action` is ignored. */
   actions?: PageHeaderAction[]
+  /** Turns both title variants into buttons that open a scope picker. */
+  onTitleClick?: (e: MouseEvent<HTMLButtonElement>) => void
+  /** Trailing indicator rendered next to a clickable title. */
+  titleTrailing?: ReactNode
   /** Replaces the title row (title + actions) while keeping the search bar mounted. */
   titleRow?: ReactNode
   /** Ref to the collapse wrapper around the search bar, for scroll-collapsing headers. */
@@ -32,18 +36,38 @@ export default function PageHeader({
   title,
   action,
   actions,
+  onTitleClick,
+  titleTrailing,
   search,
   searchWrapRef,
   largeTitleRef,
   titleRow,
 }: PageHeaderProps) {
   const headerActions = actions ?? (action ? [action] : [])
+  const titleContent = (
+    <>
+      {title}
+      {titleTrailing}
+    </>
+  )
+  const titleButtonClass = 'page-title page-title-btn'
   return (
     <div className="page-header">
       <div className="page-title-row">
         {titleRow ?? (
           <>
-            <h1 className="page-title">{title}</h1>
+            {onTitleClick ? (
+              <button
+                type="button"
+                className={titleButtonClass}
+                onClick={onTitleClick}
+                aria-haspopup="dialog"
+              >
+                {titleContent}
+              </button>
+            ) : (
+              <h1 className="page-title">{title}</h1>
+            )}
             {headerActions.length > 0 && (
               <div className="page-header-actions">
                 {headerActions.map((a) => (
@@ -67,7 +91,18 @@ export default function PageHeader({
         // above fades in as this row disappears (see useCollapsibleHeader). It
         // only renders when the collapse hook actually drives it.
         <div className="large-title-collapse" ref={largeTitleRef}>
-          <h1 className="large-title">{title}</h1>
+          {onTitleClick ? (
+            <button
+              type="button"
+              className="large-title large-title-btn"
+              onClick={onTitleClick}
+              aria-haspopup="dialog"
+            >
+              {titleContent}
+            </button>
+          ) : (
+            <h1 className="large-title">{title}</h1>
+          )}
         </div>
       )}
       {search && (

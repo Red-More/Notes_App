@@ -208,15 +208,15 @@ fn acl_filters_glob_and_grep_results() {
 #[test]
 fn folders_list_returns_only_note_folders() {
     let mut vfs = test_vfs();
-    let stats = docs::folders::list(&vfs).unwrap();
+    let stats = docs::folders::list(&vfs, None, None).unwrap();
     assert_eq!(stats.default_folder_name, "默认");
     // System dirs (diary/todos/contacts/agent) are fixed tabs, not folders here.
     assert!(stats.folders.is_empty(), "no note folders yet");
     assert_eq!(stats.unclassified, 0);
 
-    let folder = docs::folders::create(&mut vfs, "项目").unwrap();
+    let folder = docs::folders::create(&mut vfs, "项目", None).unwrap();
     docs::create(&mut vfs, "note", "会议", "内容", Some(folder.id), None).unwrap();
-    let stats = docs::folders::list(&vfs).unwrap();
+    let stats = docs::folders::list(&vfs, None, None).unwrap();
     assert_eq!(stats.folders.len(), 1);
     assert_eq!(stats.folders[0].name, "项目");
     assert_eq!(stats.folders[0].note_count, 1);
@@ -276,7 +276,7 @@ fn system_folders_reject_delete_and_rename() {
 #[test]
 fn ordinary_folder_delete_still_moves_notes_to_root() {
     let mut vfs = test_vfs();
-    let folder = docs::folders::create(&mut vfs, "项目").unwrap();
+    let folder = docs::folders::create(&mut vfs, "项目", None).unwrap();
     let note = docs::create(&mut vfs, "note", "会议", "内容", Some(folder.id), None).unwrap();
     docs::folders::delete(&mut vfs, folder.id).unwrap();
 
@@ -301,6 +301,58 @@ fn ordinary_folder_delete_still_moves_notes_to_root() {
         )
         .unwrap();
     assert_eq!(folder_left, 0, "the folder itself is removed");
+}
+
+#[test]
+fn nested_folders_list_and_delete_recursively() {
+    let mut vfs = test_vfs();
+    let parent = docs::folders::create(&mut vfs, "项目", None).unwrap();
+    let child = docs::folders::create(&mut vfs, "子项目", Some(parent.id)).unwrap();
+    let note = docs::create(&mut vfs, "note", "纪要", "内容", Some(child.id), None).unwrap();
+
+    // The parent scope lists the child folder and counts notes recursively.
+    let stats = docs::folders::list(&vfs, Some(parent.id), None).unwrap();
+    assert_eq!(stats.folders.len(), 1);
+    assert_eq!(stats.folders[0].id, child.id);
+    assert!(!stats.folders[0].has_children);
+    assert_eq!(stats.total, 1);
+    assert_eq!(stats.unclassified, 0);
+
+    // Breadcrumbs walk from the namespace root down to the nested folder.
+    let crumbs = docs::folders::path(&vfs, Some(child.id), None).unwrap();
+    assert_eq!(crumbs.len(), 3);
+    assert_eq!(crumbs[0].id, None);
+    assert_eq!(crumbs[1].id, Some(parent.id));
+    assert_eq!(crumbs[2].name, "子项目");
+    assert_eq!(crumbs[2].path, child.path);
+
+    // VFS-root scope shows the system columns with their UI labels.
+    let vfs_stats = docs::folders::list(&vfs, None, Some("/life")).unwrap();
+    let notes = vfs_stats
+        .folders
+        .iter()
+        .find(|folder| folder.path == "/life/notes")
+        .expect("notes root is visible from the VFS root");
+    assert_eq!(notes.name, "笔记");
+
+    // Deleting the parent moves nested notes to the root and drops the subtree.
+    docs::folders::delete(&mut vfs, parent.id).unwrap();
+    let path: String = vfs
+        .conn()
+        .query_row(
+            "SELECT path FROM inodes WHERE inode = ?1",
+            params![note.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        path.starts_with("/life/notes/"),
+        "note moved to the default folder: {path}"
+    );
+    assert!(
+        !path.contains("项目"),
+        "note left the deleted subtree: {path}"
+    );
 }
 
 #[test]

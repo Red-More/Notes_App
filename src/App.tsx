@@ -5,6 +5,8 @@ import { IconCalendar, IconChat, IconNote, IconTodo, IconUsers } from './compone
 import { applyTheme, getStoredTheme } from './theme'
 import { applyFontScale } from './appPrefs'
 import { installKeyboardViewport } from './system/keyboard'
+import type { FolderScope } from './types'
+import { NOTES_ROOT_SCOPE } from './types'
 import NoteListPage from './pages/notes/NoteListPage'
 import FolderManagePage from './pages/notes/FolderManagePage'
 import TodoPage from './pages/todos/TodoPage'
@@ -24,7 +26,7 @@ type EditorMode = 'note' | 'diary'
 
 type Overlay =
   | { kind: 'editor'; noteId: number | null; folderId?: number | null; mode?: EditorMode; diaryDate?: string }
-  | { kind: 'folders' }
+  | { kind: 'folders'; folderId: number | null }
   | { kind: 'settings' }
 
 const TABS: Array<{ key: Tab; label: string; icon: typeof IconNote }> = [
@@ -57,6 +59,9 @@ function App() {
   const [overlay, setOverlay] = useState<Overlay | null>(null)
   // Bumped when the editor / folder pages close so lists reload.
   const [dataVersion, setDataVersion] = useState(0)
+  // The notes scope survives overlay unmounts so the title picker, the list and
+  // the folder manager always describe the same namespace subtree.
+  const [notesScope, setNotesScope] = useState<FolderScope>(NOTES_ROOT_SCOPE)
 
   const indexRef = useRef(0)
   const trackRef = useRef<HTMLDivElement>(null)
@@ -335,7 +340,7 @@ function App() {
   if (overlay?.kind === 'folders') {
     return (
       <>
-        <FolderManagePage onBack={closeOverlay} />
+        <FolderManagePage initialFolderId={overlay.folderId} onBack={closeOverlay} />
         <ToastHost />
       </>
     )
@@ -352,6 +357,12 @@ function App() {
   }
 
   const openSettings = () => setOverlay({ kind: 'settings' })
+  // Folder management is notes-only; other VFS scopes open it at the notes root
+  // instead of exposing system directories.
+  const notesFolderId =
+    notesScope.path === '/life/notes' || notesScope.path.startsWith('/life/notes/')
+      ? notesScope.id
+      : null
 
   return (
     <div className="app">
@@ -373,11 +384,13 @@ function App() {
             <NoteListPage
               isActive={index === 1}
               version={dataVersion}
+              scope={notesScope}
+              onScopeChange={setNotesScope}
               onOpenSettings={openSettings}
               onOpenNote={(noteId, folderId) =>
                 setOverlay({ kind: 'editor', noteId, folderId })
               }
-              onOpenFolders={() => setOverlay({ kind: 'folders' })}
+              onOpenFolders={() => setOverlay({ kind: 'folders', folderId: notesFolderId })}
             />
           </section>
           <section className="pager-page" role="tabpanel" id="panel-todos" aria-label="待办">

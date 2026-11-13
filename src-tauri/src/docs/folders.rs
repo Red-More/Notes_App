@@ -11,8 +11,8 @@ use crate::db::schema::{ensure_notes_root, NOTES_ROOT};
 use crate::vfs::error::ToolError;
 use crate::vfs::{cap_gate, VirtualFs};
 
-use super::types::{Folder, FolderStats};
-use super::util::{basename, now, safe_segment, unique_dir_path, unique_file_path};
+use super::types::{Folder, FolderCrumb, FolderStats};
+use super::util::{basename, now, parent_dir, safe_segment, unique_dir_path, unique_file_path};
 
 const MAX_FOLDER_NAME_CHARS: usize = 50;
 
@@ -117,51 +117,53 @@ fn guard_protected(path: &str, action: &str) -> Result<(), ToolError> {
     }
 }
 
-/// 列出笔记文件夹统计。默认文件夹 = `/life/notes` 本身，folderId 为 null。
-pub fn list(vfs: &VirtualFs) -> Result<FolderStats, ToolError> {
+/// 列出当前作用域的直接子文件夹统计。
+///
+/// `parent_id` 为 `None` 时作用域是 `root`（缺省 `/life/notes`）；`root` 为
+/// `/life` 时可浏览整个虚拟文件系统。只返回直接子目录，深层节点由前端懒加载。
+pub fn list(
+    vfs: &VirtualFs,
+    parent_id: Option<i64>,
+    root: Option<&str>,
+) -> Result<FolderStats, ToolError> {
     let conn = vfs.conn();
     ensure_notes_root(conn)?;
 
-    let default_folder_name = folder_title(conn, NOTES_ROOT)?.unwrap_or_else(|| "默认".into());
-    let total = count_files_under(conn, NOTES_ROOT)?;
-    let unclassified = count_direct_files(conn, NOTES_ROOT)?;
+    let (_, scope_path, scope_name) = resolve_scope(conn, parent_id, root)?;
+    let vfs_mode = scope_path == cap_gate::ROOT;
+    let total = count_files_under(conn, &scope_path)?;
+    let unclassified = count_direct_files(conn, &scope_path)?;
 
-    // Note folders are the direct child directories of `/life/notes`.
-    let notes_prefix = format!("{NOTES_ROOT}/");
-    let like = format!("{}%", cap_gate::escape_like(&notes_prefix));
+    let scope_prefix = format!("{scope_path}/");
+    let like = format!("{}%", cap_gate::escape_like(&scope_prefix));
     let mut stmt = conn.prepare(
-        "SELECT i.inode, i.path, i.pinned, i.ctime, COALESCE(m.title, '')
+        "SELECT i.inode, i.path, i.pinned, i.ctime
          FROM inodes i
-         LEFT JOIN meta m ON m.inode = i.inode
          WHERE i.kind = 'directory' AND i.deleted = 0
            AND i.path LIKE ?1 ESCAPE '\\'
            AND instr(substr(i.path, length(?2) + 1), '/') = 0
          ORDER BY i.pinned DESC, i.ctime ASC, i.inode ASC",
     )?;
-    let rows = stmt.query_map(params![like, notes_prefix], |r| {
+    let rows = stmt.query_map(params![like, scope_prefix], |r| {
         Ok((
             r.get::<_, i64>(0)?,
             r.get::<_, String>(1)?,
             r.get::<_, i64>(2)?,
             r.get::<_, String>(3)?,
-            r.get::<_, String>(4)?,
         ))
     })?;
 
     let mut folders = Vec::new();
     for row in rows {
-        let (id, path, pinned, created_at, title) = row?;
-        let name = if title.is_empty() {
-            basename(&path).to_string()
-        } else {
-            title
-        };
+        let (id, path, pinned, created_at) = row?;
         folders.push(Folder {
             id,
-            name,
+            name: display_name(conn, &path, vfs_mode)?,
+            path: path.clone(),
             is_pinned: pinned,
             sort_order: 0,
             note_count: count_direct_files(conn, &path)?,
+            has_children: has_child_dirs(conn, &path)?,
             created_at,
         });
     }
@@ -169,22 +171,32 @@ pub fn list(vfs: &VirtualFs) -> Result<FolderStats, ToolError> {
     Ok(FolderStats {
         total,
         unclassified,
-        default_folder_name,
+        default_folder_name: scope_name.clone(),
         folders,
+        scope_name,
+        scope_path,
     })
 }
 
-/// 新建文件夹。显示名查重，路径自动去重。
-pub fn create(vfs: &mut VirtualFs, name: &str) -> Result<Folder, ToolError> {
+/// 新建文件夹；`parent_id` 指定父级，缺省挂在笔记根目录下。
+pub fn create(
+    vfs: &mut VirtualFs,
+    name: &str,
+    parent_id: Option<i64>,
+) -> Result<Folder, ToolError> {
     let name = validate_name(name)?;
     ensure_notes_root(vfs.conn())?;
-    if folder_name_exists(vfs.conn(), &name, None)? {
-        return Err(ToolError::invalid("同名文件夹已存在"));
+    let parent_path = match parent_id {
+        None => NOTES_ROOT.to_string(),
+        Some(id) => folder_path_by_id(vfs.conn(), id)?,
+    };
+    if folder_name_exists(vfs.conn(), &name, None, &parent_path)? {
+        return Err(ToolError::invalid("同级已存在同名文件夹"));
     }
 
     let tx = vfs.conn_mut().transaction()?;
     let segment = safe_segment(&name, "folder");
-    let path = unique_dir_path(&tx, NOTES_ROOT, &segment)?;
+    let path = unique_dir_path(&tx, &parent_path, &segment)?;
     let now = now(&tx)?;
     tx.execute(
         "INSERT INTO inodes (path, kind, head_rev, size, ctime, mtime)
@@ -202,9 +214,11 @@ pub fn create(vfs: &mut VirtualFs, name: &str) -> Result<Folder, ToolError> {
     Ok(Folder {
         id,
         name,
+        path,
         is_pinned: 0,
         sort_order: 0,
         note_count: 0,
+        has_children: false,
         created_at: now,
     })
 }
@@ -219,8 +233,8 @@ pub fn rename(vfs: &mut VirtualFs, id: i64, name: &str) -> Result<(), ToolError>
     }
     guard_protected(&path, "重命名")?;
     ensure_note_folder(&path)?;
-    if folder_name_exists(conn, &name, Some(id))? {
-        return Err(ToolError::invalid("同名文件夹已存在"));
+    if folder_name_exists(conn, &name, Some(id), parent_dir(&path))? {
+        return Err(ToolError::invalid("同级已存在同名文件夹"));
     }
     upsert_title(conn, id, &name)?;
     Ok(())
@@ -248,31 +262,16 @@ pub fn delete(vfs: &mut VirtualFs, id: i64) -> Result<(), ToolError> {
     guard_protected(&path, "删除")?;
     ensure_note_folder(&path)?;
 
-    let nested: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM inodes
-         WHERE kind = 'directory' AND deleted = 0
-           AND path LIKE ?1 ESCAPE '\\'
-           AND instr(substr(path, length(?2) + 1), '/') = 0",
-        params![
-            format!("{}%", cap_gate::escape_like(&format!("{path}/"))),
-            format!("{path}/")
-        ],
-        |r| r.get(0),
-    )?;
-    if nested > 0 {
-        return Err(ToolError::invalid("暂不支持删除包含子文件夹的文件夹"));
-    }
-
+    // Recursive delete: every document in the subtree returns to the default
+    // root, then the whole directory subtree is removed in one statement.
     let prefix = format!("{path}/");
     let like = format!("{}%", cap_gate::escape_like(&prefix));
     let files: Vec<String> = {
         let mut stmt = tx.prepare(
             "SELECT path FROM inodes
-             WHERE kind = 'file'
-               AND path LIKE ?1 ESCAPE '\\'
-               AND instr(substr(path, length(?2) + 1), '/') = 0",
+             WHERE kind = 'file' AND deleted = 0 AND path LIKE ?1 ESCAPE '\\'",
         )?;
-        let rows = stmt.query_map(params![like, prefix], |r| r.get::<_, String>(0))?;
+        let rows = stmt.query_map(params![like], |r| r.get::<_, String>(0))?;
         let mut files = Vec::new();
         for row in rows {
             files.push(row?);
@@ -290,8 +289,9 @@ pub fn delete(vfs: &mut VirtualFs, id: i64) -> Result<(), ToolError> {
         )?;
     }
     tx.execute(
-        "DELETE FROM inodes WHERE inode = ?1 AND kind = 'directory'",
-        params![id],
+        "DELETE FROM inodes
+         WHERE kind = 'directory' AND (path = ?1 OR path LIKE ?2 ESCAPE '\\')",
+        params![path, format!("{}%", cap_gate::escape_like(&prefix))],
     )?;
     tx.commit()?;
     Ok(())
@@ -308,6 +308,147 @@ pub fn set_pinned(vfs: &mut VirtualFs, id: i64, pinned: bool) -> Result<(), Tool
         params![pinned as i64, id],
     )?;
     Ok(())
+}
+
+/// 从作用域根到 `id` 的面包屑；根节点 `id` 为 `None`。
+pub fn path(
+    vfs: &VirtualFs,
+    id: Option<i64>,
+    root: Option<&str>,
+) -> Result<Vec<FolderCrumb>, ToolError> {
+    let conn = vfs.conn();
+    ensure_notes_root(conn)?;
+    let (root_path, root_name) = resolve_root(conn, root)?;
+    let vfs_mode = root_path == cap_gate::ROOT;
+    let mut crumbs = vec![FolderCrumb {
+        id: None,
+        name: root_name,
+        path: root_path.clone(),
+    }];
+    let Some(id) = id else {
+        return Ok(crumbs);
+    };
+    let target = directory_path_by_id(conn, id)?;
+    ensure_under(&target, &root_path)?;
+    if target == root_path {
+        return Ok(crumbs);
+    }
+
+    let relative = target
+        .strip_prefix(&format!("{root_path}/"))
+        .unwrap_or_default();
+    let mut current = root_path;
+    for segment in relative.split('/').filter(|segment| !segment.is_empty()) {
+        current.push('/');
+        current.push_str(segment);
+        let row: Option<i64> = conn
+            .query_row(
+                "SELECT inode FROM inodes
+                 WHERE path = ?1 AND kind = 'directory' AND deleted = 0",
+                params![current],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(inode) = row else {
+            return Err(ToolError::NotFound {
+                path: current.clone(),
+            });
+        };
+        crumbs.push(FolderCrumb {
+            id: Some(inode),
+            name: display_name(conn, &current, vfs_mode)?,
+            path: current.clone(),
+        });
+    }
+    Ok(crumbs)
+}
+
+/// 解析作用域根：返回 (虚拟路径, 显示名)，必须是 /life 下的目录。
+fn resolve_root(
+    conn: &Connection,
+    root: Option<&str>,
+) -> Result<(String, String), ToolError> {
+    let path = root.unwrap_or(NOTES_ROOT).trim_end_matches('/');
+    if path != cap_gate::ROOT && !path.starts_with("/life/") {
+        return Err(ToolError::invalid("作用域必须位于 /life 下"));
+    }
+    let kind: Option<String> = conn
+        .query_row(
+            "SELECT kind FROM inodes WHERE path = ?1 AND deleted = 0",
+            params![path],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if kind.as_deref() != Some("directory") {
+        return Err(ToolError::NotFound {
+            path: path.to_string(),
+        });
+    }
+    let vfs_mode = path == cap_gate::ROOT;
+    let name = display_name(conn, path, vfs_mode)?;
+    Ok((path.to_string(), name))
+}
+
+/// 解析作用域：返回 (文件夹 id, 虚拟路径, 显示名)；根作用域 id 为 None。
+fn resolve_scope(
+    conn: &Connection,
+    parent_id: Option<i64>,
+    root: Option<&str>,
+) -> Result<(Option<i64>, String, String), ToolError> {
+    let (root_path, root_name) = resolve_root(conn, root)?;
+    match parent_id {
+        None => Ok((None, root_path, root_name)),
+        Some(id) => {
+            let path = directory_path_by_id(conn, id)?;
+            ensure_under(&path, &root_path)?;
+            let name = display_name(conn, &path, root_path == cap_gate::ROOT)?;
+            if path == root_path {
+                Ok((None, path, name))
+            } else {
+                Ok((Some(id), path, name))
+            }
+        }
+    }
+}
+
+fn ensure_under(path: &str, root: &str) -> Result<(), ToolError> {
+    if path == root || path.starts_with(&format!("{root}/")) {
+        Ok(())
+    } else {
+        Err(ToolError::invalid("目标不在当前作用域内"))
+    }
+}
+
+/// Display names: system labels win when browsing the whole VFS, otherwise the
+/// folder's own renameable title is authoritative.
+fn display_name(conn: &Connection, path: &str, vfs_mode: bool) -> Result<String, ToolError> {
+    if vfs_mode {
+        if let Some(label) = system_dir_label(path) {
+            return Ok(label.to_string());
+        }
+    }
+    if let Some(title) = folder_title(conn, path)? {
+        if !title.is_empty() {
+            return Ok(title);
+        }
+    }
+    if path == cap_gate::ROOT {
+        return Ok("文件".into());
+    }
+    Ok(basename(path).to_string())
+}
+
+fn has_child_dirs(conn: &Connection, dir: &str) -> Result<bool, ToolError> {
+    let prefix = format!("{dir}/");
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM inodes
+         WHERE kind = 'directory' AND deleted = 0
+           AND path LIKE ?1 ESCAPE '\\'
+           AND instr(substr(path, length(?2) + 1), '/') = 0",
+        params![format!("{}%", cap_gate::escape_like(&prefix)), prefix],
+        |r| r.get(0),
+    )?;
+    Ok(count > 0)
 }
 
 fn validate_name(name: &str) -> Result<String, ToolError> {
@@ -339,19 +480,31 @@ fn folder_name_exists(
     conn: &Connection,
     name: &str,
     exclude_id: Option<i64>,
+    parent: &str,
 ) -> Result<bool, ToolError> {
-    if let Some(default_name) = folder_title(conn, NOTES_ROOT)? {
-        if default_name == name {
-            return Ok(true);
+    // A child folder may share its parent's display name; only siblings clash.
+    if parent == NOTES_ROOT {
+        if let Some(default_name) = folder_title(conn, NOTES_ROOT)? {
+            if default_name == name {
+                return Ok(true);
+            }
         }
     }
+    let prefix = format!("{parent}/");
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM inodes i
          JOIN meta m ON m.inode = i.inode
          WHERE i.kind = 'directory' AND i.deleted = 0
-           AND i.path LIKE '/life/notes/%' AND m.title = ?1
-           AND (?2 IS NULL OR i.inode != ?2)",
-        params![name, exclude_id],
+           AND i.path LIKE ?1 ESCAPE '\\'
+           AND instr(substr(i.path, length(?2) + 1), '/') = 0
+           AND m.title = ?3
+           AND (?4 IS NULL OR i.inode != ?4)",
+        params![
+            format!("{}%", cap_gate::escape_like(&prefix)),
+            prefix,
+            name,
+            exclude_id
+        ],
         |r| r.get(0),
     )?;
     Ok(count > 0)

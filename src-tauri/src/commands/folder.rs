@@ -3,20 +3,38 @@
 use tauri::State;
 
 use crate::docs::folders;
-use crate::docs::types::{Folder, FolderStats};
+use crate::docs::types::{Folder, FolderCrumb, FolderStats};
 use crate::vfs::error::ToolError;
 use crate::vfs::VfsState;
 
 #[tauri::command]
-pub fn folder_list(state: State<'_, VfsState>) -> Result<FolderStats, ToolError> {
+pub fn folder_list(
+    state: State<'_, VfsState>,
+    parent_id: Option<i64>,
+    root: Option<String>,
+) -> Result<FolderStats, ToolError> {
     let vfs = crate::lock(&state.0);
-    folders::list(&vfs)
+    folders::list(&vfs, parent_id, root.as_deref())
 }
 
 #[tauri::command]
-pub fn folder_create(state: State<'_, VfsState>, name: String) -> Result<Folder, ToolError> {
+pub fn folder_path(
+    state: State<'_, VfsState>,
+    id: Option<i64>,
+    root: Option<String>,
+) -> Result<Vec<FolderCrumb>, ToolError> {
+    let vfs = crate::lock(&state.0);
+    folders::path(&vfs, id, root.as_deref())
+}
+
+#[tauri::command]
+pub fn folder_create(
+    state: State<'_, VfsState>,
+    name: String,
+    parent_id: Option<i64>,
+) -> Result<Folder, ToolError> {
     let mut vfs = crate::lock(&state.0);
-    folders::create(&mut vfs, &name)
+    folders::create(&mut vfs, &name, parent_id)
 }
 
 #[tauri::command]

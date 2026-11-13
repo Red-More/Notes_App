@@ -22,7 +22,7 @@ import {
   safeFileName,
 } from '../../utils'
 import { hasAssetRefs } from '../../assets'
-import type { Doc, Folder, NoteVersion } from '../../types'
+import type { Doc, NoteVersion } from '../../types'
 import { ConfirmDialog, Modal } from '../../components/ui'
 import { toast } from '../../toast'
 import { useEdgeBack } from '../../hooks'
@@ -40,6 +40,7 @@ import {
   setLayoutPrefs,
 } from '../../editor/layout'
 import SplitHandle from '../../components/SplitHandle'
+import FolderScopePicker from '../../components/FolderScopePicker'
 import ImageZoom from '../../components/ImageZoom'
 import { subscribeImageZoom, type ZoomImage } from '../../system/imageZoom'
 import {
@@ -167,7 +168,7 @@ export default function NoteEditorPage({
   const [title, setTitle] = useState('')
   const [content, setContent] = useState('')
   const [currentFolderId, setCurrentFolderId] = useState<number | null>(folderId)
-  const [folders, setFolders] = useState<Folder[]>([])
+  const [currentFolderName, setCurrentFolderName] = useState('')
   const [defaultFolderName, setDefaultFolderName] = useState('默认')
   const [folderMenuOpen, setFolderMenuOpen] = useState(false)
   /** Anchor rect of the folder button, captured when the popover opens. */
@@ -262,13 +263,12 @@ export default function NoteEditorPage({
   const previewSyncIgnoreRef = useRef(0)
   const editorSyncIgnoreRef = useRef(0)
 
-  // Load the bound document plus the folder list on mount; any VFS doc opens
-  // here and new diary days start from the date title.
+  // Load the bound document plus the root folder label on mount; any VFS doc
+  // opens here and new diary days start from the date title.
   useEffect(() => {
     void (async () => {
       try {
         const stats = await api.listFolders()
-        setFolders(stats.folders)
         setDefaultFolderName(stats.defaultFolderName)
         if (noteIdRef.current != null) {
           // Generic doc load: every kind opens editable, frontmatter stays
@@ -293,6 +293,27 @@ export default function NoteEditorPage({
       }
     })()
   }, [mode, diaryDate])
+
+  // Resolve the display name of the bound folder; the root uses the renameable
+  // default label fetched above.
+  useEffect(() => {
+    if (currentFolderId == null) {
+      setCurrentFolderName(defaultFolderName)
+      return
+    }
+    let cancelled = false
+    void api
+      .folderPath(currentFolderId)
+      .then((crumbs) => {
+        if (!cancelled) setCurrentFolderName(crumbs[crumbs.length - 1]?.name ?? '')
+      })
+      .catch(() => {
+        if (!cancelled) setCurrentFolderName('')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [currentFolderId, defaultFolderName])
 
   // Skip saving a brand-new note that only contains whitespace.
   const isBlank = !title.trim() && !content.trim()
@@ -843,19 +864,15 @@ export default function NoteEditorPage({
     setFolderMenuOpen(true)
   }
 
-  // Popover placement: clamp to the horizontal viewport and flip above the
-  // anchor when the list would overflow the bottom edge.
+  // Popover placement: clamp to the horizontal viewport and keep it reachable
+  // above the bottom edge; the picker itself scrolls past 50vh.
   const folderMenuPos = useMemo(() => {
     if (!folderAnchor) return undefined
-    const WIDTH = 220
-    const estHeight = 46 * (folders.length + 1) + 20
+    const WIDTH = 300
     const left = Math.min(Math.max(8, folderAnchor.left), window.innerWidth - WIDTH - 8)
-    let top = folderAnchor.top + 6
-    if (top + estHeight > window.innerHeight - 8) {
-      top = Math.max(8, folderAnchor.top - estHeight - 50)
-    }
+    const top = Math.min(folderAnchor.top + 6, window.innerHeight - 160)
     return { left, top, width: WIDTH } as React.CSSProperties
-  }, [folderAnchor, folders.length])
+  }, [folderAnchor])
 
   const handleSelectFolder = async (fid: number | null) => {
     setFolderMenuOpen(false)
@@ -879,9 +896,7 @@ export default function NoteEditorPage({
     }
   }
 
-  const folderName =
-    folders.find((f) => f.id === currentFolderId)?.name ??
-    (currentFolderId == null ? defaultFolderName : '')
+  const folderName = currentFolderName || (currentFolderId == null ? defaultFolderName : '')
 
   /** Loaded doc is a plain note (or a brand-new note) → folder picker applies. */
   const isNoteDoc = mode === 'note' && (!docPath || docPath.startsWith('/life/notes/'))
@@ -1417,31 +1432,15 @@ export default function NoteEditorPage({
 
       {/* ---- Folder selector popover (notes only) ---- */}
       {folderMenuOpen && folderMenuPos && (
-        <>
-          <div className="scope-backdrop" onClick={() => setFolderMenuOpen(false)} />
-          <div className="folder-popover" style={folderMenuPos}>
-            <button
-              type="button"
-              className="option-row"
-              onClick={() => void handleSelectFolder(null)}
-            >
-              {defaultFolderName}
-              {currentFolderId == null && <span className="row-check">✓</span>}
-            </button>
-            {folders.map((f) => (
-              <button
-                key={f.id}
-                type="button"
-                className="option-row"
-                onClick={() => void handleSelectFolder(f.id)}
-              >
-                <IconFolder size={18} />
-                {f.name}
-                {currentFolderId === f.id && <span className="row-check">✓</span>}
-              </button>
-            ))}
-          </div>
-        </>
+        <FolderScopePicker
+          rootLabel="笔记"
+          rootPath="/life/notes"
+          value={currentFolderId}
+          valuePath={currentFolderId == null ? '/life/notes' : undefined}
+          onSelect={(scope) => void handleSelectFolder(scope.id)}
+          onClose={() => setFolderMenuOpen(false)}
+          style={folderMenuPos}
+        />
       )}
 
       {/* ---- Version list ---- */}

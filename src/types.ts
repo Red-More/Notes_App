@@ -1,9 +1,14 @@
 export interface Folder {
   id: number
   name: string
+  /** Virtual path; nesting is expressed by the path prefix. */
+  path: string
   isPinned: number
   sortOrder: number
+  /** Notes directly inside this folder (not recursive). */
   noteCount: number
+  /** Whether direct child folders exist, so the picker can drill down. */
+  hasChildren: boolean
   createdAt: string
 }
 
@@ -28,12 +33,32 @@ export interface FolderStats {
   unclassified: number
   defaultFolderName: string
   folders: Folder[]
+  /** Display name of the listed scope; the root scope uses the default name. */
+  scopeName: string
+  /** Virtual path of the listed scope. */
+  scopePath: string
 }
 
-/** A top-level `/life` directory for the notes-page browse menu. */
-export interface RootDir {
+/** One breadcrumb node; the namespace root has a null id. */
+export interface FolderCrumb {
+  id: number | null
+  name: string
+  /** Virtual path of this crumb. */
   path: string
-  label: string
+}
+
+/** The folder the notes page is currently scoped to. */
+export interface FolderScope {
+  id: number | null
+  name: string
+  path: string
+}
+
+/** Default scope: the notes namespace root (the renameable default folder). */
+export const NOTES_ROOT_SCOPE: FolderScope = {
+  id: null,
+  name: '笔记',
+  path: '/life/notes',
 }
 
 export interface Note {

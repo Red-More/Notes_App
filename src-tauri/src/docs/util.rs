@@ -164,13 +164,7 @@ pub(super) fn folder_path_any(conn: &Connection, folder_id: i64) -> Result<Strin
         )
         .optional()?;
     match row {
-        Some((kind, path))
-            if kind == "directory"
-                && path.starts_with("/life/")
-                && !path.starts_with("/life/.agents") =>
-        {
-            Ok(path)
-        }
+        Some((kind, path)) if kind == "directory" && path.starts_with("/life/") => Ok(path),
         Some(_) => Err(ToolError::invalid("目标不是可浏览的文件夹")),
         None => Err(ToolError::NotFound {
             path: format!("folder#{folder_id}"),

@@ -1,14 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { save } from '@tauri-apps/plugin-dialog'
 import { api } from '../../api'
 import { useElasticOverscroll, useEdgeBack, useLongPress, useScrollContainer } from '../../hooks'
 import { exportTs, safeFileName, friendlyError } from '../../utils'
-import type { Folder, FolderStats } from '../../types'
+import type { Folder, FolderCrumb, FolderStats } from '../../types'
 import { ConfirmDialog, Modal } from '../../components/ui'
 import { toast } from '../../toast'
 import {
   IconBack,
   IconCheck,
+  IconChevronRight,
   IconClose,
   IconEdit,
   IconExport,
@@ -22,13 +23,24 @@ import { usePhysicalBack } from '../../system/backButton'
 
 interface Props {
   onBack: () => void
+  /** Open the manager at the notes scope currently selected by the title. */
+  initialFolderId?: number | null
 }
 
 /** Synthetic id for the virtual default folder (notes with folder_id = NULL). */
 const DEFAULT_FOLDER_ID = -1
 
-export default function FolderManagePage({ onBack }: Props) {
+/** Namespace label shown as the root breadcrumb in the notes column. */
+const ROOT_LABEL = '笔记'
+
+export default function FolderManagePage({ onBack, initialFolderId = null }: Props) {
+  const [scopeId, setScopeId] = useState<number | null>(initialFolderId)
+  const [crumbs, setCrumbs] = useState<FolderCrumb[]>([
+    { id: null, name: ROOT_LABEL, path: '/life/notes' },
+  ])
+  const [rootName, setRootName] = useState('默认')
   const [stats, setStats] = useState<FolderStats | null>(null)
+  const [loading, setLoading] = useState(true)
   const [selectMode, setSelectMode] = useState(false)
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [createOpen, setCreateOpen] = useState(false)
@@ -44,29 +56,35 @@ export default function FolderManagePage({ onBack }: Props) {
 
   const load = useCallback(async () => {
     try {
-      setStats(await api.listFolders())
+      const [nextStats, path] = await Promise.all([
+        api.listFolders(scopeId),
+        api.folderPath(scopeId),
+      ])
+      setStats(nextStats)
+      // The picker namespace is the notes column, so the root crumb says 笔记
+      // while the folder's own renameable title is kept for delete messages.
+      setRootName(path[0]?.name ?? '默认')
+      setCrumbs(
+        path.length > 0
+          ? [{ ...path[0], name: ROOT_LABEL }, ...path.slice(1)]
+          : [{ id: null, name: ROOT_LABEL, path: '/life/notes' }],
+      )
     } catch (e) {
+      // The selected scope disappeared (deleted elsewhere): fall back to root.
+      if (scopeId != null && (e as { code?: string })?.code === 'notFound') {
+        setScopeId(null)
+        return
+      }
       console.error('加载文件夹失败', e)
       toast(friendlyError(e))
+    } finally {
+      setLoading(false)
     }
-  }, [])
+  }, [scopeId])
 
   useEffect(() => {
-    let cancelled = false
-    const run = async () => {
-      try {
-        const stats = await api.listFolders()
-        if (!cancelled) setStats(stats)
-      } catch (e) {
-        console.error('加载文件夹失败', e)
-        if (!cancelled) toast(friendlyError(e))
-      }
-    }
-    void run()
-    return () => {
-      cancelled = true
-    }
-  }, [])
+    void load()
+  }, [load])
 
   const { bind, didLongPress } = useLongPress(() => {
     if (!selectMode) setSelectMode(true)
@@ -77,10 +95,20 @@ export default function FolderManagePage({ onBack }: Props) {
     setSelected(new Set())
   }
 
-  // Pop one level: recycle bin → folder list → notes tab.
+  /** Drill into a folder level; the breadcrumb stays the single source of path. */
+  const changeScope = (next: number | null) => {
+    if (next === scopeId) return
+    exitSelect()
+    setStats(null)
+    setLoading(true)
+    setScopeId(next)
+  }
+
+  // Pop one level: recycle bin → selection → parent folder → notes tab.
   const handleBack = () => {
     if (trashOpen) setTrashOpen(false)
     else if (selectMode) exitSelect()
+    else if (scopeId != null) changeScope(crumbs[crumbs.length - 2]?.id ?? null)
     else onBack()
   }
   useEdgeBack(handleBack)
@@ -99,16 +127,19 @@ export default function FolderManagePage({ onBack }: Props) {
   }
 
   const folders = stats?.folders ?? []
-  const defaultName = stats?.defaultFolderName ?? '默认'
+  const atRoot = scopeId == null
+  const defaultName = stats?.defaultFolderName ?? rootName
   const selectedIds = useMemo(() => [...selected], [selected])
   const selectedFolders = folders.filter((f) => selected.has(f.id))
-  const includesDefault = selected.has(DEFAULT_FOLDER_ID)
+  const includesDefault = atRoot && selected.has(DEFAULT_FOLDER_ID)
   const defaultOnly = includesDefault && selectedFolders.length === 0
   // The virtual default folder has no row to pin, so pin needs a real folder.
   const canPin = selectedFolders.length > 0
   const pinTarget = !selectedFolders.every((f) => f.isPinned === 1)
-  const selectableIds = [DEFAULT_FOLDER_ID, ...folders.map((f) => f.id)]
-  const allSelected = selected.size === selectableIds.length
+  const selectableIds = atRoot
+    ? [DEFAULT_FOLDER_ID, ...folders.map((f) => f.id)]
+    : folders.map((f) => f.id)
+  const allSelected = selectableIds.length > 0 && selected.size === selectableIds.length
 
   const handleCreate = async () => {
     const name = newName.trim()
@@ -117,7 +148,7 @@ export default function FolderManagePage({ onBack }: Props) {
       return
     }
     try {
-      await api.createFolder(name)
+      await api.createFolder(name, scopeId)
       setCreateOpen(false)
       setNewName('')
       toast('文件夹已创建')
@@ -165,7 +196,7 @@ export default function FolderManagePage({ onBack }: Props) {
       } else if (includesDefault) {
         toast(`${defaultName}文件夹已清空，笔记移入回收站`)
       } else {
-        toast(`已删除，原笔记移入${defaultName}`)
+        toast(`已删除，原笔记移入${rootName}`)
       }
       exitSelect()
       await load()
@@ -223,8 +254,17 @@ export default function FolderManagePage({ onBack }: Props) {
     }
   }
 
+  const handleRowClick = (folder: Folder) => {
+    if (didLongPress()) return
+    if (selectMode) {
+      toggleSelected(folder.id)
+    } else {
+      changeScope(folder.id)
+    }
+  }
+
   if (trashOpen) {
-    return <RecycleBinPage onBack={() => setTrashOpen(false)} defaultFolderName={defaultName} />
+    return <RecycleBinPage onBack={() => setTrashOpen(false)} defaultFolderName={rootName} />
   }
 
   return (
@@ -248,23 +288,41 @@ export default function FolderManagePage({ onBack }: Props) {
           </button>
         </div>
       ) : (
-        <div className="editor-topbar">
-          <button type="button" className="icon-btn" onClick={onBack} aria-label="返回">
-            <IconBack size={22} />
-          </button>
-          <span className="modal-title" style={{ marginLeft: 6 }}>
-            文件夹管理
-          </span>
-          <button
-            type="button"
-            className="icon-btn"
-            style={{ marginLeft: 'auto' }}
-            onClick={() => setTrashOpen(true)}
-            aria-label="回收站"
-          >
-            <IconTrash size={20} />
-          </button>
-        </div>
+        <>
+          <div className="editor-topbar">
+            <button type="button" className="icon-btn" onClick={handleBack} aria-label="返回">
+              <IconBack size={22} />
+            </button>
+            <span className="modal-title" style={{ marginLeft: 6 }}>
+              文件夹管理
+            </span>
+            <button
+              type="button"
+              className="icon-btn"
+              style={{ marginLeft: 'auto' }}
+              onClick={() => setTrashOpen(true)}
+              aria-label="回收站"
+            >
+              <IconTrash size={20} />
+            </button>
+          </div>
+          <div className="folder-crumbs" aria-label="文件夹路径">
+            {crumbs.map((crumb, index) => (
+              <Fragment key={`${crumb.id ?? 'root'}-${index}`}>
+                {index > 0 && <IconChevronRight size={14} className="folder-crumb-sep" />}
+                <button
+                  type="button"
+                  className={`folder-crumb ${index === crumbs.length - 1 ? 'current' : ''}`}
+                  onClick={() => {
+                    if (index < crumbs.length - 1) changeScope(crumb.id)
+                  }}
+                >
+                  {crumb.name}
+                </button>
+              </Fragment>
+            ))}
+          </div>
+        </>
       )}
 
       <div className="page-scroll" style={{ paddingTop: 16 }} ref={scrollRef}>
@@ -272,44 +330,34 @@ export default function FolderManagePage({ onBack }: Props) {
           className={`scroll-content ${springing ? 'springing' : ''}`}
           style={pullDist ? { transform: `translateY(${pullDist}px)` } : undefined}
         >
-          {/* Virtual rows */}
-          <div className="folder-row virtual">
-            <div className="folder-icon">
-              <IconFolder size={19} />
+          {/* The default folder only exists at the namespace root. */}
+          {atRoot && (
+            <div
+              className={`folder-row virtual${selectMode && includesDefault ? ' selected' : ''}`}
+              onClick={() => {
+                if (didLongPress()) return
+                if (selectMode) toggleSelected(DEFAULT_FOLDER_ID)
+              }}
+              {...bind()}
+            >
+              {selectMode && (
+                <span className="check-dot">{includesDefault && <IconCheck size={14} />}</span>
+              )}
+              <div className="folder-icon">
+                <IconFolder size={19} />
+              </div>
+              <div className="folder-main">
+                <div className="folder-name">{defaultName}</div>
+                <div className="folder-count">{stats?.unclassified ?? 0} 篇笔记</div>
+              </div>
             </div>
-            <div className="folder-main">
-              <div className="folder-name">全部</div>
-              <div className="folder-count">{stats?.total ?? 0} 篇笔记</div>
-            </div>
-          </div>
-          <div
-            className={`folder-row virtual${selectMode && includesDefault ? ' selected' : ''}`}
-            onClick={() => {
-              if (didLongPress()) return
-              if (selectMode) toggleSelected(DEFAULT_FOLDER_ID)
-            }}
-            {...bind()}
-          >
-            {selectMode && (
-              <span className="check-dot">{includesDefault && <IconCheck size={14} />}</span>
-            )}
-            <div className="folder-icon">
-              <IconFolder size={19} />
-            </div>
-            <div className="folder-main">
-              <div className="folder-name">{defaultName}</div>
-              <div className="folder-count">{stats?.unclassified ?? 0} 篇笔记</div>
-            </div>
-          </div>
+          )}
 
           {folders.map((f) => (
             <div
               key={f.id}
               className={`folder-row ${selectMode && selected.has(f.id) ? 'selected' : ''}`}
-              onClick={() => {
-                if (didLongPress()) return
-                if (selectMode) toggleSelected(f.id)
-              }}
+              onClick={() => handleRowClick(f)}
               {...bind()}
             >
               {selectMode && (
@@ -323,28 +371,33 @@ export default function FolderManagePage({ onBack }: Props) {
                   {f.isPinned === 1 && <span className="pin-badge">📌</span>}
                   {f.name}
                 </div>
-                <div className="folder-count">{f.noteCount} 篇笔记</div>
+                <div className="folder-count">
+                  {f.noteCount} 篇笔记{f.hasChildren ? ' · 含子文件夹' : ''}
+                </div>
               </div>
               {!selectMode && (
-                <button
-                  type="button"
-                  className="icon-btn"
-                  aria-label="打包导出"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    void handleExport(f)
-                  }}
-                >
-                  <IconExport size={19} />
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    aria-label="打包导出"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      void handleExport(f)
+                    }}
+                  >
+                    <IconExport size={19} />
+                  </button>
+                  <IconChevronRight size={18} className="folder-row-chevron" />
+                </>
               )}
             </div>
           ))}
 
-          {folders.length === 0 && (
+          {!loading && folders.length === 0 && (
             <div className="empty-state">
               <IconFolder size={44} />
-              <div>还没有文件夹，点击下方按钮创建</div>
+              <div>{atRoot ? '还没有文件夹，点击下方按钮创建' : '还没有子文件夹，点击下方按钮创建'}</div>
             </div>
           )}
         </div>
@@ -358,7 +411,7 @@ export default function FolderManagePage({ onBack }: Props) {
             style={{ flex: 1 }}
             onClick={() => setCreateOpen(true)}
           >
-            新建文件夹
+            {atRoot ? '新建文件夹' : '新建子文件夹'}
           </button>
         </div>
       ) : (
@@ -390,7 +443,7 @@ export default function FolderManagePage({ onBack }: Props) {
 
       {createOpen && (
         <Modal
-          title="新建文件夹"
+          title={atRoot ? '新建文件夹' : '新建子文件夹'}
           onClose={() => setCreateOpen(false)}
           footer={
             <button type="button" className="btn btn-primary" onClick={() => void handleCreate()}>
@@ -447,7 +500,7 @@ export default function FolderManagePage({ onBack }: Props) {
               ? `确定清空"${defaultName}"文件夹吗？其中 ${stats?.unclassified ?? 0} 篇笔记将移入回收站。`
               : includesDefault
                 ? `确定删除选中的 ${selectedFolders.length} 个文件夹，并清空"${defaultName}"文件夹（${stats?.unclassified ?? 0} 篇笔记将移入回收站）吗？`
-                : `确定删除选中的 ${selectedFolders.length} 个文件夹吗？文件夹下的笔记不会删除，将变为"${defaultName}"。`
+                : `确定删除选中的 ${selectedFolders.length} 个文件夹吗？其中的笔记将移入"${rootName}"，子文件夹会一并删除。`
           }
           confirmText={defaultOnly ? '清空' : '删除'}
           danger
