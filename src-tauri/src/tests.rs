@@ -1315,6 +1315,10 @@ fn conversation_lifecycle_persists_messages() {
     )
     .unwrap();
     assert_eq!(conv.message_count, 0);
+    assert!(
+        conversations::list(&vfs).unwrap().is_empty(),
+        "an empty conversation must not appear in the list"
+    );
 
     let inserted = conversations::append(
         &vfs,
@@ -1374,6 +1378,10 @@ fn conversation_lifecycle_persists_messages() {
     let list = conversations::list(&vfs).unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].message_count, 2);
+    assert!(
+        list[0].last_message_at.is_some(),
+        "a conversation with messages must carry its last message time"
+    );
 
     conversations::delete(&vfs, conv.id).unwrap();
     let orphan: i64 = vfs
@@ -1385,6 +1393,53 @@ fn conversation_lifecycle_persists_messages() {
         )
         .unwrap();
     assert_eq!(orphan, 0, "deleting a conversation cascades its messages");
+}
+
+#[test]
+fn first_send_creates_conversation_and_message_atomically() {
+    let vfs = test_vfs();
+    add_model(&vfs, "测试模型", "demo-model");
+
+    let started = runs::start_new(
+        &vfs,
+        Some("第一条消息".into()),
+        "prompt",
+        Some(conversations::NewMessage {
+            role: "user".into(),
+            content: "你好".into(),
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    let created = started
+        .conversation
+        .expect("the draft must adopt a conversation");
+    assert_eq!(started.run.status, "running");
+    assert_eq!(started.message.as_ref().unwrap().content, "你好");
+    assert_eq!(conversations::messages(&vfs, created.id).unwrap().len(), 1);
+    let list = conversations::list(&vfs).unwrap();
+    assert_eq!(
+        list.len(),
+        1,
+        "the conversation appears once it has a message"
+    );
+}
+
+#[test]
+fn draft_without_a_model_leaves_no_conversation_behind() {
+    let vfs = test_vfs();
+    let result = runs::start_new(
+        &vfs,
+        Some("草稿".into()),
+        "prompt",
+        Some(conversations::NewMessage {
+            role: "user".into(),
+            content: "你好".into(),
+            ..Default::default()
+        }),
+    );
+    assert!(result.is_err(), "a missing model must fail the first send");
+    assert!(conversations::list(&vfs).unwrap().is_empty());
 }
 
 #[test]
@@ -2779,24 +2834,11 @@ fn skill_file_count(vfs: &VirtualFs) -> i64 {
 }
 
 #[test]
-fn builtin_skills_seed_once_and_do_not_resurrect() {
-    let mut vfs = test_vfs();
-    skills::seed_builtins(&mut vfs).expect("builtin skills should seed");
-    let list = skills::list(&vfs).unwrap();
-    assert_eq!(list.len(), 4, "four builtin skills are expected");
-    assert!(list.iter().all(|skill| skill.builtin && skill.enabled));
-    let contact = list
-        .iter()
-        .find(|skill| skill.id == "contact-manager")
-        .expect("contact-manager should exist");
-    assert!(contact.triggers.iter().any(|trigger| trigger == "联系人"));
-
-    skills::delete(&mut vfs, "note-taking").unwrap();
-    skills::seed_builtins(&mut vfs).expect("reseed must be a no-op");
-    assert_eq!(
-        skills::list(&vfs).unwrap().len(),
-        3,
-        "uninstalled builtin must not resurrect"
+fn no_skills_are_seeded_on_a_fresh_install() {
+    let vfs = test_vfs();
+    assert!(
+        skills::list(&vfs).unwrap().is_empty(),
+        "a fresh install must ship zero preset skills"
     );
 }
 

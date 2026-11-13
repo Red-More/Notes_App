@@ -17,8 +17,82 @@ export function useDebouncedSearch(
   return [value, setValue, query]
 }
 
+/** Left-edge drag distance that counts as a back gesture, in CSS pixels. */
+const EDGE_BACK_ZONE = 24
+const EDGE_BACK_DISTANCE = 60
+
 /**
- * Long-press detection via pointer events (works for touch and mouse).
+ * Rightward swipe from the left screen edge pops one level (UX-09).
+ *
+ * Secondary pages mount this hook; the tab pager itself never pages from the
+ * 24px edge zone, so the system back gesture keeps priority over horizontal
+ * swipers. The Android hardware back key is bound separately and calls the
+ * same handler.
+ */
+export function useEdgeBack(onBack: () => void, enabled = true): void {
+  const handler = useRef(onBack)
+  useEffect(() => {
+    handler.current = onBack
+  }, [onBack])
+
+  useEffect(() => {
+    if (!enabled) return
+    let startX = 0
+    let startY = 0
+    let tracking = false
+
+    const onStart = (event: TouchEvent) => {
+      if (event.touches.length !== 1) {
+        tracking = false
+        return
+      }
+      const touch = event.touches[0]
+      tracking = touch.clientX <= EDGE_BACK_ZONE
+      startX = touch.clientX
+      startY = touch.clientY
+    }
+
+    const onMove = (event: TouchEvent) => {
+      if (!tracking) return
+      const touch = event.touches[0]
+      const dx = touch.clientX - startX
+      const dy = touch.clientY - startY
+      // A vertical gesture belongs to the page content, not to back.
+      if (Math.abs(dy) > Math.abs(dx) * 1.15) {
+        tracking = false
+        return
+      }
+      if (dx > 0) event.preventDefault()
+    }
+
+    const onEnd = (event: TouchEvent) => {
+      if (!tracking) return
+      tracking = false
+      const touch = event.changedTouches[0]
+      if (!touch) return
+      const dx = touch.clientX - startX
+      const dy = touch.clientY - startY
+      if (dx >= EDGE_BACK_DISTANCE && Math.abs(dy) <= Math.abs(dx)) handler.current()
+    }
+
+    const onCancel = () => {
+      tracking = false
+    }
+
+    window.addEventListener('touchstart', onStart, { passive: true })
+    window.addEventListener('touchmove', onMove, { passive: false })
+    window.addEventListener('touchend', onEnd)
+    window.addEventListener('touchcancel', onCancel)
+    return () => {
+      window.removeEventListener('touchstart', onStart)
+      window.removeEventListener('touchmove', onMove)
+      window.removeEventListener('touchend', onEnd)
+      window.removeEventListener('touchcancel', onCancel)
+    }
+  }, [enabled])
+}
+
+/** Long-press detection via pointer events (works for touch and mouse).
  * `bind(payload)` returns spreadable props for one pressable element; the
  * payload is handed back to `callback` when the press completes, so a list can
  * tell which item was held. `didLongPress` suppresses the click that follows a

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { save } from '@tauri-apps/plugin-dialog'
 import { api } from '../../api'
-import { useElasticOverscroll, useLongPress, useScrollContainer } from '../../hooks'
+import { useElasticOverscroll, useEdgeBack, useLongPress, useScrollContainer } from '../../hooks'
 import { exportTs, safeFileName, friendlyError } from '../../utils'
 import type { Folder, FolderStats } from '../../types'
 import { ConfirmDialog, Modal } from '../../components/ui'
@@ -18,6 +18,7 @@ import {
   IconTrash,
 } from '../../components/Icons'
 import RecycleBinPage from './RecycleBinPage'
+import { usePhysicalBack } from '../../system/backButton'
 
 interface Props {
   onBack: () => void
@@ -75,6 +76,15 @@ export default function FolderManagePage({ onBack }: Props) {
     setSelectMode(false)
     setSelected(new Set())
   }
+
+  // Pop one level: recycle bin → folder list → notes tab.
+  const handleBack = () => {
+    if (trashOpen) setTrashOpen(false)
+    else if (selectMode) exitSelect()
+    else onBack()
+  }
+  useEdgeBack(handleBack)
+  usePhysicalBack(handleBack)
 
   const toggleSelected = (id: number) => {
     setSelected((prev) => {

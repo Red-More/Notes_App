@@ -166,16 +166,19 @@ CREATE TABLE path_acl (
 );
 CREATE INDEX idx_acl_prefix ON path_acl(path_prefix);
 
--- Agent conversations.
+-- Agent conversations. `last_message_at` stays NULL until the first message
+-- commits; the chat list only shows conversations with a non-NULL value.
 CREATE TABLE conversations (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    title      TEXT NOT NULL DEFAULT '',
-    provider   TEXT NOT NULL DEFAULT '',
-    model      TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    title           TEXT NOT NULL DEFAULT '',
+    provider        TEXT NOT NULL DEFAULT '',
+    model           TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    last_message_at TEXT
 );
 CREATE INDEX idx_conversations_updated ON conversations(updated_at DESC);
+CREATE INDEX idx_conversations_last_message ON conversations(last_message_at);
 
 -- Chat messages; tool calls are JSON, usage columns are NULL when not recorded.
 CREATE TABLE messages (
@@ -324,6 +327,37 @@ pub fn create(conn: &mut Connection) -> rusqlite::Result<()> {
     seed_acl(&tx)?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()
+}
+
+/// Additive, non-destructive migrations for databases created by older builds.
+///
+/// `SCHEMA_VERSION` is intentionally not bumped: bumping it would delete and
+/// rebuild `life.db` (see `db::open_or_rebuild`), losing user data.
+pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    let has_column: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name = 'last_message_at'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_column == 0 {
+        conn.execute(
+            "ALTER TABLE conversations ADD COLUMN last_message_at TEXT",
+            [],
+        )?;
+        // Backfill from the transcript so existing conversations stay visible.
+        conn.execute(
+            "UPDATE conversations
+             SET last_message_at = (SELECT MAX(created_at) FROM messages m
+                                    WHERE m.conversation_id = conversations.id)",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_conversations_last_message
+         ON conversations(last_message_at)",
+        [],
+    )?;
+    Ok(())
 }
 
 /// Idempotently ensure the system folders, display titles and default ACL rows.

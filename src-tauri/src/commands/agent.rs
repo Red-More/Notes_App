@@ -12,7 +12,9 @@ use tauri::State;
 use serde::Deserialize;
 
 use crate::agent::discovery::ConnectionTest;
-use crate::agent::model_store::{self, AgentSettings, ApiFormat, ModelEntry, ModelInput, ModelView};
+use crate::agent::model_store::{
+    self, AgentSettings, ApiFormat, ModelEntry, ModelInput, ModelView,
+};
 use crate::agent::params::{self, LlmParams};
 use crate::agent::{conversations, discovery, llm, runs, AgentState};
 use crate::vfs::error::ToolError;
@@ -84,16 +86,24 @@ pub fn chat_truncate(
 }
 
 /// Start a run and persist its user message in one transaction.
+///
+/// `conversation_id` is absent for the first message of a draft chat: the
+/// conversation is created atomically with that message, so an interrupted
+/// first send never leaves an empty conversation behind.
 #[tauri::command]
 pub fn chat_run_start(
     state: State<'_, VfsState>,
-    conversation_id: i64,
+    conversation_id: Option<i64>,
+    title: Option<String>,
     trigger: String,
     model_entry: String,
     message: Option<conversations::NewMessage>,
 ) -> Result<runs::RunStart, ToolError> {
     let vfs = crate::lock(&state.0);
-    runs::start(&vfs, conversation_id, &trigger, &model_entry, message)
+    match conversation_id {
+        Some(id) => runs::start(&vfs, id, &trigger, &model_entry, message),
+        None => runs::start_new(&vfs, title, &trigger, message),
+    }
 }
 
 /// Move a run between non-terminal states; illegal transitions are rejected.

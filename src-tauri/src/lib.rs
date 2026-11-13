@@ -31,6 +31,8 @@ pub fn run() {
             let conn = db::init(app.handle())?;
             // 系统目录、中文标题与 Agent 默认 ACL：幂等补齐，不覆盖用户修改。
             db::schema::ensure_default_dirs(&conn)?;
+            // 增量列（如 conversations.last_message_at）就地补齐，绝不重建数据库。
+            db::schema::migrate(&conn)?;
             // 历史文件可能没有交叉索引行，启动时补建一次（幂等）。
             if let Err(e) = vfs::index::rebuild_missing(&conn) {
                 eprintln!("life.db index rebuild failed: {e}");
@@ -50,15 +52,12 @@ pub fn run() {
                 Ok(_) => {}
                 Err(e) => log::warn!("search index stats failed: {e}"),
             }
-            // 首次启动写入 4 个内置技能；已种过则不再补，避免卸载后复活。
-            let mut vault = VirtualFs::new(conn);
+            // 首发不预置任何技能：`skills_installed = []`，全部由用户导入。
+            let vault = VirtualFs::new(conn);
             // Agent runs never auto-resume: rows left executing become
             // `interrupted` and the UI offers an explicit "continue" action.
             if let Err(e) = agent::runs::recover(vault.conn()) {
                 log::warn!("agent run recovery failed: {e}");
-            }
-            if let Err(e) = skills::seed_builtins(&mut vault) {
-                eprintln!("life.db skill seed failed: {e}");
             }
             // Agent 工作区：模型可读写，但草稿不会自动加载。
             if let Err(e) = skills::ensure_workspace(&vault) {

@@ -590,7 +590,8 @@ export const chatApi = {
     invoke<number>('chat_truncate', params),
   /** Write the run row and its user message in one transaction. */
   runStart: (params: {
-    conversationId: number
+    conversationId: number | null
+    title?: string
     trigger: AgentRunTrigger
     modelEntry: string
     message?: NewChatMessage | null

@@ -5,7 +5,7 @@ import { friendlyError } from '../../utils'
 import type { Contact } from '../../types'
 import { ConfirmDialog, Modal } from '../../components/ui'
 import { toast } from '../../toast'
-import { IconUsers } from '../../components/Icons'
+import { IconSettings, IconUsers } from '../../components/Icons'
 import PageHeader from '../../components/PageHeader'
 import FAB from '../../components/FAB'
 import EmptyState from '../../components/EmptyState'
@@ -31,7 +31,13 @@ const EMPTY_FORM: ContactForm = {
   tag: '默认',
 }
 
-export default function ContactPage({ isActive }: { isActive: boolean }) {
+export default function ContactPage({
+  isActive,
+  onOpenSettings,
+}: {
+  isActive: boolean
+  onOpenSettings: () => void
+}) {
   const [contacts, setContacts] = useState<Contact[]>([])
   const [searchInput, setSearchInput, query] = useDebouncedSearch()
   const [tag, setTag] = useState('全部')
@@ -168,6 +174,7 @@ export default function ContactPage({ isActive }: { isActive: boolean }) {
         title="人脉"
         searchWrapRef={searchWrapRef}
         largeTitleRef={largeTitleRef}
+        actions={[{ icon: <IconSettings size={22} />, label: '设置', onClick: onOpenSettings }]}
         search={{
           placeholder: '搜索姓名、电话、公司',
           value: searchInput,

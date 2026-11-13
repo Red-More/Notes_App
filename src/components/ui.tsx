@@ -71,6 +71,50 @@ export function Modal({ title, onClose, children, footer, headerAction }: ModalP
   )
 }
 
+interface ActionSheetItem {
+  label: string
+  onClick: () => void
+  danger?: boolean
+}
+
+interface ActionSheetProps {
+  title?: string
+  items: ActionSheetItem[]
+  onClose: () => void
+}
+
+/** Bottom action sheet with a cancel row; the backdrop also dismisses it. */
+export function ActionSheet({ title, items, onClose }: ActionSheetProps) {
+  return (
+    <OverlayPortal>
+      <div className="modal-overlay" onClick={onClose}>
+        <div
+          className="action-sheet"
+          role="dialog"
+          aria-modal="true"
+          aria-label={title}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {title && <div className="action-sheet-title">{title}</div>}
+          {items.map((item) => (
+            <button
+              key={item.label}
+              type="button"
+              className={`action-sheet-item ${item.danger ? 'danger' : ''}`}
+              onClick={item.onClick}
+            >
+              {item.label}
+            </button>
+          ))}
+          <button type="button" className="action-sheet-cancel" onClick={onClose}>
+            取消
+          </button>
+        </div>
+      </div>
+    </OverlayPortal>
+  )
+}
+
 interface ConfirmProps {
   title: string
   message: string

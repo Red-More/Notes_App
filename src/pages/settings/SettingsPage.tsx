@@ -1,4 +1,6 @@
 import { IconBack } from '../../components/Icons'
+import { useEdgeBack } from '../../hooks'
+import { usePhysicalBack } from '../../system/backButton'
 import AccountSection from './AccountSection'
 import AiSection from './AiSection'
 import AppearanceSection from './AppearanceSection'
@@ -22,6 +24,11 @@ const QUICK_NAV = [
 ]
 
 export default function SettingsPage({ onBack }: Props) {
+  // Same pop semantics for the edge swipe and the Android back key: return to
+  // the tab that opened settings instead of jumping to a home tab.
+  useEdgeBack(onBack)
+  usePhysicalBack(onBack)
+
   const jumpTo = (id: string) => {
     document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }

@@ -15,6 +15,8 @@ import { hasAssetRefs } from '../../assets'
 import type { Folder, NoteVersion } from '../../types'
 import { ConfirmDialog, Modal } from '../../components/ui'
 import { toast } from '../../toast'
+import { useEdgeBack } from '../../hooks'
+import { usePhysicalBack } from '../../system/backButton'
 import { getSaveStrategy } from '../../saveStrategy'
 import { getEditorPrefs } from '../../editor/prefs'
 import {
@@ -490,6 +492,11 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
       onBack()
     }
   }
+
+  // Edge swipe and Android back key use the same guarded back path (save /
+  // leave-confirm) as the toolbar button.
+  useEdgeBack(() => void handleBack())
+  usePhysicalBack(() => void handleBack())
 
   const leaveSaving = async () => {
     // On failure keep the dialog open — the toast explains why.

@@ -25,6 +25,9 @@ pub struct Conversation {
     pub model: String,
     pub created_at: String,
     pub updated_at: String,
+    /// Last persisted message time; NULL means the conversation is still empty
+    /// and must stay out of the list.
+    pub last_message_at: Option<String>,
     pub message_count: i64,
 }
 
@@ -128,13 +131,18 @@ fn validate_role(role: &str) -> Result<(), ToolError> {
     }
 }
 
-/// 列出所有会话，最近更新在前。
+/// 列出已有消息的会话，最近更新在前。
+///
+/// 空会话（创建后首条消息尚未落库）永远不进入列表，因此冷启动、杀进程
+/// 或任意异常退出都不会留下占位项。
 pub fn list(vfs: &VirtualFs) -> Result<Vec<Conversation>, ToolError> {
     let conn = vfs.conn();
     let mut stmt = conn.prepare(
         "SELECT c.id, c.title, c.provider, c.model, c.created_at, c.updated_at,
+                c.last_message_at,
                 (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id)
          FROM conversations c
+         WHERE c.last_message_at IS NOT NULL
          ORDER BY c.updated_at DESC, c.id DESC",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -145,7 +153,8 @@ pub fn list(vfs: &VirtualFs) -> Result<Vec<Conversation>, ToolError> {
             model: r.get(3)?,
             created_at: r.get(4)?,
             updated_at: r.get(5)?,
-            message_count: r.get(6)?,
+            last_message_at: r.get(6)?,
+            message_count: r.get(7)?,
         })
     })?;
     let mut out = Vec::new();
@@ -168,7 +177,17 @@ pub fn create(
     if model != entry.model_id {
         return Err(ToolError::invalid("模型与会话配置不一致"));
     }
-    let conn = vfs.conn();
+    insert_on(vfs.conn(), title, provider, model)
+}
+
+/// Insert a conversation row. Shared by `create` and the atomic
+/// "first run + conversation" transaction in `runs::start_new`.
+pub(crate) fn insert_on(
+    conn: &Connection,
+    title: Option<String>,
+    provider: String,
+    model: String,
+) -> Result<Conversation, ToolError> {
     let title = match title {
         Some(t) => {
             let t = validate_title(&t)?;
@@ -186,7 +205,7 @@ pub fn create(
          VALUES (?1, ?2, ?3, ?4, ?4)",
         params![title, provider, model, at],
     )?;
-    let id: i64 = conn.last_insert_rowid();
+    let id = conn.last_insert_rowid();
     Ok(Conversation {
         id,
         title,
@@ -194,6 +213,7 @@ pub fn create(
         model,
         created_at: at.clone(),
         updated_at: at,
+        last_message_at: None,
         message_count: 0,
     })
 }
@@ -260,6 +280,20 @@ pub fn message_for_run(conn: &Connection, run_id: i64) -> Result<Option<ChatMess
     Ok(row)
 }
 
+/// Advance the conversation clocks after a message is written. A non-NULL
+/// `last_message_at` is what makes the conversation visible in the list.
+pub(crate) fn touch_message_clock(
+    conn: &Connection,
+    conversation_id: i64,
+    at: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE conversations SET updated_at = ?1, last_message_at = ?1 WHERE id = ?2",
+        params![at, conversation_id],
+    )?;
+    Ok(())
+}
+
 /// 批量追加消息，并推进会话的 updated_at。
 pub fn append(
     vfs: &VirtualFs,
@@ -279,10 +313,7 @@ pub fn append(
     for item in items {
         inserted.push(insert_message(&tx, conversation_id, item, &at)?);
     }
-    tx.execute(
-        "UPDATE conversations SET updated_at = ?1 WHERE id = ?2",
-        params![at, conversation_id],
-    )?;
+    touch_message_clock(&tx, conversation_id, &at)?;
     tx.commit()?;
     Ok(inserted)
 }
@@ -406,7 +437,11 @@ pub fn truncate_after(
         params![conversation_id, message_id],
     )?;
     tx.execute(
-        "UPDATE conversations SET updated_at = ?1 WHERE id = ?2",
+        "UPDATE conversations
+         SET updated_at = ?1,
+             last_message_at = (SELECT MAX(created_at) FROM messages
+                                WHERE conversation_id = ?2)
+         WHERE id = ?2",
         params![at, conversation_id],
     )?;
     tx.commit()?;

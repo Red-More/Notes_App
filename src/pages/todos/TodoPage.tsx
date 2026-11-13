@@ -5,7 +5,7 @@ import { parseDbTime, friendlyError } from '../../utils'
 import type { Todo } from '../../types'
 import { ConfirmDialog, Modal } from '../../components/ui'
 import { toast } from '../../toast'
-import { IconBell, IconCheck, IconTodo, IconTrash } from '../../components/Icons'
+import { IconBell, IconCheck, IconSettings, IconTodo, IconTrash } from '../../components/Icons'
 import PageHeader from '../../components/PageHeader'
 import FAB from '../../components/FAB'
 import EmptyState from '../../components/EmptyState'
@@ -36,11 +36,12 @@ interface TodoForm {
 
 interface Props {
   isActive: boolean
+  onOpenSettings: () => void
 }
 
 const EMPTY_FORM: TodoForm = { title: '', category: '默认', dueDate: '', reminder: false }
 
-export default function TodoPage({ isActive }: Props) {
+export default function TodoPage({ isActive, onOpenSettings }: Props) {
   const [todos, setTodos] = useState<Todo[]>([])
   const [searchInput, setSearchInput, query] = useDebouncedSearch()
   const [category, setCategory] = useState('全部')
@@ -195,6 +196,7 @@ export default function TodoPage({ isActive }: Props) {
         title="待办"
         searchWrapRef={searchWrapRef}
         largeTitleRef={largeTitleRef}
+        actions={[{ icon: <IconSettings size={22} />, label: '设置', onClick: onOpenSettings }]}
         search={{ placeholder: '搜索待办', value: searchInput, onChange: setSearchInput }}
       />
 

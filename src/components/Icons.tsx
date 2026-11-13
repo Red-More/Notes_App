@@ -254,3 +254,30 @@ export const IconImage = (p: IconProps) => (
     <path d="m21 15-5-5L5 21" />
   </svg>
 )
+
+/** Generic attachment entry (paperclip). */
+export const IconPaperclip = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+  </svg>
+)
+
+/** Expand the composer: arrows pointing to opposite corners. */
+export const IconExpand = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M15 3h6v6" />
+    <path d="M9 21H3v-6" />
+    <path d="M21 3l-7 7" />
+    <path d="M3 21l7-7" />
+  </svg>
+)
+
+/** Collapse the expanded composer: arrows pointing inward. */
+export const IconCollapse = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M4 14h6v6" />
+    <path d="M20 10h-6V4" />
+    <path d="M14 10l7-7" />
+    <path d="M10 14l-7 7" />
+  </svg>
+)

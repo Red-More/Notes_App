@@ -84,7 +84,9 @@ body {
 #root {
   max-width: 520px;
   margin: 0 auto;
-  height: 100svh;
+  /* JS tracks the visual viewport so the soft keyboard never covers the
+     composer; 100svh is the fallback before the first measurement. */
+  height: var(--app-height, 100svh);
   background: var(--bg);
   display: flex;
   flex-direction: column;
@@ -1933,6 +1935,14 @@ body.split-resizing {
   animation: slide-up 0.2s ease;
 }
 
+.action-sheet-title {
+  padding: 8px 12px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-2);
+  text-align: center;
+}
+
 .action-sheet-item {
   display: block;
   width: 100%;
@@ -3404,6 +3414,68 @@ body.split-resizing {
   border-top: 1px solid var(--border);
 }
 
+/* Expanded composer: anchored below the nav bar and above the keyboard. The
+   page scroll and tabbar step aside so only the input area changes height when
+   the keyboard opens or closes. */
+.chat-page.expanded {
+  padding-bottom: 0;
+}
+
+.chat-page.expanded .chat-status,
+.chat-page.expanded .chat-scroll,
+.chat-page.expanded .chat-scroll-bottom {
+  display: none;
+}
+
+.chat-page.expanded .chat-composer {
+  flex: 1;
+  min-height: 0;
+  padding-bottom: calc(8px + var(--safe-bottom));
+}
+
+.chat-page.expanded .chat-composer-row {
+  flex: 1;
+  min-height: 0;
+  align-items: flex-end;
+}
+
+.chat-page.expanded .chat-input-wrap {
+  align-self: stretch;
+}
+
+/* Body class is toggled while expanded, so the tabbar leaves the keyboard area. */
+body.chat-expanded .tabbar {
+  display: none;
+}
+
+.chat-input-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+
+/* Corner control inside the input; opens the full-height composer. */
+.chat-expand {
+  position: absolute;
+  top: 7px;
+  right: 9px;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  color: var(--text-3);
+  background: var(--surface-2);
+  z-index: 2;
+}
+
+.chat-expand.active {
+  color: var(--accent);
+  background: var(--accent-weak);
+}
+
 .chat-resume {
   align-self: flex-start;
   padding: 4px 10px;
@@ -3441,9 +3513,11 @@ body.split-resizing {
 
 .chat-input {
   flex: 1;
-  min-height: 42px;
-  max-height: 132px;
-  padding: 10px 14px;
+  /* One-line baseline; the elastic range is [2h0, 4h0] (UX-03). */
+  --composer-h0: 42px;
+  min-height: calc(2 * var(--composer-h0));
+  max-height: calc(4 * var(--composer-h0));
+  padding: 10px 40px 10px 14px;
   border: 1px solid var(--border);
   border-radius: 20px;
   background: var(--surface);
@@ -3453,10 +3527,33 @@ body.split-resizing {
   line-height: 1.45;
   resize: none;
   outline: none;
+  overflow-y: hidden;
+  /* Height animates only when a new wrapped line is crossed. */
+  transition: height 0.16s ease;
+  overscroll-behavior: contain;
+}
+
+.chat-input.capped {
+  overflow-y: auto;
 }
 
 .chat-input:focus {
   border-color: var(--accent-border);
+}
+
+/* Expanded: the textarea owns the remaining height and scrolls internally. */
+.chat-page.expanded .chat-input {
+  height: 100%;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+  padding-right: 40px;
+  touch-action: pan-y;
+}
+
+.chat-page.expanded .chat-expand {
+  top: 8px;
+  right: 10px;
 }
 
 .chat-send {

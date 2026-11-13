@@ -17,8 +17,14 @@ export function createRuntimeDeps(): AgentRuntimeDeps {
     loadMcpTools: () => mcpApi.tools(),
     loadAsset: (id) => assetApi.data(id),
     createConversation: (title) => chatApi.create({ title }),
-    startRun: (conversationId, trigger, modelEntry, message) =>
-      chatApi.runStart({ conversationId, trigger, modelEntry, message: message ?? null }),
+    startRun: (conversationId, trigger, modelEntry, message, title) =>
+      chatApi.runStart({
+        conversationId,
+        title,
+        trigger,
+        modelEntry,
+        message: message ?? null,
+      }),
     resumeRun: (conversationId, modelEntry) =>
       chatApi.runResume({ conversationId, modelEntry }),
     transitionRun: (runId, status) => chatApi.runTransition({ runId, status }),

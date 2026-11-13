@@ -28,11 +28,11 @@ import PageHeader from '../../components/PageHeader'
 import FAB from '../../components/FAB'
 import EmptyState from '../../components/EmptyState'
 import ChipRow from '../../components/ChipRow'
-import SettingsPage from '../settings/SettingsPage'
 
 interface Props {
   isActive: boolean
   version: number
+  onOpenSettings: () => void
   onOpenNote: (noteId: number | null, folderId: number | null) => void
   onOpenFolders: () => void
 }
@@ -77,7 +77,13 @@ function Highlight({ text, needle }: { text: string; needle: string }) {
   )
 }
 
-export default function NoteListPage({ isActive, version, onOpenNote, onOpenFolders }: Props) {
+export default function NoteListPage({
+  isActive,
+  version,
+  onOpenSettings,
+  onOpenNote,
+  onOpenFolders,
+}: Props) {
   const [notes, setNotes] = useState<Note[]>([])
   const [stats, setStats] = useState<FolderStats | null>(null)
   const [filter, setFilter] = useState<FolderFilter>('all')
@@ -91,7 +97,6 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
   const [moveOpen, setMoveOpen] = useState(false)
   const [deleteConfirm, setDeleteConfirm] = useState(false)
   const [loading, setLoading] = useState(true)
-  const [settingsOpen, setSettingsOpen] = useState(false)
   const [visible, setVisible] = useState(PAGE)
 
   const sentinelRef = useRef<HTMLDivElement>(null)
@@ -203,7 +208,7 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
     })
     io.observe(el)
     return () => io.disconnect()
-  }, [notes.length, hasMore, settingsOpen])
+  }, [notes.length, hasMore])
 
   const exitSelect = () => {
     setSelectMode(false)
@@ -347,10 +352,6 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
     </div>
   ) : undefined
 
-  if (settingsOpen) {
-    return <SettingsPage onBack={() => setSettingsOpen(false)} />
-  }
-
   return (
     <div className="page">
       <div className="note-header-wrap">
@@ -363,7 +364,7 @@ export default function NoteListPage({ isActive, version, onOpenNote, onOpenFold
             {
               icon: <IconSettings size={22} />,
               label: '设置',
-              onClick: () => setSettingsOpen(true),
+              onClick: onOpenSettings,
             },
             { icon: <IconFolder size={22} />, label: '文件夹管理', onClick: onOpenFolders },
           ]}

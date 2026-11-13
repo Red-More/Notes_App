@@ -5,7 +5,13 @@ import { dateStr, monthStr, shortTime, friendlyError } from '../../utils'
 import type { Schedule } from '../../types'
 import { ConfirmDialog, Modal } from '../../components/ui'
 import { toast } from '../../toast'
-import { IconBell, IconCalendar, IconChevronLeft, IconChevronRight } from '../../components/Icons'
+import {
+  IconBell,
+  IconCalendar,
+  IconChevronLeft,
+  IconChevronRight,
+  IconSettings,
+} from '../../components/Icons'
 import PageHeader from '../../components/PageHeader'
 import FAB from '../../components/FAB'
 import EmptyState from '../../components/EmptyState'
@@ -21,7 +27,13 @@ interface ScheduleForm {
   reminder: boolean
 }
 
-export default function SchedulePage({ isActive }: { isActive: boolean }) {
+export default function SchedulePage({
+  isActive,
+  onOpenSettings,
+}: {
+  isActive: boolean
+  onOpenSettings: () => void
+}) {
   const [viewMonth, setViewMonth] = useState(() => new Date())
   const [selectedDate, setSelectedDate] = useState(() => dateStr(new Date()))
   const [schedules, setSchedules] = useState<Schedule[]>([])
@@ -193,6 +205,7 @@ export default function SchedulePage({ isActive }: { isActive: boolean }) {
         title="日程"
         searchWrapRef={searchWrapRef}
         largeTitleRef={largeTitleRef}
+        actions={[{ icon: <IconSettings size={22} />, label: '设置', onClick: onOpenSettings }]}
         search={{ placeholder: '搜索日程', value: searchInput, onChange: setSearchInput }}
       />
 

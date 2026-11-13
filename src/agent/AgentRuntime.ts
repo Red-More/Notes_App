@@ -55,10 +55,11 @@ export interface AgentRuntimeDeps {
   createConversation(title: string): Promise<ChatConversation>
   /** Run ledger: the database is the queue, so re-entry never loses work. */
   startRun(
-    conversationId: number,
+    conversationId: number | null,
     trigger: AgentRunTrigger,
     modelEntry: string,
     message?: NewChatMessage | null,
+    title?: string,
   ): Promise<AgentRunStart>
   resumeRun(conversationId: number, modelEntry: string): Promise<AgentRunStart>
   transitionRun(runId: number, status: AgentRunStatus): Promise<AgentRun>
@@ -79,6 +80,8 @@ export interface AgentRuntimeDeps {
 
 export interface RuntimeSnapshot {
   conversationId: number | null
+  /** Adopted conversation; NULL while the chat is still an unsaved draft. */
+  conversation: ChatConversation | null
   status: RuntimeStatus
   /** Pending runs read from the ledger (survives page switches). */
   queued: number
@@ -164,17 +167,7 @@ export class AgentRuntime {
     await this.dispose()
     this.conversation = conversation
     this.profile = profile
-    this.status = 'idle'
-    this.lastError = null
-    this.view = createView([])
-    this.currentRun = null
-    this.interrupted = null
-    this.queue = []
-    this.runSteps = 0
-    this.runWrites = 0
-    this.limit = null
-    this.cancelRequested = false
-    this.steering = []
+    this.resetState()
 
     const records = await this.deps.loadMessages(conversation.id)
     this.view = createView(projectHistory(records))
@@ -188,14 +181,52 @@ export class AgentRuntime {
     this.interrupted = runState.latest?.status === 'interrupted' ? runState.latest : null
 
     if (profile) {
-      const skills = await this.deps.loadSkills().catch(() => [])
-      const mcpTools = await this.deps.loadMcpTools().catch(() => [])
-      this.skillsIndex = buildSkillsIndex(skills)
-      const agent = await this.buildAgent(profile, records, skills, mcpTools)
-      this.unsubscribe = agent.subscribe((event) => this.onEvent(event))
-      this.agent = agent
+      await this.attachAgent(profile, records)
     }
     this.emit()
+  }
+
+  /**
+   * Prepare an unsaved draft: no conversation row exists yet. The first
+   * `prompt` creates the conversation and persists its first message in one
+   * transaction, so drafts never leave empty entries in the list.
+   */
+  async openDraft(profile: AgentProfile | null): Promise<void> {
+    await this.dispose()
+    this.conversation = null
+    this.profile = profile
+    this.resetState()
+    if (profile) {
+      await this.attachAgent(profile, [])
+    }
+    this.emit()
+  }
+
+  /** Clear per-conversation state without touching the shared Agent plumbing. */
+  private resetState(): void {
+    this.status = 'idle'
+    this.lastError = null
+    this.view = createView([])
+    this.currentRun = null
+    this.interrupted = null
+    this.queue = []
+    this.runSteps = 0
+    this.runWrites = 0
+    this.limit = null
+    this.cancelRequested = false
+    this.steering = []
+  }
+
+  private async attachAgent(
+    profile: AgentProfile,
+    records: ChatMessageRecord[],
+  ): Promise<void> {
+    const skills = await this.deps.loadSkills().catch(() => [])
+    const mcpTools = await this.deps.loadMcpTools().catch(() => [])
+    this.skillsIndex = buildSkillsIndex(skills)
+    const agent = await this.buildAgent(profile, records, skills, mcpTools)
+    this.unsubscribe = agent.subscribe((event) => this.onEvent(event))
+    this.agent = agent
   }
 
   private async buildAgent(
@@ -223,7 +254,7 @@ export class AgentRuntime {
 
   async prompt(input: PromptInput): Promise<void> {
     const conversation = this.conversation
-    if (!conversation || !this.agent) throw new Error('会话尚未就绪')
+    if (!this.agent) throw new Error('会话尚未就绪')
     if (this.status !== 'idle') throw new Error('上一条回复尚未结束')
     // The previous run may still be settling; a stale executor would make the
     // new run look queued even though nothing is running.
@@ -233,12 +264,20 @@ export class AgentRuntime {
     const imageAssetIds = input.imageAssetIds ?? []
     if (text === '' && imageAssetIds.length === 0) return
 
-    // The ledger insert and the user message share one transaction.
-    const started = await this.startRun(conversation, 'prompt', {
-      role: 'user',
-      content: text,
-      imageAssetIds,
-    })
+    // The ledger insert and the user message share one transaction. For a
+    // draft (conversation === null) the backend also creates the conversation
+    // in that same transaction, so a failed first send leaves nothing behind.
+    const started = await this.startRun(
+      conversation,
+      'prompt',
+      {
+        role: 'user',
+        content: text,
+        imageAssetIds,
+      },
+      text.slice(0, 20) || '附件',
+    )
+    if (started.conversation) this.conversation = started.conversation
     if (started.run.status !== 'running') {
       this.queue.push({ run: started.run, userMessage: started.message })
       this.addUserItem(started, text, imageAssetIds)
@@ -290,11 +329,19 @@ export class AgentRuntime {
   }
 
   private startRun(
-    conversation: ChatConversation,
+    conversation: ChatConversation | null,
     trigger: AgentRunTrigger,
     message: NewChatMessage | null,
+    title?: string,
   ): Promise<AgentRunStart> {
-    return this.deps.startRun(conversation.id, trigger, conversation.provider, message)
+    const modelEntry = conversation?.provider ?? this.profile?.provider ?? ''
+    return this.deps.startRun(
+      conversation?.id ?? null,
+      trigger,
+      modelEntry,
+      message,
+      title,
+    )
   }
 
   private beginRun(started: AgentRunStart): void {
@@ -612,6 +659,7 @@ export class AgentRuntime {
   snapshot(): RuntimeSnapshot {
     return {
       conversationId: this.conversation?.id ?? null,
+      conversation: this.conversation,
       status: this.status,
       queued: this.queue.length,
       items: this.view.items,

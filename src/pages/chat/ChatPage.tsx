@@ -3,9 +3,10 @@
 //! 渲染策略（D9）：流式阶段纯文本；`message_end` 后也只展示纯文本，
 //! 不使用 `dangerouslySetInnerHTML`，模型输出不经过任何 HTML 解析。
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api, assetApi, chatApi } from '../../api'
 import { assetDataUrl } from '../../assets'
+import { clearDraft, loadDraft, saveDraft } from '../../chatDraft'
 import type { AgentProfile } from '../../agent/runtime'
 import { profileFromSettings } from '../../agent/runtime'
 import { AgentRuntime } from '../../agent/AgentRuntime'
@@ -19,28 +20,34 @@ import type {
 } from '../../types'
 import { friendlyError, bytesToBase64 } from '../../utils'
 import { toast } from '../../toast'
-import { Modal } from '../../components/ui'
+import { ActionSheet, Modal } from '../../components/ui'
 import PageHeader from '../../components/PageHeader'
 import EmptyState from '../../components/EmptyState'
 import {
   IconChat,
+  IconCollapse,
   IconEdit,
+  IconExpand,
   IconEye,
-  IconImage,
   IconInfo,
   IconNote,
+  IconPaperclip,
   IconPlus,
   IconSearch,
   IconSend,
+  IconSettings,
   IconStop,
   IconTrash,
   IconUsers,
 } from '../../components/Icons'
 import DiffViewerModal from '../../components/DiffViewerModal'
+import { useKeyboardInset } from '../../system/keyboard'
 
 interface Props {
   isActive: boolean
+  onOpenSettings: () => void
 }
+
 
 interface DocPreview {
   path: string
@@ -220,7 +227,7 @@ async function withCapabilities(profile: AgentProfile): Promise<AgentProfile> {
   }
 }
 
-export default function ChatPage({ isActive }: Props) {
+export default function ChatPage({ isActive, onOpenSettings }: Props) {
   const [settings, setSettings] = useState<AgentSettings | null>(null)
   // settings 的最新镜像：激活刷新 effect 只依赖 isActive，用 ref 读当前值，避免写回新对象触发依赖循环。
   const settingsRef = useRef<AgentSettings | null>(null)
@@ -232,6 +239,12 @@ export default function ChatPage({ isActive }: Props) {
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const attachmentRef = useRef<Attachment[]>([])
   const imageInputRef = useRef<HTMLInputElement>(null)
+  const cameraInputRef = useRef<HTMLInputElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const inputElRef = useRef<HTMLTextAreaElement>(null)
+  const [attachMenuOpen, setAttachMenuOpen] = useState(false)
+  // Expanded composer: fills the space between the nav bar and the keyboard.
+  const [expanded, setExpanded] = useState(false)
   const [streaming, setStreaming] = useState(false)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [renameId, setRenameId] = useState<number | null>(null)
@@ -253,6 +266,7 @@ export default function ChatPage({ isActive }: Props) {
   const [diffView, setDiffView] = useState<{ paths: string[]; title: string } | null>(null)
   // Maps an item id to its row so a timeline dot can scroll it into view.
   const rowRefs = useRef(new Map<string, HTMLDivElement>())
+  const kbInset = useKeyboardInset()
 
   // The runtime owns the Agent, the run status, the queue and write ordering.
   const runtime = useMemo(() => new AgentRuntime({ deps: createRuntimeDeps() }), [])
@@ -272,6 +286,76 @@ export default function ChatPage({ isActive }: Props) {
     if (!el) return
     setScrollBottomVisible(el.scrollHeight - el.scrollTop - el.clientHeight > 90)
   }, [])
+
+  const setAttachmentList = useCallback((next: Attachment[]) => {
+    attachmentRef.current = next
+    setAttachments(next)
+  }, [])
+
+  /** Restore a local draft (text + image ids) for one conversation key. */
+  const restoreDraft = useCallback(
+    (key: string) => {
+      const draft = loadDraft(key)
+      setInput(draft.text)
+      // Clear immediately so a previous conversation's preview can never leak
+      // into this one while the async asset URLs load.
+      setAttachmentList([])
+      if (draft.assetIds.length === 0) return
+      void Promise.all(draft.assetIds.map((id) => assetDataUrl(id))).then((urls) => {
+        // Drop assets that no longer exist instead of sending a broken id.
+        setAttachmentList(
+          draft.assetIds.flatMap((id, index) => {
+            const url = urls[index]
+            return url ? [{ id, url, size: 0 }] : []
+          }),
+        )
+      })
+    },
+    [setAttachmentList],
+  )
+
+  // Drafts live only in localStorage until the first message is sent.
+  const draftKey = conversation ? String(conversation.id) : 'new'
+  useEffect(() => {
+    saveDraft(draftKey, { text: input, assetIds: attachments.map((item) => item.id) })
+  }, [draftKey, input, attachments])
+
+  // The chat composer grows by whole wrapped lines (CJK/emoji included) between
+  // 2x and 4x its one-line baseline, then scrolls internally.
+  useLayoutEffect(() => {
+    const el = inputElRef.current
+    if (!el) return
+    if (expanded) {
+      el.style.height = ''
+      el.classList.remove('capped')
+      return
+    }
+    el.style.height = 'auto'
+    const styles = getComputedStyle(el)
+    const line = parseFloat(styles.lineHeight) || 22
+    const padding = (parseFloat(styles.paddingTop) || 0) + (parseFloat(styles.paddingBottom) || 0)
+    const baseline = line + padding
+    const min = baseline * 2
+    const max = baseline * 4
+    const needed = el.scrollHeight
+    const next = Math.min(Math.max(needed, min), max)
+    el.style.height = `${next}px`
+    // Internal scrolling starts only after the 4-line cap (UX-06).
+    el.classList.toggle('capped', needed > max)
+  }, [input, expanded])
+
+  // Keep the latest turn visible when the soft keyboard opens.
+  useEffect(() => {
+    if (kbInset > 0) scrollToBottom()
+  }, [kbInset, scrollToBottom])
+
+  // While expanded, the tabbar is hidden so the composer reaches the keyboard.
+  useEffect(() => {
+    if (!expanded) return
+    document.body.classList.add('chat-expanded')
+    return () => document.body.classList.remove('chat-expanded')
+  }, [expanded])
+
 
   // Surface offline mode immediately and clear it when the network returns.
   useEffect(() => {
@@ -300,6 +384,26 @@ export default function ChatPage({ isActive }: Props) {
         setStreaming(snapshot.status !== 'idle')
         setQueuedCount(snapshot.queued)
         setInterrupted(snapshot.interrupted)
+        // The first message of a draft adopts the conversation the backend
+        // created atomically with it; mirror it into the list and page state.
+        if (snapshot.conversation) {
+          const adopted = snapshot.conversation
+          if (conversationRef.current?.id !== adopted.id) {
+            conversationRef.current = adopted
+            setConversation(adopted)
+          }
+          setConversations((prev) => {
+            const existing = prev.find((item) => item.id === adopted.id)
+            if (
+              existing &&
+              existing.title === adopted.title &&
+              existing.updatedAt === adopted.updatedAt
+            ) {
+              return prev
+            }
+            return [adopted, ...prev.filter((item) => item.id !== adopted.id)]
+          })
+        }
         if (snapshot.error) {
           setNetworkIssue(
             snapshot.error.code === 'network' ||
@@ -316,8 +420,8 @@ export default function ChatPage({ isActive }: Props) {
     async (conv: ChatConversation) => {
       conversationRef.current = conv
       setConversation(conv)
-      attachmentRef.current = []
-      setAttachments([])
+      setExpanded(false)
+      restoreDraft(String(conv.id))
       setLoading(true)
       try {
         // 优先使用会话记录里的模型条目；该条目被删除后回退到当前激活模型。
@@ -339,8 +443,28 @@ export default function ChatPage({ isActive }: Props) {
         setScrollBottomVisible(false)
       }
     },
-    [runtime, scrollToBottom],
+    [restoreDraft, runtime, scrollToBottom],
   )
+
+  /** Prepare an unsaved chat: no conversation row is written until send. */
+  const openDraft = useCallback(async () => {
+    conversationRef.current = null
+    setConversation(null)
+    setItems([])
+    setExpanded(false)
+    restoreDraft('new')
+    setLoading(true)
+    try {
+      const current = settingsRef.current
+      const target = current ? profileFromSettings(current, undefined, undefined) : null
+      const profile = target ? await withCapabilities(target) : null
+      if (profile) setContextWindow(profile.contextWindow ?? 128000)
+      await runtime.openDraft(profile)
+      setItems(runtime.snapshot().items)
+    } finally {
+      setLoading(false)
+    }
+  }, [restoreDraft, runtime])
 
   const bootstrap = useCallback(async () => {
     try {
@@ -348,21 +472,14 @@ export default function ChatPage({ isActive }: Props) {
       setSettings(nextSettings)
       settingsRef.current = nextSettings
       setConversations(list)
-      let target = list[0]
-      if (!target) {
-        if (!nextSettings.activeId) {
-          setLoading(false)
-          return
-        }
-        target = await chatApi.create()
-        setConversations([target])
-      }
-      await openConversation(target)
+      if (list[0]) await openConversation(list[0])
+      else await openDraft()
     } catch (e) {
       toast(friendlyError(e))
+    } finally {
       setLoading(false)
     }
-  }, [openConversation])
+  }, [openConversation, openDraft])
 
   useEffect(() => {
     if (bootRef.current) return
@@ -386,12 +503,12 @@ export default function ChatPage({ isActive }: Props) {
         settingsRef.current = next
         // Rebuild on every activation so per-model capability edits are applied.
         const conv = conversationRef.current
-        if (!conv) return
         if (!next.activeId && next.models.length === 0) {
           await runtime.dispose()
           return
         }
-        await openConversation(conv)
+        if (conv) await openConversation(conv)
+        else await openDraft()
       } catch (e) {
         console.error('刷新 Agent 配置失败', e)
       }
@@ -399,7 +516,7 @@ export default function ChatPage({ isActive }: Props) {
     return () => {
       disposed = true
     }
-  }, [isActive, openConversation, runtime])
+  }, [isActive, openConversation, openDraft, runtime])
 
   const ensureTitle = useCallback(async (text: string) => {
     const conv = conversationRef.current
@@ -416,16 +533,11 @@ export default function ChatPage({ isActive }: Props) {
     }
   }, [])
 
-  const setAttachmentList = useCallback((next: Attachment[]) => {
-    attachmentRef.current = next
-    setAttachments(next)
-  }, [])
-
   /** Import picked/pasted images as assets; every limit failure is announced. */
   const addImageFiles = useCallback(
     async (files: File[]) => {
       if (streaming) {
-        toast('当前回复进行中，暂不支持发送图片')
+        toast('当前回复进行中，暂不支持发送附件')
         return
       }
       if (files.length === 0) return
@@ -433,11 +545,11 @@ export default function ChatPage({ isActive }: Props) {
       let total = next.reduce((sum, item) => sum + item.size, 0)
       for (const file of files) {
         if (next.length >= MAX_CHAT_IMAGES) {
-          toast(`单条消息最多 ${MAX_CHAT_IMAGES} 张图片`)
+          toast(`单条消息最多 ${MAX_CHAT_IMAGES} 个附件`)
           break
         }
         if (file.type !== '' && !file.type.startsWith('image/')) {
-          toast('仅支持图片文件')
+          toast('暂不支持发送该类型文件，请选择图片')
           continue
         }
         if (file.size > MAX_CHAT_IMAGE_BYTES) {
@@ -485,26 +597,30 @@ export default function ChatPage({ isActive }: Props) {
 
   const submitPrompt = useCallback(
     async (text: string, imageAssetIds: number[]) => {
-      if ((!text && imageAssetIds.length === 0) || streaming) return
-      if (!conversationRef.current) {
-        toast('会话尚未就绪')
+      if ((!text && imageAssetIds.length === 0) || streaming || loading) return
+      // BUG-01: a draft chat no longer blocks on "会话尚未就绪". The first send
+      // creates the conversation atomically in the backend.
+      if (!settingsRef.current?.activeId) {
+        toast('请先在设置 → AI 助理中添加并启用一个对话模型')
         return
       }
       const previous = attachmentRef.current
+      const key = conversationRef.current ? String(conversationRef.current.id) : 'new'
       setInput('')
       setAttachmentList([])
-      void ensureTitle(text || '图片')
+      if (conversationRef.current) void ensureTitle(text || '附件')
       try {
         // The runtime persists the user turn, runs the loop and writes results.
         await runtime.prompt({ text, imageAssetIds })
+        clearDraft(key)
       } catch (e) {
         // Rejected before anything was written: keep the draft for a retry.
-        setInput((prev) => prev || text)
+        setInput(text)
         setAttachmentList(previous)
         toast(friendlyError(e))
       }
     },
-    [ensureTitle, runtime, setAttachmentList, streaming],
+    [ensureTitle, loading, runtime, setAttachmentList, streaming],
   )
 
   const send = useCallback(() => {
@@ -624,20 +740,20 @@ export default function ChatPage({ isActive }: Props) {
     void runtime.cancel()
   }, [runtime])
 
+  /** Start an unsaved chat. Nothing is written until the first message sends. */
   const newConversation = useCallback(async () => {
     if (!settings?.activeId) {
       toast('请先在设置 → AI 助理中添加并启用一个对话模型')
       return
     }
     try {
-      const created = await chatApi.create()
-      setConversations((prev) => [created, ...prev])
       setDrawerOpen(false)
-      await openConversation(created)
+      setAttachMenuOpen(false)
+      await openDraft()
     } catch (e) {
       toast(friendlyError(e))
     }
-  }, [openConversation, settings])
+  }, [openDraft, settings])
 
   const removeConversation = useCallback(
     async (id: number) => {
@@ -647,18 +763,13 @@ export default function ChatPage({ isActive }: Props) {
         setConversations(rest)
         if (conversationRef.current?.id === id) {
           if (rest[0]) await openConversation(rest[0])
-          else {
-            await runtime.dispose()
-            setItems([])
-            setConversation(null)
-            await newConversation()
-          }
+          else await openDraft()
         }
       } catch (e) {
         toast(friendlyError(e))
       }
     },
-    [conversations, newConversation, openConversation, runtime],
+    [conversations, openConversation, openDraft],
   )
 
   const saveRename = useCallback(async () => {
@@ -700,7 +811,7 @@ export default function ChatPage({ isActive }: Props) {
       : 0
 
   return (
-    <div className="page chat-page">
+    <div className={`page chat-page ${expanded ? 'expanded' : ''}`}>
       <PageHeader
         title="对话"
         actions={[
@@ -710,6 +821,7 @@ export default function ChatPage({ isActive }: Props) {
             label: '新建对话',
             onClick: () => void newConversation(),
           },
+          { icon: <IconSettings size={22} />, label: '设置', onClick: onOpenSettings },
         ]}
       />
 
@@ -864,7 +976,7 @@ export default function ChatPage({ isActive }: Props) {
         </button>
       )}
 
-      <div className="chat-composer">
+      <div className={`chat-composer ${expanded ? 'expanded' : ''}`}>
         {interrupted && !streaming && (
           <button type="button" className="chat-resume" onClick={resumeRun}>
             上次回答中断
@@ -894,30 +1006,43 @@ export default function ChatPage({ isActive }: Props) {
           </div>
         )}
         <div className="chat-composer-row">
-          <textarea
-            className="chat-input"
-            value={input}
-            rows={1}
-            placeholder={hasModel ? '说点什么…' : '请先添加模型'}
-            disabled={!hasModel}
-            onChange={(e) => setInput(e.target.value)}
-            onPaste={handleComposerPaste}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault()
-                if (streaming) void queueMessage()
-                else void send()
-              }
-            }}
-          />
+          <div className="chat-input-wrap">
+            <textarea
+              ref={inputElRef}
+              className="chat-input"
+              value={input}
+              rows={1}
+              placeholder={hasModel ? '说点什么…' : '请先添加模型'}
+              disabled={!hasModel || loading}
+              onChange={(e) => setInput(e.target.value)}
+              onPaste={handleComposerPaste}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  if (streaming) void queueMessage()
+                  else void send()
+                }
+              }}
+            />
+            <button
+              type="button"
+              className={`chat-expand ${expanded ? 'active' : ''}`}
+              aria-label={expanded ? '收起输入框' : '展开输入框'}
+              aria-pressed={expanded}
+              title={expanded ? '收起输入框' : '展开输入框'}
+              onClick={() => setExpanded((prev) => !prev)}
+            >
+              {expanded ? <IconCollapse size={15} /> : <IconExpand size={15} />}
+            </button>
+          </div>
           {!streaming && hasModel && (
             <button
               type="button"
               className="chat-attach"
-              aria-label="添加图片"
-              onClick={() => imageInputRef.current?.click()}
+              aria-label="添加附件"
+              onClick={() => setAttachMenuOpen(true)}
             >
-              <IconImage size={20} />
+              <IconPaperclip size={20} />
             </button>
           )}
           {streaming && (
@@ -951,7 +1076,7 @@ export default function ChatPage({ isActive }: Props) {
               type="button"
               className="chat-send"
               aria-label="发送"
-              disabled={(input.trim() === '' && attachments.length === 0) || !hasModel}
+              disabled={(input.trim() === '' && attachments.length === 0) || !hasModel || loading}
               onClick={() => void send()}
             >
               <IconSend size={20} />
@@ -970,7 +1095,62 @@ export default function ChatPage({ isActive }: Props) {
             void addImageFiles(files)
           }}
         />
+        {/* Camera capture and generic file picking share the same import path. */}
+        <input
+          ref={cameraInputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          hidden
+          onChange={(e) => {
+            const files = Array.from(e.target.files ?? [])
+            e.target.value = ''
+            void addImageFiles(files)
+          }}
+        />
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*,.pdf,.txt,.md,.csv,.json,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.mp3,.m4a,.wav,.mp4,.mov,.webm"
+          multiple
+          hidden
+          onChange={(e) => {
+            const files = Array.from(e.target.files ?? [])
+            e.target.value = ''
+            void addImageFiles(files)
+          }}
+        />
       </div>
+
+      {attachMenuOpen && (
+        <ActionSheet
+          title="添加附件"
+          onClose={() => setAttachMenuOpen(false)}
+          items={[
+            {
+              label: '拍照',
+              onClick: () => {
+                setAttachMenuOpen(false)
+                cameraInputRef.current?.click()
+              },
+            },
+            {
+              label: '相册',
+              onClick: () => {
+                setAttachMenuOpen(false)
+                imageInputRef.current?.click()
+              },
+            },
+            {
+              label: '文件',
+              onClick: () => {
+                setAttachMenuOpen(false)
+                fileInputRef.current?.click()
+              },
+            },
+          ]}
+        />
+      )}
 
       {docPreview && (
         <Modal

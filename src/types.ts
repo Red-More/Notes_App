@@ -275,6 +275,8 @@ export interface ChatConversation {
   model: string
   createdAt: string
   updatedAt: string
+  /** 最近一条消息时间；NULL 表示空会话，不会出现在会话列表。 */
+  lastMessageAt: string | null
   messageCount: number
 }
 
@@ -388,6 +390,8 @@ export interface AgentRunState {
 export interface AgentRunStart {
   run: AgentRun
   message: ChatMessageRecord | null
+  /** Present when this call created the conversation with its first message. */
+  conversation: ChatConversation | null
 }
 
 /** Wire protocol used by one user-defined model entry. */

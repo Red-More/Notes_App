@@ -101,11 +101,12 @@ function memoryDeps(conversation: ChatConversation) {
     )
 
   const startRun = async (
-    conversationId: number,
+    conversationId: number | null,
     trigger: AgentRunTrigger,
     modelEntry: string,
     message?: NewChatMessage | null,
   ): Promise<AgentRunStart> => {
+    if (conversationId === null) throw new Error('test fake expects a conversation')
     const complete = [...(rows.get(conversationId) ?? [])].reverse().find((item) => !item.isPartial)
     const run: AgentRun = {
       runId: nextRunId++,
@@ -125,7 +126,7 @@ function memoryDeps(conversation: ChatConversation) {
     }
     runs.push(run)
     const record = message ? insert(conversationId, { ...message, runId: run.runId }) : null
-    return { run: { ...run }, message: record }
+    return { run: { ...run }, message: record, conversation: null }
   }
 
   const deps: AgentRuntimeDeps = {
@@ -223,6 +224,7 @@ function conversation(id = 1, title = '测试对话'): ChatConversation {
     model: profile.model,
     createdAt: '2026-01-01 00:00:00',
     updatedAt: '2026-01-01 00:00:00',
+    lastMessageAt: '2026-01-01 00:00:00',
     messageCount: 0,
   } as unknown as ChatConversation
 }

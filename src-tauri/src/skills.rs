@@ -22,7 +22,6 @@ use crate::vfs::VirtualFs;
 const SKILLS_ROOT: &str = "/life/.agents/skills";
 const SKILL_FILE: &str = "SKILL.md";
 const DISABLED_KEY: &str = "skills.disabled";
-const SEEDED_KEY: &str = "skills.seeded";
 /// Agent 工作区：模型可读写，但其中的草稿不会被自动加载。
 const AGENT_ROOT: &str = "/life/agent";
 const DRAFT_ROOT: &str = "/life/agent/skills-drafts";
@@ -35,26 +34,6 @@ const TRIGGER_SEPARATORS: [char; 3] = [',', '，', '、'];
 const MAX_PACKAGE_BYTES: usize = 2 * 1024 * 1024;
 /// 单个 SKILL.md 解压后的上限，防止 zip bomb。
 const MAX_SKILL_FILE_BYTES: u64 = 128 * 1024;
-
-/// 随包内置技能：id 与正文。正文含 frontmatter，首次启动原样写入。
-const BUILTINS: [(&str, &str); 4] = [
-    (
-        "contact-manager",
-        include_str!("../assets/skills/contact-manager.md"),
-    ),
-    (
-        "study-planner",
-        include_str!("../assets/skills/study-planner.md"),
-    ),
-    (
-        "trip-planner",
-        include_str!("../assets/skills/trip-planner.md"),
-    ),
-    (
-        "note-taking",
-        include_str!("../assets/skills/note-taking.md"),
-    ),
-];
 
 /// Prompt 索引与技能列表使用的摘要，不含正文。
 #[derive(Debug, Clone, Serialize)]
@@ -166,7 +145,8 @@ fn parse_skill(id: &str, content: &str) -> Option<(String, SkillSummary)> {
         scope,
         version,
         enabled: true,
-        builtin: is_builtin(id),
+        // The app ships no preset skills: every skill is user-installed.
+        builtin: false,
     };
     Some((parts.body, summary))
 }
@@ -239,10 +219,6 @@ fn split_triggers(raw: &str) -> Vec<String> {
         .map(|part| part.trim().trim_matches('"').trim_matches('\'').to_string())
         .filter(|part| !part.is_empty())
         .collect()
-}
-
-fn is_builtin(id: &str) -> bool {
-    BUILTINS.iter().any(|(builtin, _)| builtin == &id)
 }
 
 fn quote(value: &str) -> String {
@@ -747,35 +723,4 @@ pub fn delete(vfs: &mut VirtualFs, id: &str) -> Result<(), ToolError> {
     write_disabled(&tx, &disabled)?;
     tx.commit()?;
     Ok(())
-}
-
-/// 首次启动写入内置技能；`skills.seeded` 存在时不再补，避免卸载后复活。
-pub fn seed_builtins(vfs: &mut VirtualFs) -> Result<(), ToolError> {
-    if get_setting(vfs.conn(), SEEDED_KEY)?.is_some() {
-        return Ok(());
-    }
-    for (id, content) in BUILTINS {
-        let path = skill_path(id);
-        let exists: i64 = vfs.conn().query_row(
-            "SELECT COUNT(*) FROM inodes WHERE path = ?1",
-            params![path],
-            |row| row.get(0),
-        )?;
-        if exists == 0 {
-            vfs.write_skill(WriteRequest {
-                path,
-                content: content.to_string(),
-                create_parents: Some(true),
-                auto_frontmatter: Some(false),
-                source: WriteSource::User,
-            })?;
-        }
-    }
-    set_setting(vfs.conn(), SEEDED_KEY, &now(vfs.conn())?)?;
-    Ok(())
-}
-
-/// SQLite 本地时间，与其它模块的写入格式一致。
-fn now(conn: &Connection) -> rusqlite::Result<String> {
-    conn.query_row("SELECT datetime('now','localtime')", [], |row| row.get(0))
 }

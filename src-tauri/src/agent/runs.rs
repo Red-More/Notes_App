@@ -6,7 +6,7 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
-use super::conversations::{self, ChatMessage, NewMessage};
+use super::conversations::{self, ChatMessage, Conversation, NewMessage};
 use crate::vfs::error::ToolError;
 use crate::vfs::VirtualFs;
 
@@ -45,11 +45,14 @@ pub struct QueuedRun {
 }
 
 /// Result of starting a run: the ledger row plus its persisted user message.
+/// `conversation` is set only when this call created the conversation
+/// atomically with its first message.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunStart {
     pub run: AgentRun,
     pub message: Option<ChatMessage>,
+    pub conversation: Option<Conversation>,
 }
 
 /// Everything the UI needs to render run state on (re)entry.
@@ -144,6 +147,49 @@ fn row_to_run(r: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRun> {
     })
 }
 
+/// Insert the run row and its optional user message inside an open transaction.
+#[allow(clippy::too_many_arguments)]
+fn insert_start(
+    tx: &Connection,
+    conversation_id: i64,
+    status: &str,
+    trigger: &str,
+    model_entry: &str,
+    resume_from: Option<i64>,
+    at: &str,
+    message: Option<NewMessage>,
+) -> Result<(i64, Option<ChatMessage>), ToolError> {
+    tx.execute(
+        "INSERT INTO agent_runs
+             (conversation_id, status, trigger, model_entry, resume_from_message_id,
+              created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+        params![
+            conversation_id,
+            status,
+            trigger,
+            model_entry,
+            resume_from,
+            at
+        ],
+    )?;
+    let run_id = tx.last_insert_rowid();
+    let inserted = match message {
+        Some(mut item) => {
+            item.run_id.get_or_insert(run_id);
+            Some(conversations::insert_message(
+                tx,
+                conversation_id,
+                item,
+                at,
+            )?)
+        }
+        None => None,
+    };
+    conversations::touch_message_clock(tx, conversation_id, at)?;
+    Ok((run_id, inserted))
+}
+
 /// Insert the run row and its user message in one transaction.
 ///
 /// A second prompt while another run is executing is stored as `queued`; the
@@ -172,36 +218,15 @@ pub fn start(
     };
 
     let tx = conn.unchecked_transaction()?;
-    tx.execute(
-        "INSERT INTO agent_runs
-             (conversation_id, status, trigger, model_entry, resume_from_message_id,
-              created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-        params![
-            conversation_id,
-            status,
-            trigger,
-            model_entry,
-            resume_from,
-            at
-        ],
-    )?;
-    let run_id = tx.last_insert_rowid();
-    let inserted = match message {
-        Some(mut item) => {
-            item.run_id.get_or_insert(run_id);
-            Some(conversations::insert_message(
-                &tx,
-                conversation_id,
-                item,
-                &at,
-            )?)
-        }
-        None => None,
-    };
-    tx.execute(
-        "UPDATE conversations SET updated_at = ?1 WHERE id = ?2",
-        params![at, conversation_id],
+    let (run_id, inserted) = insert_start(
+        &tx,
+        conversation_id,
+        status,
+        trigger,
+        model_entry,
+        resume_from,
+        &at,
+        message,
     )?;
     tx.commit()?;
 
@@ -211,6 +236,52 @@ pub fn start(
     Ok(RunStart {
         run,
         message: inserted,
+        conversation: None,
+    })
+}
+
+/// Create a conversation together with its first prompt, atomically.
+///
+/// The conversation row, the run row and the first user message commit as one
+/// transaction: if anything fails (or the process dies) no empty conversation
+/// is ever persisted. This backs the "draft until first send" chat flow.
+pub fn start_new(
+    vfs: &VirtualFs,
+    title: Option<String>,
+    trigger: &str,
+    message: Option<NewMessage>,
+) -> Result<RunStart, ToolError> {
+    validate_trigger(trigger)?;
+    let conn = vfs.conn();
+    let settings = crate::agent::model_store::settings(conn, &[])?;
+    let active = settings
+        .active_id
+        .ok_or_else(|| ToolError::invalid("请先在设置中添加并启用一个对话模型"))?;
+    let entry = crate::agent::model_store::resolve(conn, &active)?;
+    let at = now(conn)?;
+
+    let tx = conn.unchecked_transaction()?;
+    let conversation =
+        conversations::insert_on(&tx, title, entry.id.clone(), entry.model_id.clone())?;
+    let (run_id, inserted) = insert_start(
+        &tx,
+        conversation.id,
+        "running",
+        trigger,
+        &entry.id,
+        None,
+        &at,
+        message,
+    )?;
+    tx.commit()?;
+
+    let run = get(conn, run_id)?.ok_or_else(|| ToolError::Storage {
+        message: "运行记录写入后未能读回".into(),
+    })?;
+    Ok(RunStart {
+        run,
+        message: inserted,
+        conversation: Some(conversation),
     })
 }
 

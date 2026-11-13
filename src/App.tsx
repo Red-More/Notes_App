@@ -4,6 +4,7 @@ import ReminderScheduler from './components/ReminderScheduler'
 import { IconCalendar, IconChat, IconNote, IconTodo, IconUsers } from './components/Icons'
 import { applyTheme, getStoredTheme } from './theme'
 import { applyFontScale } from './appPrefs'
+import { installKeyboardViewport } from './system/keyboard'
 import NoteListPage from './pages/notes/NoteListPage'
 import FolderManagePage from './pages/notes/FolderManagePage'
 import TodoPage from './pages/todos/TodoPage'
@@ -15,12 +16,14 @@ import ContactPage from './pages/contacts/ContactPage'
 const NoteEditorPage = lazy(() => import('./pages/notes/NoteEditorPage'))
 // Agent runtime + chat UI live in their own chunk; list pages stay light.
 const ChatPage = lazy(() => import('./pages/chat/ChatPage'))
+const SettingsPage = lazy(() => import('./pages/settings/SettingsPage'))
 
 type Tab = 'chat' | 'notes' | 'todos' | 'schedules' | 'contacts'
 
 type Overlay =
   | { kind: 'editor'; noteId: number | null; folderId: number | null }
   | { kind: 'folders' }
+  | { kind: 'settings' }
 
 const TABS: Array<{ key: Tab; label: string; icon: typeof IconNote }> = [
   { key: 'chat', label: '对话', icon: IconChat },
@@ -71,6 +74,9 @@ function App() {
     applyTheme(getStoredTheme())
     applyFontScale()
   }, [])
+
+  // Track the visual viewport so the soft keyboard never covers the composer.
+  useEffect(() => installKeyboardViewport(), [])
 
   const closeOverlay = () => {
     setOverlay(null)
@@ -123,6 +129,12 @@ function App() {
       const dy = y - g.startY
       if (!g.locked) {
         if (Math.abs(dx) < SLOP && Math.abs(dy) < SLOP) return
+        // Text editing keeps native caret/selection gestures: never page from
+        // inside an input, textarea, or the expanded composer.
+        if (target.closest('input, textarea, select, [contenteditable="true"], .chat-page.expanded')) {
+          g.locked = 'v'
+          return
+        }
         // Horizontal-only scrollable (chips row): let the browser scroll it.
         const chips = target.closest('.chips') as HTMLElement | null
         if (chips && chips.scrollWidth > chips.clientWidth) {
@@ -324,6 +336,18 @@ function App() {
       </>
     )
   }
+  if (overlay?.kind === 'settings') {
+    return (
+      <>
+        <Suspense fallback={<div className="editor-page settings-page" />}>
+          <SettingsPage onBack={closeOverlay} />
+        </Suspense>
+        <ToastHost />
+      </>
+    )
+  }
+
+  const openSettings = () => setOverlay({ kind: 'settings' })
 
   return (
     <div className="app">
@@ -338,25 +362,26 @@ function App() {
         <div className="pager-track" ref={trackRef}>
           <section className="pager-page" role="tabpanel" id="panel-chat" aria-label="对话">
             <Suspense fallback={<div className="page" />}>
-              <ChatPage isActive={index === 0} />
+              <ChatPage isActive={index === 0} onOpenSettings={openSettings} />
             </Suspense>
           </section>
           <section className="pager-page" role="tabpanel" id="panel-notes" aria-label="笔记">
             <NoteListPage
               isActive={index === 1}
               version={dataVersion}
+              onOpenSettings={openSettings}
               onOpenNote={(noteId, folderId) => setOverlay({ kind: 'editor', noteId, folderId })}
               onOpenFolders={() => setOverlay({ kind: 'folders' })}
             />
           </section>
           <section className="pager-page" role="tabpanel" id="panel-todos" aria-label="待办">
-            <TodoPage isActive={index === 2} />
+            <TodoPage isActive={index === 2} onOpenSettings={openSettings} />
           </section>
           <section className="pager-page" role="tabpanel" id="panel-schedules" aria-label="日程">
-            <SchedulePage isActive={index === 3} />
+            <SchedulePage isActive={index === 3} onOpenSettings={openSettings} />
           </section>
           <section className="pager-page" role="tabpanel" id="panel-contacts" aria-label="人脉">
-            <ContactPage isActive={index === 4} />
+            <ContactPage isActive={index === 4} onOpenSettings={openSettings} />
           </section>
         </div>
       </div>
