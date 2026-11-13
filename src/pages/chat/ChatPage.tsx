@@ -345,14 +345,18 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
 
   // Keep the latest turn visible whenever the viewport changes: the soft
   // keyboard shrinks either the layout viewport (adjustResize) or the visual
-  // viewport (overlay), and both must re-anchor the transcript.
+  // viewport (overlay), and both must re-anchor the transcript. visualViewport
+  // can also scroll independently after the keyboard opens (no resize fires),
+  // so the scroll event is tracked as well.
   useEffect(() => {
     const onViewportChange = () => scrollToBottom()
     const vv = window.visualViewport
     vv?.addEventListener('resize', onViewportChange)
+    vv?.addEventListener('scroll', onViewportChange)
     window.addEventListener('resize', onViewportChange)
     return () => {
       vv?.removeEventListener('resize', onViewportChange)
+      vv?.removeEventListener('scroll', onViewportChange)
       window.removeEventListener('resize', onViewportChange)
     }
   }, [scrollToBottom])
