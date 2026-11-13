@@ -1,10 +1,20 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react'
 import { save } from '@tauri-apps/plugin-dialog'
 import { api, assetApi, docApi } from '../../api'
 import {
   bytesToBase64,
   computeKbInset,
-  diffLines,
+  diffLines,  
   formatAmPmDateTime,
   formatDateTime,
   fmtVersion,
@@ -12,7 +22,7 @@ import {
   safeFileName,
 } from '../../utils'
 import { hasAssetRefs } from '../../assets'
-import type { DocFields, Folder, NoteVersion } from '../../types'
+import type { Doc, Folder, NoteVersion } from '../../types'
 import { ConfirmDialog, Modal } from '../../components/ui'
 import { toast } from '../../toast'
 import { useEdgeBack } from '../../hooks'
@@ -24,10 +34,10 @@ import {
   subscribeMermaidEnhance,
 } from '../../editor/mermaidPrefs'
 import {
-  SPLIT_HANDLE_SIZE,
+  MAX_SPLIT_RATIO,
+  MIN_SPLIT_RATIO,
   getLayoutPrefs,
   setLayoutPrefs,
-  type LayoutPrefs,
 } from '../../editor/layout'
 import SplitHandle from '../../components/SplitHandle'
 import ImageZoom from '../../components/ImageZoom'
@@ -83,6 +93,15 @@ const keepFieldFocus = (e: React.PointerEvent<HTMLButtonElement>) => e.preventDe
 /** How long a programmatic scroll suppresses the other pane's scroll events. */
 const SYNC_GUARD_MS = 160
 
+/** Scroll idle time before a partially collapsed metadata head snaps shut/open. */
+const META_SNAP_IDLE_MS = 120
+
+/** Duration of the eased snap that finishes a partially collapsed head. */
+const META_SNAP_MS = 220
+
+/** Position/opacity transition of the split panes (kept in sync with index.css). */
+const PREVIEW_ANIM_MS = 1000
+
 /** Quick-syntax actions offered by the bar above the soft keyboard. */
 type QuickAction =
   | 'heading'
@@ -115,16 +134,27 @@ function hhmm(ts: number): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
-/** Render system-generated frontmatter fields as read-only YAML lines. */
-function fieldsToYaml(fields: DocFields): string {
-  return Object.entries(fields)
-    .filter(([, v]) => v !== null && v !== undefined && v !== '')
-    .map(([k, v]) => {
-      const text =
-        typeof v === 'boolean' ? (v ? 'true' : 'false') : Array.isArray(v) ? v.join(', ') : String(v)
-      return `${k}: ${text}`
-    })
-    .join('\n')
+/** Render a document's full frontmatter as read-only YAML lines. */
+function docMetaYaml(doc: Doc): string {
+  const lines = [
+    `kind: ${doc.kind}`,
+    `title: ${doc.title}`,
+    `created_at: ${doc.createdAt}`,
+    `updated_at: ${doc.updatedAt}`,
+  ]
+  for (const [k, v] of Object.entries(doc.fields)) {
+    if (v === null || v === undefined || v === '') continue
+    const text =
+      typeof v === 'boolean'
+        ? v
+          ? 'true'
+          : 'false'
+        : Array.isArray(v)
+          ? v.join(', ')
+          : String(v)
+    lines.push(`${k}: ${text}`)
+  }
+  return lines.join('\n')
 }
 
 export default function NoteEditorPage({
@@ -139,14 +169,15 @@ export default function NoteEditorPage({
   const [currentFolderId, setCurrentFolderId] = useState<number | null>(folderId)
   const [folders, setFolders] = useState<Folder[]>([])
   const [defaultFolderName, setDefaultFolderName] = useState('默认')
-  const [folderModalOpen, setFolderModalOpen] = useState(false)
+  const [folderMenuOpen, setFolderMenuOpen] = useState(false)
+  /** Anchor rect of the folder button, captured when the popover opens. */
+  const [folderAnchor, setFolderAnchor] = useState<{ left: number; top: number } | null>(null)
   /** Path / kind / generated frontmatter of the bound doc (empty for new docs). */
   const [docPath, setDocPath] = useState('')
   const [metaYaml, setMetaYaml] = useState('')
   const [saveState, setSaveState] = useState<SaveState>('clean')
   const [dirty, setDirty] = useState(false)
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null)
-  const [createdAt, setCreatedAt] = useState<string | null>(null)
   const [updatedAt, setUpdatedAt] = useState<string | null>(null)
   const [hasNote, setHasNote] = useState(noteId != null)
   const [leaveConfirm, setLeaveConfirm] = useState(false)
@@ -162,12 +193,19 @@ export default function NoteEditorPage({
 
   const [zoomImage, setZoomImage] = useState<ZoomImage | null>(null)
 
-  // Layout config is persisted, so the split mode / ratio survives reloads.
-  const [layout, setLayout] = useState<LayoutPrefs>(() => getLayoutPrefs())
+  // The divider position is persisted, but the preview always starts closed:
+  // the editor is the default view and the eye button renders the preview on
+  // demand. A closed preview renders the editor at the full 100% share.
+  const [splitRatio, setSplitRatio] = useState(() => getLayoutPrefs().ratio)
+  /** Editor share currently rendered; 100% while the preview is rolled away. */
+  const [renderedRatio, setRenderedRatio] = useState(MAX_SPLIT_RATIO)
+  const [previewOpen, setPreviewOpen] = useState(false)
+  const [previewMounted, setPreviewMounted] = useState(false)
   const [previewReady, setPreviewReady] = useState(false)
-  const previewOpen = layout.previewOpen
-  const previewOnly = layout.previewOnly
-  const isSplit = previewOpen && !previewOnly
+  const isSplit = previewMounted
+  const previewOpenRef = useRef(false)
+  const previewCloseTimerRef = useRef(0)
+  const previewOpenFramesRef = useRef<number[]>([])
 
   // Edit mode: the draft is always mounted in place; tapping the title or the
   // body turns the bar on, dismissing the IME turns it off.
@@ -190,6 +228,17 @@ export default function NoteEditorPage({
   const prevKbInsetRef = useRef(0)
 
   const noteIdRef = useRef<number | null>(noteId)
+  /**
+   * Collapsible metadata head: the wrapper is clipped to the live collapse
+   * height while the inner block keeps its natural height for measurement.
+   */
+  const metaWrapRef = useRef<HTMLDivElement>(null)
+  const metaInnerRef = useRef<HTMLDivElement>(null)
+  const metaHeightRef = useRef(0)
+  const metaExpandedRef = useRef(false)
+  const [metaExpanded, setMetaExpanded] = useState(false)
+  /** Imperative toggle exposed by the collapse controller for the head button. */
+  const metaToggleRef = useRef<(() => void) | null>(null)
   const lastSavedRef = useRef<{ title: string; content: string }>({
     title: '',
     content: '',
@@ -228,10 +277,9 @@ export default function NoteEditorPage({
           setTitle(doc.title)
           setContent(doc.content)
           setCurrentFolderId(doc.folderId)
-          setCreatedAt(doc.createdAt)
           setUpdatedAt(doc.updatedAt)
           setDocPath(doc.path)
-          setMetaYaml(fieldsToYaml(doc.fields))
+          setMetaYaml(docMetaYaml(doc))
           lastSavedRef.current = {
             title: doc.title,
             content: doc.content,
@@ -272,7 +320,6 @@ export default function NoteEditorPage({
             : await api.createNote({ title: t, content: c, folderId: currentFolderId })
         noteIdRef.current = note.id
         setHasNote(true)
-        setCreatedAt(note.createdAt)
         setUpdatedAt(note.updatedAt)
       } else if (mode === 'diary') {
         const receipt = await api.saveDiary({ id: noteIdRef.current, title: t, content: c })
@@ -313,6 +360,187 @@ export default function NoteEditorPage({
       return matches ? 'clean' : 'dirty'
     })
   }, [title, content, isBlank])
+
+  // ---- Scroll-driven collapsible metadata head ----
+  // The head sits above the title in normal flow and starts fully collapsed.
+  // Its height maps 1:1 to the active scroller's offset over the first H px;
+  // the rest of the delta passes through to the document. Each scroller gets a
+  // matching top inset, so the text stays locked while the head collapses
+  // instead of moving at double speed (same idea as useCollapsibleHeader).
+  useLayoutEffect(() => {
+    const body = bodyRef.current
+    const wrap = metaWrapRef.current
+    const inner = metaInnerRef.current
+    if (!body || !wrap || !inner) return
+    // The inner block keeps its natural height while the wrapper is clipped.
+    const height = Math.max(0, inner.offsetHeight)
+    metaHeightRef.current = height
+    if (height <= 0) return
+
+    const reduceMotion =
+      window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
+    const bound = new Set<HTMLElement>()
+    let primary: HTMLElement | null = null
+    let last: HTMLElement | null = null
+    let frame = 0
+    let idleTimer = 0
+    let animating = false
+    let touching = false
+    let disposed = false
+
+    /** Paint the head and the scroll inset for one raw scroll offset. */
+    const apply = (scroller: HTMLElement, rawTop: number) => {
+      const consumed = Math.min(Math.max(0, rawTop), height)
+      const progress = 1 - consumed / height
+      // The inset cancels the consumed offset so the text does not move twice.
+      scroller.style.paddingTop = `${consumed}px`
+      // A collapsed head must truly disappear: no height, no hit area.
+      wrap.style.height = `${height * progress}px`
+      wrap.style.opacity = String(progress)
+      wrap.style.pointerEvents = progress > 0 ? 'auto' : 'none'
+      const expanded = progress > 0.5
+      if (metaExpandedRef.current !== expanded) {
+        metaExpandedRef.current = expanded
+        setMetaExpanded(expanded)
+      }
+    }
+
+    const stopSnap = () => {
+      if (frame) cancelAnimationFrame(frame)
+      frame = 0
+      animating = false
+    }
+
+    /** Ease-out scroll so a released head never rests between states. */
+    const animateTo = (scroller: HTMLElement, target: number) => {
+      stopSnap()
+      if (reduceMotion || Math.abs(scroller.scrollTop - target) < 1) {
+        scroller.scrollTop = target
+        // Read back: a short document clamps the offset before the head's full
+        // travel, and the painted state must follow the real position.
+        apply(scroller, scroller.scrollTop)
+        return
+      }
+      const from = scroller.scrollTop
+      const start = performance.now()
+      animating = true
+      const step = (now: number) => {
+        const t = Math.min(1, (now - start) / META_SNAP_MS)
+        const eased = 1 - Math.pow(1 - t, 3)
+        const value = from + (target - from) * eased
+        scroller.scrollTop = value
+        apply(scroller, scroller.scrollTop)
+        if (t < 1) {
+          frame = requestAnimationFrame(step)
+        } else {
+          frame = 0
+          animating = false
+        }
+      }
+      frame = requestAnimationFrame(step)
+    }
+
+    const snap = () => {
+      if (!last || animating) return
+      const top = last.scrollTop
+      if (top <= 0 || top >= height) return
+      // The head only moves with real scroller offsets, so focusing the title
+      // (or the IME / a selection drag) can never collapse it on its own.
+      animateTo(last, top < height / 2 ? 0 : height)
+    }
+
+    const scheduleSnap = () => {
+      if (idleTimer) window.clearTimeout(idleTimer)
+      idleTimer = window.setTimeout(() => {
+        idleTimer = 0
+        snap()
+      }, META_SNAP_IDLE_MS)
+    }
+
+    const onScroll = (event: Event) => {
+      const scroller = event.target
+      if (!(scroller instanceof HTMLElement)) return
+      last = scroller
+      apply(scroller, scroller.scrollTop)
+      if (!animating && !touching) scheduleSnap()
+    }
+
+    const onTouchStart = () => {
+      touching = true
+      if (idleTimer) window.clearTimeout(idleTimer)
+      idleTimer = 0
+      stopSnap()
+    }
+
+    const onTouchEnd = () => {
+      touching = false
+      scheduleSnap()
+    }
+
+    const placeCollapsed = (scroller: HTMLElement) => {
+      scroller.style.paddingTop = `${height}px`
+      scroller.scrollTop = height
+      apply(scroller, scroller.scrollTop)
+    }
+
+    const bind = (scroller: HTMLElement) => {
+      if (bound.has(scroller)) return
+      bound.add(scroller)
+      if (!primary || !primary.isConnected) primary = scroller
+      scroller.style.overflowAnchor = 'none'
+      // Reserve the head's travel, so even a short document can scroll it away.
+      const content = scroller.querySelector<HTMLElement>('.cm-content')
+      if (content) content.style.minHeight = `calc(100% + ${height}px)`
+      scroller.addEventListener('scroll', onScroll, { passive: true })
+      placeCollapsed(scroller)
+      last = scroller
+      // CodeMirror may restore its scroll offset right after a doc load; make
+      // sure the head still starts collapsed once the layout settles.
+      requestAnimationFrame(() => {
+        if (!disposed && scroller.scrollTop === 0) placeCollapsed(scroller)
+      })
+    }
+
+    const toggle = () => {
+      const scroller = primary?.isConnected
+        ? primary
+        : last?.isConnected
+          ? last
+          : null
+      if (!scroller) return
+      animateTo(scroller, scroller.scrollTop < height / 2 ? height : 0)
+    }
+    metaToggleRef.current = toggle
+
+    const bindScrollers = () => {
+      // Only the source pane drives the head: the preview pane mounts with its
+      // own scroll position (and synced line jumps), which must never pop the
+      // metadata head open when the preview button is pressed.
+      body.querySelectorAll<HTMLElement>('.cm-scroller').forEach(bind)
+    }
+    bindScrollers()
+    // CodeMirror mounts after this effect; rescan the body for its scroller.
+    const observer = new MutationObserver(bindScrollers)
+    observer.observe(body, { childList: true, subtree: true })
+    body.addEventListener('touchstart', onTouchStart, { passive: true })
+    body.addEventListener('touchend', onTouchEnd, { passive: true })
+    body.addEventListener('touchcancel', onTouchEnd, { passive: true })
+    // Any fresh user gesture takes over from a running snap.
+    body.addEventListener('wheel', stopSnap, { passive: true })
+
+    return () => {
+      disposed = true
+      observer.disconnect()
+      body.removeEventListener('touchstart', onTouchStart)
+      body.removeEventListener('touchend', onTouchEnd)
+      body.removeEventListener('touchcancel', onTouchEnd)
+      body.removeEventListener('wheel', stopSnap)
+      bound.forEach((scroller) => scroller.removeEventListener('scroll', onScroll))
+      if (idleTimer) window.clearTimeout(idleTimer)
+      stopSnap()
+      metaToggleRef.current = null
+    }
+  }, [metaYaml, previewVersion])
 
   // ---- Strategy-driven auto-save ----
 
@@ -576,7 +804,6 @@ export default function NoteEditorPage({
       setTitle(note.title)
       setContent(note.content)
       setCurrentFolderId(note.folderId)
-      setCreatedAt(note.createdAt)
       setUpdatedAt(note.updatedAt)
       lastSavedRef.current = { title: note.title, content: note.content }
       setDirty(false)
@@ -597,7 +824,6 @@ export default function NoteEditorPage({
       setTitle(note.title)
       setContent(note.content)
       setCurrentFolderId(note.folderId)
-      setCreatedAt(note.createdAt)
       setUpdatedAt(note.updatedAt)
       lastSavedRef.current = { title: note.title, content: note.content }
       setDirty(false)
@@ -611,8 +837,28 @@ export default function NoteEditorPage({
   }
 
   // ---- Folder selection (notes only; other kinds keep their fixed path) ----
+  const openFolderMenu = (e: React.MouseEvent<HTMLButtonElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    setFolderAnchor({ left: rect.left, top: rect.bottom })
+    setFolderMenuOpen(true)
+  }
+
+  // Popover placement: clamp to the horizontal viewport and flip above the
+  // anchor when the list would overflow the bottom edge.
+  const folderMenuPos = useMemo(() => {
+    if (!folderAnchor) return undefined
+    const WIDTH = 220
+    const estHeight = 46 * (folders.length + 1) + 20
+    const left = Math.min(Math.max(8, folderAnchor.left), window.innerWidth - WIDTH - 8)
+    let top = folderAnchor.top + 6
+    if (top + estHeight > window.innerHeight - 8) {
+      top = Math.max(8, folderAnchor.top - estHeight - 50)
+    }
+    return { left, top, width: WIDTH } as React.CSSProperties
+  }, [folderAnchor, folders.length])
+
   const handleSelectFolder = async (fid: number | null) => {
-    setFolderModalOpen(false)
+    setFolderMenuOpen(false)
     setCurrentFolderId(fid)
     if (noteIdRef.current == null) return
     try {
@@ -724,25 +970,96 @@ export default function NoteEditorPage({
     editorRef.current?.focus()
   }
 
-  // ---- Layout: preview visibility, split mode and ratio ----
+  // ---- Layout: preview visibility and divider position ----
+
+  /**
+   * Unroll the preview: mount it at 0% and then animate to the remembered
+   * divider position over one second. A divider remembered at 100% (preview
+   * hidden) opens the full preview instead of staying invisible.
+   */
+  const openPreview = () => {
+    if (previewCloseTimerRef.current) {
+      window.clearTimeout(previewCloseTimerRef.current)
+      previewCloseTimerRef.current = 0
+    }
+    previewOpenFramesRef.current.forEach((id) => cancelAnimationFrame(id))
+    const target = splitRatio >= MAX_SPLIT_RATIO ? MIN_SPLIT_RATIO : splitRatio
+    if (target !== splitRatio) {
+      setSplitRatio(target)
+      setLayoutPrefs({ ratio: target })
+    }
+    previewOpenRef.current = true
+    setPreviewOpen(true)
+    setPreviewMounted(true)
+    setRenderedRatio(MAX_SPLIT_RATIO)
+    // Let the zero-height pane paint once, then run the one-second unroll.
+    previewOpenFramesRef.current = [
+      requestAnimationFrame(() => {
+        previewOpenFramesRef.current = [
+          requestAnimationFrame(() => {
+            previewOpenFramesRef.current = []
+            if (previewOpenRef.current) setRenderedRatio(target)
+          }),
+        ]
+      }),
+    ]
+  }
+
+  /** Roll the preview back over one second, then unmount it. */
+  const closePreview = () => {
+    previewOpenFramesRef.current.forEach((id) => cancelAnimationFrame(id))
+    previewOpenFramesRef.current = []
+    previewOpenRef.current = false
+    setPreviewOpen(false)
+    setRenderedRatio(MAX_SPLIT_RATIO)
+    if (previewCloseTimerRef.current) window.clearTimeout(previewCloseTimerRef.current)
+    previewCloseTimerRef.current = window.setTimeout(() => {
+      previewCloseTimerRef.current = 0
+      setPreviewMounted(false)
+    }, PREVIEW_ANIM_MS)
+  }
 
   const togglePreview = () => {
-    const next = { ...layout, previewOpen: !layout.previewOpen }
-    setLayout(next)
-    setLayoutPrefs(next)
+    if (previewOpen) closePreview()
+    else openPreview()
   }
 
-  /** Live drag update: re-render the panes without touching localStorage. */
+  /** Live drag update: move the panes without touching localStorage. */
   const handleRatioChange = (ratio: number) => {
-    setLayout((current) => (current.ratio === ratio ? current : { ...current, ratio }))
+    // Grabbing the divider cancels a pending open/close hand-off.
+    previewOpenFramesRef.current.forEach((id) => cancelAnimationFrame(id))
+    previewOpenFramesRef.current = []
+    if (previewCloseTimerRef.current) {
+      window.clearTimeout(previewCloseTimerRef.current)
+      previewCloseTimerRef.current = 0
+    }
+    if (!previewOpenRef.current) {
+      previewOpenRef.current = true
+      setPreviewOpen(true)
+    }
+    setRenderedRatio(ratio)
   }
 
-  /** Drag / click finished: persist the final ratio. */
+  /** Drag / keys finished: remember the divider position for the next session. */
   const handleRatioCommit = (ratio: number) => {
-    const next = { ...layout, ratio }
-    setLayout(next)
-    setLayoutPrefs(next)
+    setRenderedRatio(ratio)
+    setSplitRatio(ratio)
+    setLayoutPrefs({ ratio })
+    // Snapping the divider to the bottom hides the preview entirely, so the
+    // state follows: the preview closes (and its toolbar button turns off)
+    // instead of staying "open" at zero height.
+    if (ratio >= MAX_SPLIT_RATIO) closePreview()
   }
+
+  // Drop pending open frames / close timer when the editor page goes away.
+  useEffect(
+    () => () => {
+      if (previewCloseTimerRef.current) window.clearTimeout(previewCloseTimerRef.current)
+      previewOpenFramesRef.current.forEach((id) => cancelAnimationFrame(id))
+      previewOpenFramesRef.current = []
+    },
+    [],
+  )
 
   // ---- Two-way editor <-> preview scroll sync ----
   // Each direction ignores the scroll events emitted by the pane it just
@@ -780,8 +1097,9 @@ export default function NoteEditorPage({
   }, [isSplit, previewReady])
 
   const wordCount = content.length
-  const createdAtLabel = createdAt ? formatAmPmDateTime(createdAt) : '—'
-  const updatedAtLabel = updatedAt ? formatAmPmDateTime(updatedAt) : '—'
+  const wordCountLabel = wordCount.toLocaleString('zh-CN')
+  // The status strip only carries the last update time and the live word count.
+  const updatedAtLabel = updatedAt ? formatAmPmDateTime(updatedAt) : null
   const diffRows = compareVersion ? diffLines(compareVersion.content, content) : []
   const diffAdd = diffRows.filter((r) => r.type === 'add').length
   const diffDel = diffRows.filter((r) => r.type === 'del').length
@@ -871,7 +1189,7 @@ export default function NoteEditorPage({
             <button
               type="button"
               className="editor-folder"
-              onClick={() => setFolderModalOpen(true)}
+              onClick={openFolderMenu}
             >
               <IconFolder size={15} />
               <span>{folderName || '选择文件夹'}</span>
@@ -924,14 +1242,6 @@ export default function NoteEditorPage({
         </div>
       )}
 
-      {/* System-generated frontmatter: rendered read-only, YAML flavored. */}
-      {metaYaml && (
-        <div className="editor-frontmatter" role="status">
-          <div className="editor-frontmatter-title">元数据 · 系统生成（只读）</div>
-          <pre className="editor-frontmatter-body">{metaYaml}</pre>
-        </div>
-      )}
-
       {previewVersion ? (
         <>
           <div className="preview-banner">
@@ -967,92 +1277,97 @@ export default function NoteEditorPage({
                 : undefined
             }
           >
-            {previewOpen && previewOnly ? (
-              <div className="editor-preview preview-only" aria-label="Markdown 预览">
-                <div className="preview-only-title">{title || '无标题'}</div>
-                <Suspense fallback={<div className="preview-loading">正在加载预览…</div>}>
-                  <MarkdownPreview
-                    ref={attachPreview}
-                    source={content}
-                    enhance={mermaidEnhance}
-                    onScrollLine={handlePreviewScroll}
-                    onSourceLine={handlePreviewSourceLine}
-                  />
-                </Suspense>
-              </div>
-            ) : (
-              <div className="editor-split">
-                <div
-                  className="editor-main"
-                  style={
-                    previewOpen
-                      ? {
-                          flex: `0 0 calc((100% - ${SPLIT_HANDLE_SIZE}px) * ${layout.ratio / 100})`,
-                        }
-                      : undefined
-                  }
-                  onClick={handleEditorPaneClick}
-                >
-                  <input
-                    ref={titleRef}
-                    className="editor-title-input"
-                    value={title}
-                    onChange={(e) => setTitle(e.target.value)}
-                    onFocus={enterEditing}
-                    placeholder="标题"
-                  />
-                  <div className="editor-meta">
-                    <span className="editor-meta-item" title="创建时间">
-                      {createdAtLabel}
-                    </span>
-                    <span className="editor-meta-sep" aria-hidden="true">
-                      |
-                    </span>
-                    <span className="editor-meta-item" title="上次更新时间">
-                      {updatedAtLabel}
-                    </span>
-                    <span className="editor-meta-sep" aria-hidden="true">
-                      |
-                    </span>
-                    <span className="editor-meta-count" title="正文字数">
-                      {wordCount}字
-                    </span>
-                  </div>
-                  <div className="markdown-editor-host" onFocus={enterEditing}>
-                    <MarkdownEditor
-                      ref={editorRef}
-                      value={content}
-                      prefs={editorPrefs}
-                      kbInset={kbInset}
-                      onChange={setContent}
-                      onHistoryChange={handleHistoryChange}
-                      onScrollLine={handleEditorScroll}
-                      onPasteImages={insertImages}
-                    />
-                  </div>
+            {/* Scroll-collapsible YAML head: in normal flow above the title so
+                it can never cover the title or the status line; its height maps
+                1:1 to the scrollers' offset and snaps on release. */}
+            {metaYaml && (
+              <div className="editor-yaml" ref={metaWrapRef} aria-hidden={!metaExpanded}>
+                <div className="editor-yaml-inner" ref={metaInnerRef}>
+                  <button
+                    type="button"
+                    className="editor-yaml-head"
+                    onClick={() => metaToggleRef.current?.()}
+                    aria-expanded={metaExpanded}
+                    aria-controls="editor-yaml-body"
+                    aria-label="展开或收起元数据"
+                    tabIndex={metaExpanded ? 0 : -1}
+                  >
+                    <span>元数据 · 系统生成（只读）</span>
+                    <span className="editor-yaml-arrow">▾</span>
+                  </button>
+                  <pre className="editor-yaml-body" id="editor-yaml-body">
+                    {metaYaml}
+                  </pre>
                 </div>
-                {previewOpen && (
-                  <>
-                    <SplitHandle
-                      ratio={layout.ratio}
-                      onChange={handleRatioChange}
-                      onCommit={handleRatioCommit}
-                    />
-                    <div className="editor-preview" aria-label="Markdown 预览">
-                      <Suspense fallback={<div className="preview-loading">正在加载预览…</div>}>
-                        <MarkdownPreview
-                          ref={attachPreview}
-                          source={content}
-                          enhance={mermaidEnhance}
-                          onScrollLine={handlePreviewScroll}
-                          onSourceLine={handlePreviewSourceLine}
-                        />
-                      </Suspense>
-                    </div>
-                  </>
-                )}
               </div>
             )}
+            <input
+              ref={titleRef}
+              className="editor-title-input"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              onFocus={enterEditing}
+              placeholder="标题"
+            />
+            {/* Status strip: last update time + live word count only. */}
+            <div className="editor-meta">
+              <span className="editor-meta-item" title="上次更新时间">
+                {updatedAtLabel ? `编辑于 ${updatedAtLabel}` : '尚未保存'}
+              </span>
+              <span className="editor-meta-sep" aria-hidden="true">
+                ·
+              </span>
+              <span className="editor-meta-count" title="正文字数">
+                {wordCountLabel} 字
+              </span>
+            </div>
+            <div className="editor-split">
+              <div
+                className="editor-main"
+                style={{
+                  flex: `0 0 ${renderedRatio}%`,
+                  opacity: renderedRatio <= MIN_SPLIT_RATIO ? 0 : 1,
+                }}
+                onClick={handleEditorPaneClick}
+              >
+                <div className="markdown-editor-host" onFocus={enterEditing}>
+                  <MarkdownEditor
+                    ref={editorRef}
+                    value={content}
+                    prefs={editorPrefs}
+                    kbInset={kbInset}
+                    onChange={setContent}
+                    onHistoryChange={handleHistoryChange}
+                    onScrollLine={handleEditorScroll}
+                    onPasteImages={insertImages}
+                  />
+                </div>
+              </div>
+              {previewMounted && (
+                <>
+                  <SplitHandle
+                    ratio={renderedRatio}
+                    onChange={handleRatioChange}
+                    onCommit={handleRatioCommit}
+                  />
+                  <div
+                    className="editor-preview"
+                    style={{ opacity: renderedRatio >= MAX_SPLIT_RATIO ? 0 : 1 }}
+                    aria-label="Markdown 预览"
+                  >
+                    <Suspense fallback={<div className="preview-loading">正在加载预览…</div>}>
+                      <MarkdownPreview
+                        ref={attachPreview}
+                        source={content}
+                        enhance={mermaidEnhance}
+                        onScrollLine={handlePreviewScroll}
+                        onSourceLine={handlePreviewSourceLine}
+                      />
+                    </Suspense>
+                  </div>
+                </>
+              )}
+            </div>
           </div>
 
           {/* Quick syntax bar: only while the soft keyboard is up, pinned above it. */}
@@ -1100,30 +1415,33 @@ export default function NoteEditorPage({
         </div>
       )}
 
-      {/* ---- Folder selector (notes only) ---- */}
-      {folderModalOpen && (
-        <Modal title="选择文件夹" onClose={() => setFolderModalOpen(false)}>
-          <button
-            type="button"
-            className="option-row"
-            onClick={() => void handleSelectFolder(null)}
-          >
-            {defaultFolderName}
-            {currentFolderId == null && <span className="row-check">✓</span>}
-          </button>
-          {folders.map((f) => (
+      {/* ---- Folder selector popover (notes only) ---- */}
+      {folderMenuOpen && folderMenuPos && (
+        <>
+          <div className="scope-backdrop" onClick={() => setFolderMenuOpen(false)} />
+          <div className="folder-popover" style={folderMenuPos}>
             <button
-              key={f.id}
               type="button"
               className="option-row"
-              onClick={() => void handleSelectFolder(f.id)}
+              onClick={() => void handleSelectFolder(null)}
             >
-              <IconFolder size={18} />
-              {f.name}
-              {currentFolderId === f.id && <span className="row-check">✓</span>}
+              {defaultFolderName}
+              {currentFolderId == null && <span className="row-check">✓</span>}
             </button>
-          ))}
-        </Modal>
+            {folders.map((f) => (
+              <button
+                key={f.id}
+                type="button"
+                className="option-row"
+                onClick={() => void handleSelectFolder(f.id)}
+              >
+                <IconFolder size={18} />
+                {f.name}
+                {currentFolderId === f.id && <span className="row-check">✓</span>}
+              </button>
+            ))}
+          </div>
+        </>
       )}
 
       {/* ---- Version list ---- */}

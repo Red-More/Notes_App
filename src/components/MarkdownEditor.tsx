@@ -248,7 +248,11 @@ function markdownCompletions(context: CompletionContext): CompletionResult | nul
 }
 
 function topLineOf(view: EditorView): number {
-  const block = view.lineBlockAtHeight(view.scrollDOM.scrollTop)
+  // The note editor reserves a top inset for its collapsing metadata head.
+  // The height map ignores that inset, so subtract it to report the real line.
+  const inset = Number.parseFloat(view.scrollDOM.style.paddingTop) || 0
+  const top = Math.max(0, view.scrollDOM.scrollTop - inset)
+  const block = view.lineBlockAtHeight(top)
   return view.state.doc.lineAt(block.from).number
 }
 
@@ -485,6 +489,11 @@ function buildExtensions(prefs: EditorPrefs, refs: EditorRefs) {
     linter((view) => findUnclosedFence(view.state), { delay: 400 }),
     indentUnit.of(indentUnitFor(prefs)),
     EditorState.tabSize.of(prefs.indentSize),
+    // The note editor reserves a top inset for its collapsible metadata head.
+    // A vertical cursor margin would scroll "above" the first line when the
+    // caret sits at the viewport top, which pulls that head open and makes the
+    // whole page jitter on every IME-triggered reveal. Keep the top margin at 0.
+    EditorView.cursorScrollMargin.of({ x: 5, y: 0 }),
     EditorView.lineWrapping,
     editorTheme,
     placeholder('开始记录…'),
@@ -594,13 +603,16 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
     }, [value, prefs])
 
     // Keep the caret visible when the soft keyboard changes the viewport.
+    // No top margin: with the editor's reserved top inset, any upward scroll
+    // would be consumed by the collapsing metadata head and shift the whole
+    // page down before snapping back.
     useEffect(() => {
       const view = viewRef.current
       if (!view || kbInset <= 0 || !view.hasFocus) return
       view.dispatch({
         effects: EditorView.scrollIntoView(view.state.selection.main.head, {
           y: 'nearest',
-          yMargin: 24,
+          yMargin: 0,
         }),
       })
     }, [kbInset])
@@ -624,7 +636,9 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
           view.dispatch({
             effects: EditorView.scrollIntoView(linePosition(view, line), {
               y: 'start',
-              yMargin: 4,
+              // Align the line with the viewport top; a margin would eat into
+              // the reserved metadata-head inset and expand it.
+              yMargin: 0,
             }),
           })
         },
@@ -645,7 +659,8 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
           view.dispatch({
             changes: { from, to, insert: text },
             selection: { anchor: caret },
-            effects: EditorView.scrollIntoView(caret, { y: 'nearest' }),
+            // Keep the same no-top-margin rule as the other reveal paths.
+            effects: EditorView.scrollIntoView(caret, { y: 'nearest', yMargin: 0 }),
           })
           view.focus()
         },

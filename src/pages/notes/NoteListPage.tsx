@@ -8,7 +8,7 @@ import {
   useLongPress,
 } from '../../hooks'
 import { exportTs, formatAmPmDateTime, friendlyError } from '../../utils'
-import type { Doc, FolderStats, Note } from '../../types'
+import type { Doc, FolderStats, Note, RootDir } from '../../types'
 import { ConfirmDialog, Modal, OverlayPortal } from '../../components/ui'
 import { toast } from '../../toast'
 import {
@@ -40,14 +40,6 @@ interface Props {
 /** Tab filter: all notes, unclassified notes, or a specific note folder. */
 type FolderFilter = 'all' | 'uncat' | number
 
-/** System folders that can be browsed from the 全部 chip dropdown. */
-const SYSTEM_FOLDERS = [
-  { path: '/life/todos', label: '待办' },
-  { path: '/life/diary', label: '日记' },
-  { path: '/life/contacts', label: '联系人' },
-  { path: '/life/agent', label: 'AI 工作区' },
-] as const
-
 const KIND_LABELS: Record<string, string> = {
   note: '笔记',
   diary: '日记',
@@ -55,8 +47,11 @@ const KIND_LABELS: Record<string, string> = {
   contact: '联系人',
 }
 
-/** Path-aware label: Agent artifacts are not plain notes. */
+/** Path-aware label: agent artifacts and skill configs are not plain notes. */
 function docKindLabel(doc: Doc): string {
+  if (doc.path.startsWith('/life/.agents/')) {
+    return doc.path.endsWith('/SKILL.md') ? '技能' : '配置'
+  }
   if (doc.path.startsWith('/life/agent/')) return 'AI 产物'
   return KIND_LABELS[doc.kind] ?? doc.kind
 }
@@ -142,6 +137,8 @@ export default function NoteListPage({
 }: Props) {
   const [notes, setNotes] = useState<Row[]>([])
   const [stats, setStats] = useState<FolderStats | null>(null)
+  /** All top-level VFS directories, fetched for the browse menu. */
+  const [rootDirs, setRootDirs] = useState<RootDir[]>([])
   const [filter, setFilter] = useState<FolderFilter>('all')
   /** Active system-folder browse scope; null means the normal note tabs. */
   const [browse, setBrowse] = useState<{ path: string; label: string } | null>(null)
@@ -164,7 +161,7 @@ export default function NoteListPage({
     useCollapsibleHeader()
 
   // Note tabs: search goes through fs_grep (FTS5 with LIKE fallback); list mode
-  // is a plain doc query. Browse mode: one recursive doc query on the root.
+  // is a plain doc query. 全部 shows the whole VFS; browse mode scopes one root.
   const fetchRows = useCallback(async (): Promise<{ rows: Row[]; fallback: boolean }> => {
     const search = query.trim()
     if (browse) {
@@ -173,6 +170,10 @@ export default function NoteListPage({
         search: search || undefined,
         previewChars: 120,
       })
+      return { rows: docs.map(docRow), fallback: false }
+    }
+    if (filter === 'all') {
+      const docs = await docApi.list({ search: search || undefined })
       return { rows: docs.map(docRow), fallback: false }
     }
     const filters = {
@@ -191,7 +192,9 @@ export default function NoteListPage({
       const result = await fetchRows()
       setNotes(result.rows)
       setSearchFallback(result.fallback)
-      setStats(await api.listFolders())
+      const [folderStats, dirs] = await Promise.all([api.listFolders(), api.rootDirs()])
+      setStats(folderStats)
+      setRootDirs(dirs)
     } catch (e) {
       console.error('加载笔记失败', e)
       toast(friendlyError(e))
@@ -224,7 +227,10 @@ export default function NoteListPage({
         setSearchFallback(result.fallback)
         setVisible(PAGE)
         if (cancelled) return
-        setStats(await api.listFolders())
+        const [folderStats, dirs] = await Promise.all([api.listFolders(), api.rootDirs()])
+        if (cancelled) return
+        setStats(folderStats)
+        setRootDirs(dirs)
       } catch (e) {
         console.error('加载笔记失败', e)
         if (!cancelled) toast(friendlyError(e))
@@ -296,7 +302,7 @@ export default function NoteListPage({
   const { bind, didLongPress } = useLongPress((row: Row) => {
     // A completed hold always acts on the pressed note: enter selection mode
     // with it selected, or toggle it when selection is already active.
-    if (browse) return
+    if (!canSelect) return
     if (selectMode) {
       toggleSelected(row.id)
     } else {
@@ -307,7 +313,7 @@ export default function NoteListPage({
 
   const handleCardClick = (row: Row) => {
     if (didLongPress()) return
-    if (!browse && selectMode) {
+    if (selectMode) {
       toggleSelected(row.id)
     } else {
       // Every VFS document opens in the shared editor, editable in place.
@@ -317,8 +323,11 @@ export default function NoteListPage({
 
   /** Switch to a note tab (leaves any system-folder browse scope). */
   const selectFilter = (next: FolderFilter) => {
-    setBrowse(null)
     setScopeOpen(false)
+    // Re-selecting the current tab is a no-op: resetting rows would leave the
+    // list stuck on 加载中 because fetchRows does not change identity.
+    if (!browse && filter === next) return
+    setBrowse(null)
     setFilter(next)
     setSelectMode(false)
     setSelected(new Set())
@@ -326,9 +335,10 @@ export default function NoteListPage({
     setLoading(true)
   }
 
-  /** Browse one system folder (待办/日记/联系人/AI 工作区). */
+  /** Browse one system folder (待办/日记/联系人/Agent 配置). */
   const selectScope = (scope: { path: string; label: string }) => {
     setScopeOpen(false)
+    if (browse?.path === scope.path) return
     setBrowse(scope)
     setSelectMode(false)
     setSelected(new Set())
@@ -337,6 +347,8 @@ export default function NoteListPage({
   }
 
   const selectedIds = useMemo(() => [...selected], [selected])
+  /** Selection actions (pin/move/export) only make sense in note-folder tabs. */
+  const canSelect = !browse && filter !== 'all'
   const allSelected = notes.length > 0 && selected.size === notes.length
   const pinnedTarget =
     selected.size === 0 || !notes.filter((n) => selected.has(n.id)).every((n) => n.isPinned === 1)
@@ -548,11 +560,16 @@ export default function NoteListPage({
       </div>
 
       {scopeOpen && (
-        <>
-          <div className="popover-backdrop" onClick={() => setScopeOpen(false)} />
+        // Portal into the overlay layer: inside the pager's transformed
+        // stacking context the tabbar would swallow outside taps meant for
+        // the backdrop and paint over the menu.
+        <OverlayPortal>
+          {/* Dedicated backdrop: sits above the page header so taps anywhere
+              else only close the menu instead of activating content under it. */}
+          <div className="scope-backdrop" onClick={() => setScopeOpen(false)} />
           <div className="scope-menu">
             <div className="sort-popover-title">浏览其他文件夹</div>
-            {SYSTEM_FOLDERS.map((scope) => (
+            {rootDirs.map((scope) => (
               <button
                 key={scope.path}
                 type="button"
@@ -564,7 +581,7 @@ export default function NoteListPage({
               </button>
             ))}
           </div>
-        </>
+        </OverlayPortal>
       )}
 
       {query && searchFallback && (
@@ -604,7 +621,7 @@ export default function NoteListPage({
                     key={row.id}
                     className={`note-card ${selectMode && selected.has(row.id) ? 'selected' : ''}`}
                     onClick={() => handleCardClick(row)}
-                    {...(!browse ? bind(row) : {})}
+                    {...(canSelect ? bind(row) : {})}
                   >
                     {selectMode && (
                       <span className="check-dot">

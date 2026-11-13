@@ -1,8 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
 import { dateStr } from '../utils'
+import { OverlayPortal } from './ui'
+import { IconChevronDown, IconCheck } from './Icons'
 
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+
+/** Supported repeat intervals; persisted on the todo frontmatter. */
+export const REPEAT_OPTIONS = [
+  { value: 'none', label: '不重复' },
+  { value: 'daily', label: '每天' },
+  { value: 'weekday', label: '周一至周五' },
+  { value: 'weekly', label: '每周' },
+  { value: 'monthly', label: '每月' },
+  { value: 'yearly', label: '每年' },
+] as const
+
+export type RepeatValue = (typeof REPEAT_OPTIONS)[number]['value']
 
 /** Wheel column geometry: one item per step, three rows visible. */
 const ITEM_H = 52
@@ -21,7 +34,10 @@ interface PickerValue {
 interface Props {
   /** Initial `YYYY-MM-DDTHH:mm` value; defaults to now rounded up. */
   initial?: string | null
-  onConfirm: (value: string) => void
+  /** Initial repeat interval. */
+  initialRepeat?: RepeatValue
+  /** Resolves the picked local datetime and repeat interval. */
+  onConfirm: (value: string, repeat: RepeatValue) => void
   onCancel: () => void
 }
 
@@ -55,30 +71,60 @@ function buildColumns(initial: PickerValue) {
   }
 }
 
-/** One scroll-snap wheel column; reports the settled index upward. */
+/**
+ * One scroll-snap wheel column. The near-big-far-small effect is applied
+ * imperatively inside the scroll handler (rAF batched) so it tracks the wheel
+ * in real time with no settle delay or flicker; React state only carries the
+ * settled value.
+ */
 function WheelColumn({
   options,
   index,
+  className,
   onSettle,
   render,
 }: {
   options: Array<number | string>
   index: number
+  className?: string
   onSettle: (index: number) => void
-  render: (option: number | string, selected: boolean) => ReactNode
+  render: (option: number | string) => React.ReactNode
 }) {
   const ref = useRef<HTMLDivElement>(null)
   const settleTimer = useRef<number | null>(null)
+  const rafRef = useRef(0)
 
-  // Jump to the initial selection once the element exists.
+  /** Distance-to-center drives size / weight / color per item. */
+  const applyProximity = () => {
+    const el = ref.current
+    if (!el) return
+    const viewCenter = el.scrollTop + el.clientHeight / 2
+    for (const child of Array.from(el.children)) {
+      const item = child as HTMLElement
+      const d = Math.abs(item.offsetTop + item.offsetHeight / 2 - viewCenter) / ITEM_H
+      const prox = Math.max(0, 1 - d)
+      item.style.setProperty('--prox', prox.toFixed(3))
+      const pct = Math.round(Math.max(0, (prox - 0.4) / 0.6) * 100)
+      item.style.color = `color-mix(in srgb, var(--accent) ${pct}%, var(--text-2))`
+    }
+  }
+
+  // Jump to the initial selection, then paint the proximity gradient once.
   useEffect(() => {
     const el = ref.current
-    if (el) el.scrollTop = index * ITEM_H
+    if (!el) return
+    el.scrollTop = index * ITEM_H
+    applyProximity()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Snap to the nearest option after scrolling stops.
   const handleScroll = () => {
+    if (rafRef.current === 0) {
+      rafRef.current = window.requestAnimationFrame(() => {
+        rafRef.current = 0
+        applyProximity()
+      })
+    }
     const el = ref.current
     if (!el) return
     if (settleTimer.current !== null) window.clearTimeout(settleTimer.current)
@@ -94,7 +140,7 @@ function WheelColumn({
 
   return (
     <div
-      className="wheel-col"
+      className={`wheel-col ${className ?? ''}`}
       ref={ref}
       onScroll={handleScroll}
       style={{ '--wheel-item-h': `${ITEM_H}px` } as React.CSSProperties}
@@ -109,7 +155,7 @@ function WheelColumn({
             if (el) el.scrollTo({ top: i * ITEM_H, behavior: 'smooth' })
           }}
         >
-          {render(option, i === index)}
+          {render(option)}
         </div>
       ))}
     </div>
@@ -120,7 +166,7 @@ function WheelColumn({
  * Wheel-style reminder time picker (date / hour / minute columns), themed via
  * CSS variables. Resolves to a local `YYYY-MM-DDTHH:mm` string.
  */
-export default function ReminderPicker({ initial, onConfirm, onCancel }: Props) {
+export default function ReminderPicker({ initial, initialRepeat = 'none', onConfirm, onCancel }: Props) {
   const seed = useMemo<PickerValue>(() => {
     if (initial) {
       const [date, time] = initial.split('T')
@@ -135,63 +181,110 @@ export default function ReminderPicker({ initial, onConfirm, onCancel }: Props) 
   const [dateIndex, setDateIndex] = useState(columns.dateIndex)
   const [hour, setHour] = useState(seed.hour)
   const [minute, setMinute] = useState(seed.minute)
+  const [repeat, setRepeat] = useState<RepeatValue>(
+    REPEAT_OPTIONS.some((o) => o.value === initialRepeat) ? initialRepeat : 'none',
+  )
+  const [repeatOpen, setRepeatOpen] = useState(false)
 
   const selectedDate = columns.dates[dateIndex] ?? seed.date
   const subtitle = `${labelForDate(selectedDate)} ${pad(hour)}时${pad(minute)}分`
 
   const confirm = () => {
-    onConfirm(`${selectedDate}T${pad(hour)}:${pad(minute)}`)
+    onConfirm(`${selectedDate}T${pad(hour)}:${pad(minute)}`, repeat)
   }
 
   return (
-    <div className="modal-overlay" onClick={onCancel}>
-      <div className="picker-dialog" onClick={(e) => e.stopPropagation()}>
-        <div className="picker-title">提醒时间</div>
-        <div className="picker-subtitle">{subtitle}</div>
+    // Portal into the overlay layer so the dialog paints above the tabbar even
+    // when opened from a page nested in the transformed pager track.
+    <OverlayPortal>
+      <div className="modal-overlay picker-overlay" onClick={onCancel}>
+        <div className="picker-dialog" onClick={(e) => e.stopPropagation()}>
+          <div className="picker-title">提醒时间</div>
+          <div className="picker-subtitle">{subtitle}</div>
 
-        <div className="wheel" style={{ height: ITEM_H * VISIBLE_ROWS }}>
-          <div className="wheel-highlight" style={{ top: ITEM_H }} />
-          <WheelColumn
-            options={columns.dates}
-            index={dateIndex}
-            onSettle={setDateIndex}
-            render={(option, selected) => (
-              <span className={selected ? 'accent' : ''}>{labelForDate(String(option))}</span>
-            )}
-          />
-          <WheelColumn
-            options={columns.hours}
-            index={hour}
-            onSettle={setHour}
-            render={(option, selected) => (
-              <span className={selected ? 'accent' : ''}>
-                {pad(Number(option))}
-                <span className="wheel-unit">时</span>
-              </span>
-            )}
-          />
-          <WheelColumn
-            options={columns.minutes}
-            index={minute}
-            onSettle={setMinute}
-            render={(option, selected) => (
-              <span className={selected ? 'accent' : ''}>
-                {pad(Number(option))}
-                <span className="wheel-unit">分</span>
-              </span>
-            )}
-          />
-        </div>
+          <div className="wheel" style={{ height: ITEM_H * VISIBLE_ROWS }}>
+            <div className="wheel-highlight" style={{ top: ITEM_H }} />
+            <WheelColumn
+              className="wheel-col-date"
+              options={columns.dates}
+              index={dateIndex}
+              onSettle={setDateIndex}
+              render={(option) => (
+                <span className="wheel-label">{labelForDate(String(option))}</span>
+              )}
+            />
+            <WheelColumn
+              options={columns.hours}
+              index={hour}
+              onSettle={setHour}
+              render={(option) => (
+                <span className="wheel-label">
+                  {pad(Number(option))}
+                  <span className="wheel-unit">时</span>
+                </span>
+              )}
+            />
+            <WheelColumn
+              options={columns.minutes}
+              index={minute}
+              onSettle={setMinute}
+              render={(option) => (
+                <span className="wheel-label">
+                  {pad(Number(option))}
+                  <span className="wheel-unit">分</span>
+                </span>
+              )}
+            />
+          </div>
 
-        <div className="picker-actions">
-          <button type="button" className="btn picker-cancel" onClick={onCancel}>
-            取消
-          </button>
-          <button type="button" className="btn picker-confirm" onClick={confirm}>
-            确定
-          </button>
+          <div className="picker-repeat">
+            <span className="picker-repeat-label">重复提醒</span>
+            <div className="picker-repeat-anchor">
+              <button
+                type="button"
+                className="picker-repeat-btn"
+                onClick={() => setRepeatOpen((v) => !v)}
+                aria-haspopup="menu"
+                aria-expanded={repeatOpen}
+              >
+                <span>{REPEAT_OPTIONS.find((o) => o.value === repeat)?.label ?? '不重复'}</span>
+                <IconChevronDown size={14} />
+              </button>
+              {repeatOpen && (
+                <>
+                  <div className="repeat-pop-backdrop" onClick={() => setRepeatOpen(false)} />
+                  <div className="repeat-pop" role="menu">
+                    {REPEAT_OPTIONS.map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        role="menuitem"
+                        className={`sort-option ${repeat === option.value ? 'active' : ''}`}
+                        onClick={() => {
+                          setRepeat(option.value)
+                          setRepeatOpen(false)
+                        }}
+                      >
+                        {option.label}
+                        {repeat === option.value && <IconCheck size={16} />}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="picker-actions">
+            <button type="button" className="btn picker-cancel" onClick={onCancel}>
+              取消
+            </button>
+            <button type="button" className="btn picker-confirm" onClick={confirm}>
+              确定
+            </button>
+          </div>
         </div>
       </div>
-    </div>
+    </OverlayPortal>
   )
 }

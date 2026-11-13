@@ -929,24 +929,37 @@ textarea {
   overflow: hidden;
 }
 
-/* Split stack: source pane, divider, preview pane. */
+/* Split stack: source pane, divider, preview pane. The handle is absolutely
+   positioned over the boundary, so the panes always split the full height and
+   0% / 100% hide one side completely without leaving a gap. */
 .editor-split {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  position: relative;
 }
 
-/* Source pane; flex-basis is set inline when the split is active. */
+/* Source pane; the share is set inline from the divider position. */
 .editor-main {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* Opening, closing and snapping all run for exactly one linear second:
+     the pane size and the content fade move together like a scroll unrolling. */
+  transition:
+    flex-basis 1s linear,
+    opacity 1s linear;
+}
+
+body.split-resizing .editor-main {
+  transition: none;
 }
 
 .editor-title-input {
+  flex: none;
   border: none;
   outline: none;
   background: none;
@@ -954,20 +967,25 @@ textarea {
   font-weight: 700;
   padding: 6px 0;
   margin-bottom: 6px;
+  /* Title and status must paint above the collapsing head's animation layer. */
+  position: relative;
+  z-index: 1;
 }
 
-/* Note metadata row between the title and the content: created / updated / word count. */
+/* Status strip between the title and the body: last update time + word count. */
 .editor-meta {
   display: flex;
   align-items: center;
   gap: 8px;
   margin: 0 0 14px;
   font-size: 12px;
-  color: var(--text-3);
+  color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   flex-shrink: 0;
   font-variant-numeric: tabular-nums;
+  position: relative;
+  z-index: 1;
 }
 
 /* Let the timestamps ellipsize on narrow screens; the count and separators never shrink. */
@@ -1031,29 +1049,27 @@ textarea {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* The fade runs alongside the pane resize, so hiding/showing the preview
+     reads as the content unrolling or rolling back up. */
+  transition: opacity 1s linear;
 }
 
-/* Preview-only mode: the rendered pane fills the whole body. */
-.editor-preview.preview-only {
-  flex: 1 1 auto;
-}
-
-.preview-only-title {
-  flex: none;
-  padding: 4px 2px 10px;
-  font-size: 20px;
-  font-weight: 700;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+body.split-resizing .editor-preview {
+  transition: none;
 }
 
 /* ============ Split divider ============ */
-/* 24px tall full-width hit area (kept in sync with SPLIT_HANDLE_SIZE).
-   The resting line is 2px of the secondary text color so the two panes are
-   easy to tell apart; hover/drag thicken it and switch to the accent color. */
+/* 24px tall hit area (kept in sync with SPLIT_HANDLE_SIZE) overlaid on the pane
+   boundary. A colored line always marks the boundary; the drag pill unrolls
+   from it when the pointer comes close and rolls back once left alone. The
+   line's accent gradient cross-fades over three seconds, so the divider slowly
+   gains color when it wakes and slowly releases it when it rests. `top`
+   follows the 0-100% divider position over the same one-second transition. */
 .split-handle {
-  flex: 0 0 auto;
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 2;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1062,58 +1078,90 @@ textarea {
   outline: none;
   user-select: none;
   -webkit-tap-highlight-color: transparent;
-  border-radius: 8px;
-  background-color: transparent;
-  background-image: linear-gradient(var(--text-2), var(--text-2));
+  background-image: linear-gradient(
+    90deg,
+    transparent,
+    var(--accent-border) 12%,
+    var(--accent-border) 88%,
+    transparent
+  );
   background-size: 100% 2px;
   background-position: center;
   background-repeat: no-repeat;
-  transition:
-    background-color 0.15s ease,
-    background-size 0.15s ease;
+  transition: top 1s linear;
+}
+
+body.split-resizing .split-handle {
+  transition: none;
+}
+
+/* Brighter accent gradient; it fades in over three seconds while awake. */
+.split-handle::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: linear-gradient(
+    90deg,
+    transparent,
+    var(--accent-border) 10%,
+    var(--accent) 50%,
+    var(--accent-border) 90%,
+    transparent
+  );
+  background-size: 100% 2px;
+  background-position: center;
+  background-repeat: no-repeat;
+  opacity: 0;
+  transition: opacity 3s linear;
+}
+
+.split-handle.awake::after,
+.split-handle:hover::after,
+.split-handle.dragging::after,
+.split-handle:focus-visible::after {
+  opacity: 1;
 }
 
 .split-handle::before {
   content: '';
-  width: 52px;
+  position: relative;
+  z-index: 1;
+  width: 56px;
   height: 8px;
   border-radius: 999px;
   background: var(--surface);
   border: 1px solid var(--text-2);
   box-shadow: 0 1px 2px rgba(20, 22, 28, 0.12);
+  opacity: 0;
+  transform: scaleX(0.16) scaleY(0.6);
+  transform-origin: center;
   transition:
-    width 0.15s ease,
-    background-color 0.15s ease,
-    border-color 0.15s ease;
+    transform 0.34s cubic-bezier(0.22, 1.2, 0.36, 1),
+    opacity 0.22s ease,
+    width 0.2s ease,
+    border-color 0.2s ease,
+    background-color 0.2s ease;
 }
 
-.split-handle:hover {
-  background-color: var(--surface-2);
-  background-image: linear-gradient(var(--accent-border), var(--accent-border));
-  background-size: 100% 3px;
-}
-
+.split-handle.awake::before,
 .split-handle:hover::before,
+.split-handle.dragging::before,
 .split-handle:focus-visible::before {
-  width: 68px;
+  opacity: 1;
+  transform: scaleX(1) scaleY(1);
+}
+
+.split-handle.dragging::before,
+.split-handle:focus-visible::before {
+  width: 76px;
   border-color: var(--accent);
   background: var(--accent-weak);
 }
 
 .split-handle:focus-visible {
+  border-radius: 8px;
   box-shadow: inset 0 0 0 2px var(--accent-border);
-}
-
-.split-handle.dragging {
-  background-color: var(--accent-weak);
-  background-image: linear-gradient(var(--accent), var(--accent));
-  background-size: 100% 3px;
-}
-
-.split-handle.dragging::before {
-  width: 76px;
-  border-color: var(--accent);
-  background: var(--accent-weak);
 }
 
 /* While dragging, keep the resize cursor and block text selection globally. */
@@ -1733,12 +1781,15 @@ body.split-resizing {
 
 .modal {
   background: var(--surface);
-  width: 100%;
+  width: min(92vw, 420px);
   max-height: 82%;
-  border-radius: 20px 20px 0 0;
+  border-radius: 20px;
   display: flex;
   flex-direction: column;
   animation: slide-up 0.2s ease;
+  /* Floating card: stays clear of the bottom bar; the keyboard inset on the
+     overlay lifts it while typing and it returns on close on both platforms. */
+  margin-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
 }
 
 .modal-header {
@@ -2790,6 +2841,30 @@ body.split-resizing {
   opacity: 0.8;
 }
 
+.scope-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+}
+
+/* Anchor-anchored popover bubble (folder picker): clamped by the positioning
+   logic in the component, closes on outside tap via the backdrop. */
+.folder-popover {
+  position: fixed;
+  z-index: 91;
+  background: var(--surface);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lg, 0 8px 28px rgba(0, 0, 0, 0.18));
+  padding: 6px;
+  max-height: 50vh;
+  overflow: auto;
+  animation: fade-in 0.15s ease;
+}
+
+.folder-popover .option-row {
+  width: 100%;
+}
+
 .scope-menu {
   position: absolute;
   top: 108px;
@@ -2799,7 +2874,7 @@ body.split-resizing {
   border-radius: 14px;
   box-shadow: var(--shadow-lg, 0 8px 28px rgba(0, 0, 0, 0.18));
   padding: 10px;
-  z-index: 60;
+  z-index: 91;
 }
 
 .scope-menu .sort-option {
@@ -2868,25 +2943,51 @@ body.split-resizing {
   font-weight: 400;
 }
 
-/* ============ Editor frontmatter (read-only YAML meta) ============ */
-.editor-frontmatter {
-  flex-shrink: 0;
-  margin: 0 14px 8px;
-  padding: 10px 12px;
+/* ============ Editor YAML head (read-only, scroll-collapsible) ============ */
+/* In normal flow above the title. The wrapper is clipped to the live collapse
+   height (driven 1:1 by the active scroller's offset, see NoteEditorPage) and
+   truly reaches zero: no height, no padding, no hit area, so the title and the
+   status strip below are never covered. */
+.editor-yaml {
+  flex: none;
+  height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
   background: var(--surface-2);
   border-radius: 10px;
-  max-height: 132px;
-  overflow: auto;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
 }
 
-.editor-frontmatter-title {
+.editor-yaml-inner {
+  padding: 0 12px;
+}
+
+.editor-yaml-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  height: 32px;
+  border: none;
+  background: none;
+  padding: 0;
   font-size: 11px;
   color: var(--text-3);
-  margin-bottom: 6px;
+  cursor: pointer;
 }
 
-.editor-frontmatter-body {
-  margin: 0;
+.editor-yaml-arrow {
+  font-size: 12px;
+}
+
+.editor-yaml-body {
+  margin: 0 0 8px;
+  max-height: 80px;
+  overflow: auto;
   font-size: 12px;
   line-height: 1.6;
   color: var(--text-3);
@@ -2895,25 +2996,106 @@ body.split-resizing {
   word-break: break-all;
 }
 
-/* ============ Todo editor due row ============ */
-.due-row {
+/* ============ Todo quick editor (content-only bottom sheet) ============ */
+.todo-quick {
+  width: min(92vw, 420px);
+  background: var(--surface);
+  border-radius: 20px;
+  padding: 14px;
+  /* Floating card, never flush to the bottom bar; --kb-inset on the overlay
+     lifts it while the keyboard is open and it restores on close. */
+  margin-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+}
+
+.todo-quick-inputwrap {
+  position: relative;
+}
+
+.todo-quick-input {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-2);
+  padding: 10px 40px 10px 12px;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--text);
+  resize: none;
+  overflow: hidden;
+  font-family: inherit;
+  min-height: 66px;
+}
+
+.todo-quick-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.todo-quick-expand {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  border: none;
+  background: none;
+  color: var(--text-3);
+  padding: 4px;
+  cursor: pointer;
   display: flex;
   align-items: center;
-  gap: 8px;
 }
 
-.due-value {
-  flex: 1;
-  font-size: 14px;
-  color: var(--text);
+.todo-quick-input:focus {
+  outline: none;
+  border-color: var(--accent);
 }
 
-.due-value.empty {
+.todo-quick-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.todo-quick-time {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
   color: var(--text-3);
+  border-radius: 999px;
+  padding: 7px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  max-width: 60%;
+  min-width: 0;
 }
 
-.danger-text {
-  color: var(--danger, #e5484d);
+.todo-quick-time span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.todo-quick-time.set {
+  color: var(--accent);
+  border-color: var(--accent-weak);
+}
+
+.todo-quick-save {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 999px;
+  padding: 8px 20px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.todo-quick-save:disabled {
+  opacity: 0.6;
 }
 
 /* ============ Wheel reminder picker ============ */
@@ -2922,7 +3104,7 @@ body.split-resizing {
   background: var(--surface);
   border-radius: 22px;
   padding: 18px 16px 16px;
-  margin-bottom: max(12px, env(safe-area-inset-bottom));
+  margin-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
 }
 
 .picker-title {
@@ -2942,7 +3124,7 @@ body.split-resizing {
 .wheel {
   position: relative;
   display: flex;
-  gap: 6px;
+  gap: 4px;
   margin: 14px 0 4px;
   overflow: hidden;
 }
@@ -2952,7 +3134,7 @@ body.split-resizing {
   left: 0;
   right: 0;
   height: var(--wheel-item-h, 52px);
-  background: var(--surface-2);
+  background: var(--accent-weak);
   border-radius: 10px;
   pointer-events: none;
 }
@@ -2965,6 +3147,12 @@ body.split-resizing {
   padding: var(--wheel-item-h, 52px) 0;
 }
 
+/* Date module: wider and visually separated from the time module. */
+.wheel-col-date {
+  flex: 1.6;
+  margin-right: 16px;
+}
+
 .wheel-col::-webkit-scrollbar {
   display: none;
 }
@@ -2975,28 +3163,95 @@ body.split-resizing {
   justify-content: center;
   gap: 3px;
   scroll-snap-align: center;
-  font-size: 17px;
-  font-weight: 600;
-  color: var(--text-3);
-  opacity: 0.55;
+  /* Near-big-far-small: --prox (0..1, center=1) is set imperatively on scroll
+     so the size/weight/opacity track the wheel in real time. */
+  font-size: calc(14px + 4px * var(--prox, 0));
+  font-weight: calc(400 + 250 * var(--prox, 0));
+  opacity: calc(0.45 + 0.55 * var(--prox, 0));
+  color: var(--text-2);
   cursor: pointer;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
 }
 
-.wheel-item.selected {
-  color: var(--text);
-  opacity: 1;
+.wheel-label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+  white-space: nowrap;
 }
 
-.wheel-item.selected .accent,
-.wheel-item .accent {
-  color: var(--accent);
+.wheel-unit {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-3);
 }
 
 .wheel-unit {
   font-size: 12px;
   font-weight: 400;
   color: var(--text-3);
+}
+
+/* The picker stacks above the editor card it was opened from (both live in
+   the overlay layer; later + higher z wins). */
+.picker-overlay {
+  z-index: 110;
+}
+
+.picker-repeat {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 0 2px;
+}
+
+.picker-repeat-label {
+  font-size: 13px;
+  color: var(--text-2);
+  flex-shrink: 0;
+}
+
+.picker-repeat-anchor {
+  position: relative;
+  display: flex;
+}
+
+.picker-repeat-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 7px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* Anchored popover above the button: no width/position jump, closes on
+   outside tap via the transparent backdrop. */
+.repeat-pop-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 5;
+}
+
+.repeat-pop {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  width: 220px;
+  background: var(--surface);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lg, 0 8px 28px rgba(0, 0, 0, 0.18));
+  padding: 8px;
+  z-index: 6;
+  animation: fade-in 0.15s ease;
 }
 
 .picker-actions {
@@ -3021,7 +3276,8 @@ body.split-resizing {
   padding: 12px 0;
 }
 
-/* Soft keyboard clearance for bottom-sheet modals and the picker. */
+/* Soft keyboard clearance for the overlay: follows --kb-inset on both
+   platforms and returns to 0 when the keyboard closes. */
 .modal-overlay {
   padding-bottom: var(--kb-inset, 0px);
 }

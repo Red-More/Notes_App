@@ -21,10 +21,7 @@ import {
   MIN_SPLIT_RATIO,
   clearLayoutPrefs,
   getLayoutPrefs,
-  layoutModeOf,
   setLayoutPrefs,
-  withLayoutMode,
-  type LayoutMode,
   type LayoutPrefs,
 } from '../../editor/layout'
 import {
@@ -50,12 +47,6 @@ const INDENT_STYLE_OPTIONS: Array<{ key: EditorPrefs['indentStyle']; label: stri
 ]
 
 const INDENT_WIDTH_OPTIONS = INDENT_SIZES.map((size) => ({ key: size, label: `${size}` }))
-
-const LAYOUT_MODE_OPTIONS: Array<{ key: LayoutMode; label: string }> = [
-  { key: 'closed', label: '仅编辑' },
-  { key: 'split', label: '分屏' },
-  { key: 'preview', label: '仅预览' },
-]
 
 interface SaveOptionRowProps {
   meta: SaveStrategyMeta
@@ -149,13 +140,7 @@ export default function EditorSection() {
       ? `定时 · ${strategy.intervalMin} 分钟`
       : (strategyMeta?.label ?? '智能保存')
   const indentValue = `${editorPrefs.indentStyle === 'tabs' ? 'Tab' : '空格'} · ${editorPrefs.indentSize}`
-  const layoutMode = layoutModeOf(layout)
-  const layoutModeLabel =
-    LAYOUT_MODE_OPTIONS.find((option) => option.key === layoutMode)?.label ?? '仅编辑'
-  const layoutValue =
-    layoutMode === 'split'
-      ? `分屏 · ${layout.ratio}% / ${100 - layout.ratio}%`
-      : layoutModeLabel
+  const layoutValue = `${layout.ratio}% / ${100 - layout.ratio}%`
 
   const chooseStrategy = (key: SaveStrategyKey) => {
     const next = { ...strategy, key }
@@ -268,17 +253,12 @@ export default function EditorSection() {
       <SettingsExpandableRow
         icon={<IconSettings size={20} />}
         title="预览布局"
-        subtitle="分屏或专注阅读；比例会与笔记页分隔线同步"
+        subtitle="分界线位置会被记住；编辑器默认打开，点击预览时才渲染预览"
         value={layoutValue}
         status={<SaveStatus state={layoutSave.state} error={layoutSave.error} />}
         open={layoutOpen}
         onToggle={() => setLayoutOpen((open) => !open)}
       >
-        <ChipRow
-          items={LAYOUT_MODE_OPTIONS}
-          value={layoutMode}
-          onChange={(mode) => updateLayout(withLayoutMode(layout, mode))}
-        />
         <div className="layout-ratio-row">
           <input
             type="range"
@@ -295,27 +275,21 @@ export default function EditorSection() {
             {layout.ratio}% / {100 - layout.ratio}%
           </span>
         </div>
-        <div className={`layout-diagram mode-${layoutMode}`} aria-hidden="true">
-          {layoutMode !== 'preview' && (
-            <div
-              className="layout-diagram-pane editor"
-              style={
-                layoutMode === 'split'
-                  ? { flex: `0 0 calc((100% - 6px) * ${layout.ratio / 100})` }
-                  : { flex: '1 1 auto' }
-              }
-            >
-              编辑区
-            </div>
-          )}
-          {layoutMode === 'split' && <div className="layout-diagram-handle" />}
-          {layoutMode !== 'closed' && (
-            <div className="layout-diagram-pane preview" style={{ flex: '1 1 0' }}>
-              预览区
-            </div>
-          )}
+        <div className="layout-diagram" aria-hidden="true">
+          <div
+            className="layout-diagram-pane editor"
+            style={{ flex: `0 0 calc((100% - 6px) * ${layout.ratio / 100})` }}
+          >
+            编辑区
+          </div>
+          <div className="layout-diagram-handle" />
+          <div className="layout-diagram-pane preview" style={{ flex: '1 1 0' }}>
+            预览区
+          </div>
         </div>
-        <p className="settings-detail-note">「仅预览」会隐藏编辑区，适合专注阅读。</p>
+        <p className="settings-detail-note">
+          0% 只显示预览，100% 只显示编辑区；位置会为下次打开自动恢复。
+        </p>
         <button type="button" className="restore-default" onClick={resetLayout}>
           恢复默认设置
         </button>

@@ -16,6 +16,72 @@ use super::util::{basename, now, safe_segment, unique_dir_path, unique_file_path
 
 const MAX_FOLDER_NAME_CHARS: usize = 50;
 
+/// Chinese display names for well-known top-level directories.
+fn system_dir_label(path: &str) -> Option<&'static str> {
+    match path {
+        "/life/notes" => Some("笔记"),
+        "/life/diary" => Some("日记"),
+        "/life/todos" => Some("待办"),
+        "/life/contacts" => Some("联系人"),
+        "/life/agent" => Some("AI 工作区"),
+        "/life/.agents" => Some("Agent 配置"),
+        _ => None,
+    }
+}
+
+/// A top-level `/life` directory shown in the notes-page browse menu.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RootDir {
+    pub path: String,
+    pub label: String,
+}
+
+/// All visible top-level directories under `/life`, notes root included.
+pub fn root_dirs(vfs: &VirtualFs) -> Result<Vec<RootDir>, ToolError> {
+    let conn = vfs.conn();
+    let prefix = format!("{}/", cap_gate::ROOT);
+    let mut stmt = conn.prepare(
+        "SELECT i.path, COALESCE(m.title, '')
+         FROM inodes i
+         LEFT JOIN meta m ON m.inode = i.inode
+         WHERE i.kind = 'directory' AND i.deleted = 0
+           AND i.path LIKE ?1 ESCAPE '\\'
+           AND instr(substr(i.path, length(?2) + 1), '/') = 0
+           AND i.path != ?2
+         ORDER BY i.path",
+    )?;
+    let rows = stmt.query_map(params![format!("{}%", cap_gate::escape_like(&prefix)), prefix], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+
+    let mut dirs = Vec::new();
+    for row in rows {
+        let (path, title) = row?;
+        let label = if title.is_empty() {
+            system_dir_label(&path)
+                .map(str::to_string)
+                .unwrap_or_else(|| basename(&path).to_string())
+        } else {
+            title
+        };
+        dirs.push(RootDir { path, label });
+    }
+    // Notes-adjacent system dirs first, then anything user-created by path.
+    dirs.sort_by_key(|d| {
+        let rank = if d.path == "/life/notes" {
+            0
+        } else if matches!(d.path.as_str(), "/life/diary" | "/life/todos" | "/life/contacts" | "/life/agent" | "/life/.agents")
+        {
+            1
+        } else {
+            2
+        };
+        (rank, d.path.clone())
+    });
+    Ok(dirs)
+}
+
 /// Chinese fallback for system folders whose `meta.title` is missing.
 fn default_display_name(path: &str) -> Option<&'static str> {
     match path {

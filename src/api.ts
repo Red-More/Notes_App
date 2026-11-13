@@ -27,6 +27,7 @@ import type {
   NewChatMessage,
   Note,
   NoteVersion,
+  RootDir,
   SkillDetail,
   SkillInput,
   SkillSummary,
@@ -190,6 +191,7 @@ function docToTodo(doc: Doc): Todo {
     isCompleted: completed ? 1 : 0,
     dueDate: nullableStr(doc.fields.dueDate),
     reminder: bool(doc.fields.reminder) ? 1 : 0,
+    repeat: str(doc.fields.repeat) || 'none',
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
   }
@@ -390,6 +392,7 @@ export const api = {
 
   // ---- Folders ----
   listFolders: () => docApi.listFolders(),
+  rootDirs: () => invoke<RootDir[]>('root_dirs'),
   createFolder: (name: string) => docApi.createFolder(name),
   renameFolder: (params: { id: number; name: string }) => docApi.renameFolder(params),
   renameDefaultFolder: (name: string) => docApi.renameDefaultFolder(name),
@@ -435,6 +438,7 @@ export const api = {
     category?: string
     dueDate?: string | null
     reminder?: boolean
+    repeat?: string
   }) =>
     docToTodo(
       await docApi.create({
@@ -446,6 +450,7 @@ export const api = {
           completed: false,
           dueDate: params.dueDate ?? null,
           reminder: params.reminder ?? false,
+          repeat: params.repeat ?? 'none',
         },
       }),
     ),
@@ -455,6 +460,7 @@ export const api = {
     category?: string
     dueDate?: string | null
     reminder?: boolean
+    repeat?: string
   }) =>
     docApi.save({
       id: params.id,
@@ -463,6 +469,7 @@ export const api = {
         category: params.category ?? '默认',
         dueDate: params.dueDate ?? null,
         reminder: params.reminder ?? false,
+        repeat: params.repeat ?? 'none',
       },
     }),
   toggleTodo: async (id: number) => {

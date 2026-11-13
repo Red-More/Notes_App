@@ -34,6 +34,35 @@ async function notify(text: string) {
   }
 }
 
+/** Advance a local "YYYY-MM-DDTHH:mm" due time by the repeat interval. */
+function nextDue(due: string, repeat: string): string | null {
+  const d = parseDbTime(due)
+  switch (repeat) {
+    case 'daily':
+      d.setDate(d.getDate() + 1)
+      break
+    case 'weekday': {
+      do {
+        d.setDate(d.getDate() + 1)
+      } while (d.getDay() === 0 || d.getDay() === 6)
+      break
+    }
+    case 'weekly':
+      d.setDate(d.getDate() + 7)
+      break
+    case 'monthly':
+      d.setMonth(d.getMonth() + 1)
+      break
+    case 'yearly':
+      d.setFullYear(d.getFullYear() + 1)
+      break
+    default:
+      return null
+  }
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
 async function checkReminders() {
   // Master switch in Settings; read every cycle so toggling takes effect at once.
   if (!getAppPrefs().remindersEnabled) return
@@ -50,6 +79,19 @@ async function checkReminders() {
         if (!notified(key)) {
           markNotified(key)
           await notify(`⏰ 待办提醒：${t.title}`)
+          // Repeating todos roll forward to the next occurrence after firing.
+          if (t.repeat && t.repeat !== 'none') {
+            const next = nextDue(t.dueDate, t.repeat)
+            if (next) {
+              await api.updateTodo({
+                id: t.id,
+                title: t.title,
+                dueDate: next,
+                reminder: true,
+                repeat: t.repeat,
+              })
+            }
+          }
         }
       }
     }

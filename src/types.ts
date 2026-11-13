@@ -30,6 +30,12 @@ export interface FolderStats {
   folders: Folder[]
 }
 
+/** A top-level `/life` directory for the notes-page browse menu. */
+export interface RootDir {
+  path: string
+  label: string
+}
+
 export interface Note {
   id: number
   title: string
@@ -61,6 +67,8 @@ export interface Todo {
   isCompleted: number
   dueDate: string | null
   reminder: number
+  /** Repeat interval: none | daily | weekday | weekly | monthly | yearly. */
+  repeat: string
   createdAt: string
   updatedAt: string
 }

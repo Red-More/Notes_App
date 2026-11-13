@@ -99,6 +99,7 @@ pub fn run() {
             commands::fs::fs_grep,
             commands::fs::user_read,
             commands::fs::user_search,
+            commands::fs::root_dirs,
             commands::doc::doc_list,
             commands::doc::doc_get,
             commands::doc::doc_create,
