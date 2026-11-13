@@ -1045,7 +1045,9 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
                 aria-label="添加附件"
                 title={hasModel ? '添加附件' : '请先在设置 → AI 助理中添加并启用一个模型'}
                 disabled={!hasModel || loading}
-                onClick={() => setAttachMenuOpen(true)}
+                onClick={() => {
+                  if (hasModel && !loading) setAttachMenuOpen(true)
+                }}
               >
                 <IconPaperclip size={19} />
               </button>
