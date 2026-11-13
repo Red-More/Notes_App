@@ -4,12 +4,10 @@ import { getAppPrefs } from '../appPrefs'
 import { ensureNotificationPermission } from '../notifications'
 import { toast } from '../toast'
 import { sendNotification } from '@tauri-apps/plugin-notification'
-import { dateStr, monthStr, parseDbTime } from '../utils'
+import { parseDbTime } from '../utils'
 
 const CHECK_INTERVAL_MS = 30_000
 const TODO_WINDOW_MS = 30 * 60_000
-const SCHEDULE_EARLY_MS = 5 * 60_000
-const SCHEDULE_LATE_MS = 15 * 60_000
 const REMINDED_KEY_TTL_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
 
 const notified = (key: string) => localStorage.getItem(`reminded:${key}`) === '1'
@@ -55,30 +53,14 @@ async function checkReminders() {
         }
       }
     }
-
-    // Remind on today's schedules from 5 min before start until 15 min after.
-    const today = dateStr(new Date())
-    const schedules = await api.listSchedules(monthStr(new Date()))
-    for (const s of schedules) {
-      if (s.reminder !== 1 || s.date !== today || !s.startTime) continue
-      const start = parseDbTime(`${s.date}T${s.startTime}`).getTime()
-      const delta = now - start
-      if (delta >= -SCHEDULE_EARLY_MS && delta < SCHEDULE_LATE_MS) {
-        const key = `schedule:${s.id}:${start}`
-        if (!notified(key)) {
-          markNotified(key)
-          await notify(`⏰ 日程提醒：${s.title}`)
-        }
-      }
-    }
   } catch {
     // Backend not reachable (e.g. during dev hot reload); skip this cycle.
   }
 }
 
 /**
- * In-app reminder: while the app is running, periodically checks
- * todos / schedules with reminders enabled and notifies when due.
+ * In-app reminder: while the app is running, periodically checks todos with
+ * reminders enabled and notifies when due.
  */
 export default function ReminderScheduler() {
   useEffect(() => {

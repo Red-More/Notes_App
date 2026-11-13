@@ -2688,56 +2688,342 @@ body.split-resizing {
   background: #fff;
 }
 
-.schedule-card {
-  background: var(--surface);
-  border-radius: var(--radius);
-  padding: 13px 14px;
-  margin-bottom: 10px;
-  box-shadow: var(--shadow);
+/* ============ Diary ============ */
+.diary-datebar {
   display: flex;
-  gap: 12px;
-  touch-action: pan-y;
-}
-
-.schedule-time {
-  display: flex;
-  flex-direction: column;
   align-items: center;
-  justify-content: center;
-  min-width: 52px;
-  border-right: 2px solid var(--accent-weak);
-  padding-right: 12px;
+  gap: 8px;
+  padding: 2px 14px 8px;
   flex-shrink: 0;
 }
 
-.schedule-time .t {
+.diary-date-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 12px;
   font-size: 14px;
-  font-weight: 700;
-  color: var(--accent);
+  color: var(--text);
   font-variant-numeric: tabular-nums;
 }
 
-.schedule-time .t2 {
-  font-size: 11px;
+.diary-day-title {
+  padding: 0 16px 8px;
+  font-size: 13px;
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+
+.diary-meta {
+  padding: 0 16px 8px;
+  font-size: 12px;
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+
+.diary-preview {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  padding: 0 16px;
+}
+
+/* Read-only virtual groups (全部 / AI 工作区). */
+.readonly-hint {
+  margin: 0 16px 8px;
+  font-size: 12px;
+  line-height: 18px;
   color: var(--text-3);
 }
 
-.schedule-main {
-  flex: 1;
-  min-width: 0;
-}
-
-.schedule-title {
-  font-size: 15px;
-  font-weight: 600;
-  word-break: break-all;
-}
-
-.schedule-note {
+.source-path {
+  margin-bottom: 8px;
   font-size: 12px;
-  color: var(--text-2);
-  margin-top: 3px;
+  color: var(--text-3);
   word-break: break-all;
+}
+
+.source-view {
+  margin: 0;
+  padding: 12px;
+  max-height: 55vh;
+  overflow: auto;
+  background: var(--surface-2);
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.editor-folder.static {
+  color: var(--text-3);
+}
+
+/* ============ Note list: split chip + scope menu ============ */
+.chip-split {
+  display: inline-flex;
+  align-items: stretch;
+  padding: 0;
+  overflow: hidden;
+}
+
+.chip-split .chip-main {
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  padding: 7px 6px 7px 14px;
+  cursor: pointer;
+}
+
+.chip-split .chip-drop {
+  border: none;
+  background: none;
+  color: inherit;
+  padding: 7px 8px 7px 2px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  opacity: 0.8;
+}
+
+.scope-menu {
+  position: absolute;
+  top: 108px;
+  left: 14px;
+  min-width: 180px;
+  background: var(--surface);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lg, 0 8px 28px rgba(0, 0, 0, 0.18));
+  padding: 10px;
+  z-index: 60;
+}
+
+.scope-menu .sort-option {
+  width: 100%;
+}
+
+/* ============ Diary day list ============ */
+.diary-entry-card {
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 13px 14px;
+  margin: 0 16px 10px;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+}
+
+.diary-entry-card.empty {
+  color: var(--text-3);
+  box-shadow: none;
+  border: 1px dashed var(--border);
+}
+
+.diary-entry-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.diary-entry-preview {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.5;
+  word-break: break-all;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Due time / overdue flags shared by todo rows. */
+.todo-meta .overdue {
+  color: var(--danger, #e5484d);
+  font-weight: 600;
+}
+
+.overdue-badge {
+  font-size: 11px;
+  color: #fff;
+  background: var(--danger, #e5484d);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+.todo-row.virtual-add {
+  cursor: pointer;
+  box-shadow: none;
+  border: 1px dashed var(--border);
+}
+
+.todo-row .add-hint {
+  color: var(--text-3);
+  font-weight: 400;
+}
+
+/* ============ Editor frontmatter (read-only YAML meta) ============ */
+.editor-frontmatter {
+  flex-shrink: 0;
+  margin: 0 14px 8px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border-radius: 10px;
+  max-height: 132px;
+  overflow: auto;
+}
+
+.editor-frontmatter-title {
+  font-size: 11px;
+  color: var(--text-3);
+  margin-bottom: 6px;
+}
+
+.editor-frontmatter-body {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-3);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ============ Todo editor due row ============ */
+.due-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.due-value {
+  flex: 1;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.due-value.empty {
+  color: var(--text-3);
+}
+
+.danger-text {
+  color: var(--danger, #e5484d);
+}
+
+/* ============ Wheel reminder picker ============ */
+.picker-dialog {
+  width: min(92vw, 420px);
+  background: var(--surface);
+  border-radius: 22px;
+  padding: 18px 16px 16px;
+  margin-bottom: max(12px, env(safe-area-inset-bottom));
+}
+
+.picker-title {
+  text-align: center;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.picker-subtitle {
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-3);
+  margin-top: 6px;
+}
+
+.wheel {
+  position: relative;
+  display: flex;
+  gap: 6px;
+  margin: 14px 0 4px;
+  overflow: hidden;
+}
+
+.wheel-highlight {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: var(--wheel-item-h, 52px);
+  background: var(--surface-2);
+  border-radius: 10px;
+  pointer-events: none;
+}
+
+.wheel-col {
+  flex: 1;
+  overflow-y: auto;
+  scroll-snap-type: y mandatory;
+  scrollbar-width: none;
+  padding: var(--wheel-item-h, 52px) 0;
+}
+
+.wheel-col::-webkit-scrollbar {
+  display: none;
+}
+
+.wheel-item {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  scroll-snap-align: center;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text-3);
+  opacity: 0.55;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+
+.wheel-item.selected {
+  color: var(--text);
+  opacity: 1;
+}
+
+.wheel-item.selected .accent,
+.wheel-item .accent {
+  color: var(--accent);
+}
+
+.wheel-unit {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-3);
+}
+
+.picker-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.picker-cancel {
+  flex: 1;
+  background: var(--surface-2);
+  color: var(--text);
+  border-radius: 14px;
+  padding: 12px 0;
+}
+
+.picker-confirm {
+  flex: 1.4;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 14px;
+  padding: 12px 0;
+}
+
+/* Soft keyboard clearance for bottom-sheet modals and the picker. */
+.modal-overlay {
+  padding-bottom: var(--kb-inset, 0px);
 }
 
 /* ============ Contacts ============ */

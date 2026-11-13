@@ -44,7 +44,7 @@ export function argBoolean(value: unknown): boolean | undefined {
 }
 
 /** Document kinds accepted by `fs_grep.type`, matching `meta.kind` in Rust. */
-export const GREP_TYPES = ['note', 'todo', 'event', 'contact', 'diary'] as const
+export const GREP_TYPES = ['note', 'todo', 'contact', 'diary'] as const
 
 const GREP_TYPE_ALIASES: Record<string, (typeof GREP_TYPES)[number]> = {
   note: 'note',
@@ -54,10 +54,6 @@ const GREP_TYPE_ALIASES: Record<string, (typeof GREP_TYPES)[number]> = {
   todos: 'todo',
   task: 'todo',
   待办: 'todo',
-  event: 'event',
-  schedule: 'event',
-  事件: 'event',
-  日程: 'event',
   contact: 'contact',
   contacts: 'contact',
   联系人: 'contact',

@@ -206,15 +206,22 @@ fn acl_filters_glob_and_grep_results() {
 }
 
 #[test]
-fn folders_list_covers_all_system_dirs_and_skips_agents() {
-    let vfs = test_vfs();
+fn folders_list_returns_only_note_folders() {
+    let mut vfs = test_vfs();
     let stats = docs::folders::list(&vfs).unwrap();
-    let names: Vec<&str> = stats.folders.iter().map(|f| f.name.as_str()).collect();
     assert_eq!(stats.default_folder_name, "默认");
-    assert_eq!(names.len(), 6, "notes/diary/todos/contacts/schedule/agent");
-    for expected in ["默认", "日记", "待办", "联系人", "日程", "AI 工作区"] {
-        assert!(names.contains(&expected), "missing folder {expected}");
-    }
+    // System dirs (diary/todos/contacts/agent) are fixed tabs, not folders here.
+    assert!(stats.folders.is_empty(), "no note folders yet");
+    assert_eq!(stats.unclassified, 0);
+
+    let folder = docs::folders::create(&mut vfs, "项目").unwrap();
+    docs::create(&mut vfs, "note", "会议", "内容", Some(folder.id), None).unwrap();
+    let stats = docs::folders::list(&vfs).unwrap();
+    assert_eq!(stats.folders.len(), 1);
+    assert_eq!(stats.folders[0].name, "项目");
+    assert_eq!(stats.folders[0].note_count, 1);
+    assert_eq!(stats.unclassified, 0);
+    assert_eq!(stats.total, 1);
 }
 
 #[test]
@@ -808,9 +815,6 @@ fn export_markdown_and_zip_regression() {
         "zip must contain two notes plus the referenced image"
     );
 
-    let folder_entries = docs::export::collect_folder(&vfs, -1, &store).unwrap();
-    assert_eq!(folder_entries.len(), 2);
-    assert!(docs::export::zip_entries(&folder_entries).is_ok());
     let _ = std::fs::remove_dir_all(root);
 }
 

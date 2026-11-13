@@ -51,7 +51,7 @@ export default function NotificationSection() {
       <SettingsSwitchRow
         icon={<IconBell size={20} />}
         title="提醒通知"
-        subtitle="待办到期、日程开始时提醒"
+        subtitle="待办到期时提醒"
         checked={prefs.remindersEnabled}
         onChange={(next) =>
           void toggleSave.run(() => {

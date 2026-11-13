@@ -1,6 +1,6 @@
 //! 通用文档层的 DTO 与查询参数。
 //!
-//! 前端不再直接操作关系表：所有内容（笔记/待办/日程/联系人）都以 `Doc` 返回，
+//! 前端不再直接操作关系表：所有内容（笔记/日记/待办/联系人）都以 `Doc` 返回，
 //! 由 `src/api.ts` 再做领域映射，保证现有页面 DTO 不变。
 
 use std::collections::BTreeMap;
@@ -17,7 +17,7 @@ pub struct Doc {
     /// inode，作为稳定 id 暴露给前端。
     pub id: i64,
     pub path: String,
-    /// note | todo | event | contact | diary
+    /// note | todo | contact | diary
     pub kind: String,
     pub title: String,
     /// 正文（已剥离 frontmatter）。
@@ -85,6 +85,8 @@ pub struct DocRef {
 pub struct ListQuery {
     pub kind: Option<String>,
     pub folder_id: Option<i64>,
+    /// 限定到某个虚拟目录前缀（递归），用于「AI 工作区」等固定视图。
+    pub root: Option<String>,
     pub unclassified: Option<bool>,
     pub search: Option<String>,
     pub sort: Option<String>,

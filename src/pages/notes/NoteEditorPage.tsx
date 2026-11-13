@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { save } from '@tauri-apps/plugin-dialog'
-import { api, assetApi } from '../../api'
+import { api, assetApi, docApi } from '../../api'
 import {
   bytesToBase64,
   computeKbInset,
@@ -12,7 +12,7 @@ import {
   safeFileName,
 } from '../../utils'
 import { hasAssetRefs } from '../../assets'
-import type { Folder, NoteVersion } from '../../types'
+import type { DocFields, Folder, NoteVersion } from '../../types'
 import { ConfirmDialog, Modal } from '../../components/ui'
 import { toast } from '../../toast'
 import { useEdgeBack } from '../../hooks'
@@ -39,6 +39,7 @@ import {
 import type { MarkdownPreviewHandle } from '../../components/MarkdownPreview'
 import {
   IconBack,
+  IconCalendar,
   IconCheck,
   IconClock,
   IconClose,
@@ -65,7 +66,12 @@ const MarkdownPreview = lazy(() =>
 
 interface Props {
   noteId: number | null
-  folderId: number | null
+  /** Notes folder for a brand-new note; undefined/null means the default. */
+  folderId?: number | null
+  /** Which domain document this editor is bound to; diary reuses it verbatim. */
+  mode?: 'note' | 'diary'
+  /** Target day when `mode` is `diary` and a new scaffold is created. */
+  diaryDate?: string
   onBack: () => void
 }
 
@@ -109,12 +115,34 @@ function hhmm(ts: number): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
-export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
+/** Render system-generated frontmatter fields as read-only YAML lines. */
+function fieldsToYaml(fields: DocFields): string {
+  return Object.entries(fields)
+    .filter(([, v]) => v !== null && v !== undefined && v !== '')
+    .map(([k, v]) => {
+      const text =
+        typeof v === 'boolean' ? (v ? 'true' : 'false') : Array.isArray(v) ? v.join(', ') : String(v)
+      return `${k}: ${text}`
+    })
+    .join('\n')
+}
+
+export default function NoteEditorPage({
+  noteId,
+  folderId = null,
+  mode = 'note',
+  diaryDate,
+  onBack,
+}: Props) {
   const [title, setTitle] = useState('')
   const [content, setContent] = useState('')
   const [currentFolderId, setCurrentFolderId] = useState<number | null>(folderId)
   const [folders, setFolders] = useState<Folder[]>([])
   const [defaultFolderName, setDefaultFolderName] = useState('默认')
+  const [folderModalOpen, setFolderModalOpen] = useState(false)
+  /** Path / kind / generated frontmatter of the bound doc (empty for new docs). */
+  const [docPath, setDocPath] = useState('')
+  const [metaYaml, setMetaYaml] = useState('')
   const [saveState, setSaveState] = useState<SaveState>('clean')
   const [dirty, setDirty] = useState(false)
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null)
@@ -132,7 +160,6 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   const [restoreConfirm, setRestoreConfirm] = useState<NoteVersion | null>(null)
   const [deleteVersionConfirm, setDeleteVersionConfirm] = useState<NoteVersion | null>(null)
 
-  const [folderModalOpen, setFolderModalOpen] = useState(false)
   const [zoomImage, setZoomImage] = useState<ZoomImage | null>(null)
 
   // Layout config is persisted, so the split mode / ratio survives reloads.
@@ -186,7 +213,8 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
   const previewSyncIgnoreRef = useRef(0)
   const editorSyncIgnoreRef = useRef(0)
 
-  // Load existing note and folder list on mount.
+  // Load the bound document plus the folder list on mount; any VFS doc opens
+  // here and new diary days start from the date title.
   useEffect(() => {
     void (async () => {
       try {
@@ -194,23 +222,29 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
         setFolders(stats.folders)
         setDefaultFolderName(stats.defaultFolderName)
         if (noteIdRef.current != null) {
-          const note = await api.getNote(noteIdRef.current)
-          setTitle(note.title)
-          setContent(note.content)
-          setCurrentFolderId(note.folderId)
-          setCreatedAt(note.createdAt)
-          setUpdatedAt(note.updatedAt)
+          // Generic doc load: every kind opens editable, frontmatter stays
+          // system-owned and is rendered read-only below the toolbar.
+          const doc = await docApi.get(noteIdRef.current)
+          setTitle(doc.title)
+          setContent(doc.content)
+          setCurrentFolderId(doc.folderId)
+          setCreatedAt(doc.createdAt)
+          setUpdatedAt(doc.updatedAt)
+          setDocPath(doc.path)
+          setMetaYaml(fieldsToYaml(doc.fields))
           lastSavedRef.current = {
-            title: note.title,
-            content: note.content,
+            title: doc.title,
+            content: doc.content,
           }
+        } else if (mode === 'diary' && diaryDate) {
+          setTitle(diaryDate)
         }
       } catch (e) {
-        console.error('加载笔记失败', e)
+        console.error('加载文档失败', e)
         toast(friendlyError(e))
       }
     })()
-  }, [])
+  }, [mode, diaryDate])
 
   // Skip saving a brand-new note that only contains whitespace.
   const isBlank = !title.trim() && !content.trim()
@@ -232,16 +266,20 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     setSaveState('saving')
     try {
       if (noteIdRef.current == null) {
-        const note = await api.createNote({
-          title: t,
-          content: c,
-          folderId: currentFolderId,
-        })
+        const note =
+          mode === 'diary' && diaryDate
+            ? await api.createDiary({ date: diaryDate, title: t, content: c })
+            : await api.createNote({ title: t, content: c, folderId: currentFolderId })
         noteIdRef.current = note.id
         setHasNote(true)
         setCreatedAt(note.createdAt)
         setUpdatedAt(note.updatedAt)
+      } else if (mode === 'diary') {
+        const receipt = await api.saveDiary({ id: noteIdRef.current, title: t, content: c })
+        setUpdatedAt(receipt.updatedAt)
       } else {
+        // Generic save: folderId semantics only apply to notes; other kinds
+        // keep their path and system-owned frontmatter untouched.
         const receipt = await api.saveNote({
           id: noteIdRef.current,
           title: t,
@@ -263,7 +301,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
       toast(friendlyError(e))
       return false
     }
-  }, [title, content, isBlank, currentFolderId])
+  }, [title, content, isBlank, mode, diaryDate, currentFolderId])
 
   // Mark edits as unsaved (except for a brand-new blank note).
   useEffect(() => {
@@ -519,7 +557,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
 
   const openVersions = async () => {
     if (noteIdRef.current == null) {
-      toast('请先输入内容以创建笔记')
+      toast('请先输入内容以创建文档')
       return
     }
     setVersionsOpen(true)
@@ -572,9 +610,39 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
     }
   }
 
+  // ---- Folder selection (notes only; other kinds keep their fixed path) ----
+  const handleSelectFolder = async (fid: number | null) => {
+    setFolderModalOpen(false)
+    setCurrentFolderId(fid)
+    if (noteIdRef.current == null) return
+    try {
+      // Folder-only change: persist the selection without touching the content.
+      const receipt = await api.saveNote({
+        id: noteIdRef.current,
+        title,
+        content,
+        folderId: fid,
+      })
+      setUpdatedAt(receipt.updatedAt)
+      lastSavedRef.current = { title, content }
+      setDirty(false)
+      setSaveState('clean')
+    } catch (e) {
+      console.error(e)
+      toast(friendlyError(e))
+    }
+  }
+
+  const folderName =
+    folders.find((f) => f.id === currentFolderId)?.name ??
+    (currentFolderId == null ? defaultFolderName : '')
+
+  /** Loaded doc is a plain note (or a brand-new note) → folder picker applies. */
+  const isNoteDoc = mode === 'note' && (!docPath || docPath.startsWith('/life/notes/'))
+
   const handleCreateVersion = async () => {
     if (noteIdRef.current == null) {
-      toast('请先输入内容以创建笔记')
+      toast('请先输入内容以创建文档')
       return
     }
     try {
@@ -621,7 +689,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
 
   const handleExport = async () => {
     if (noteIdRef.current == null) {
-      toast('请先保存笔记')
+      toast('请先保存文档')
       return
     }
     try {
@@ -648,33 +716,6 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
       toast(friendlyError(e))
     }
   }
-
-  // ---- Folder selection ----
-  const handleSelectFolder = async (fid: number | null) => {
-    setFolderModalOpen(false)
-    setCurrentFolderId(fid)
-    if (noteIdRef.current == null) return
-    try {
-      // Folder-only change: persist the selection without touching the content.
-      const receipt = await api.saveNote({
-        id: noteIdRef.current,
-        title,
-        content,
-        folderId: fid,
-      })
-      setUpdatedAt(receipt.updatedAt)
-      lastSavedRef.current = { title, content }
-      setDirty(false)
-      setSaveState('clean')
-    } catch (e) {
-      console.error(e)
-      toast(friendlyError(e))
-    }
-  }
-
-  const folderName =
-    folders.find((f) => f.id === currentFolderId)?.name ??
-    (currentFolderId == null ? defaultFolderName : '')
 
   /** A tap on the editor pane outside the code surface focuses the body. */
   const handleEditorPaneClick = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -826,14 +867,21 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
           >
             <IconBack size={22} />
           </button>
-          <button
-            type="button"
-            className="editor-folder"
-            onClick={() => setFolderModalOpen(true)}
-          >
-            <IconFolder size={15} />
-            <span>{folderName || '选择文件夹'}</span>
-          </button>
+          {isNoteDoc ? (
+            <button
+              type="button"
+              className="editor-folder"
+              onClick={() => setFolderModalOpen(true)}
+            >
+              <IconFolder size={15} />
+              <span>{folderName || '选择文件夹'}</span>
+            </button>
+          ) : (
+            <span className="editor-folder static">
+              {mode === 'diary' ? <IconCalendar size={15} /> : <IconFolder size={15} />}
+              <span>{mode === 'diary' ? (diaryDate ?? '日记') : docPath || '文档'}</span>
+            </span>
+          )}
           <span className={`save-status ${statusClass}`}>
             {saveState === 'dirty' && <span className="dirty-dot" />}
             {statusText}
@@ -873,6 +921,14 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
           >
             <IconEye size={20} />
           </button>
+        </div>
+      )}
+
+      {/* System-generated frontmatter: rendered read-only, YAML flavored. */}
+      {metaYaml && (
+        <div className="editor-frontmatter" role="status">
+          <div className="editor-frontmatter-title">元数据 · 系统生成（只读）</div>
+          <pre className="editor-frontmatter-body">{metaYaml}</pre>
         </div>
       )}
 
@@ -1028,7 +1084,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
         <div className="modal-overlay" onClick={() => setLeaveConfirm(false)}>
           <div className="dialog" onClick={(e) => e.stopPropagation()}>
             <div className="dialog-title">未保存的更改</div>
-            <div className="dialog-message">当前笔记有未保存的修改，离开前要保存吗？</div>
+            <div className="dialog-message">当前文档有未保存的修改，离开前要保存吗？</div>
             <div className="dialog-actions" style={{ flexDirection: 'column' }}>
               <button type="button" className="btn btn-primary" onClick={() => void leaveSaving()}>
                 保存并离开
@@ -1044,7 +1100,7 @@ export default function NoteEditorPage({ noteId, folderId, onBack }: Props) {
         </div>
       )}
 
-      {/* ---- Folder selector ---- */}
+      {/* ---- Folder selector (notes only) ---- */}
       {folderModalOpen && (
         <Modal title="选择文件夹" onClose={() => setFolderModalOpen(false)}>
           <button

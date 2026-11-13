@@ -148,13 +148,12 @@ pub fn infer_kind(path: &str) -> &'static str {
         "notes" => "note",
         "todos" => "todo",
         "contacts" => "contact",
-        "schedule" => "event",
         _ => "note",
     }
 }
 
 /// The single source of truth for "which documents keep a version history".
-/// Notes and diary entries are versioned; todos, contacts and events are not.
+/// Notes and diary entries are versioned; todos and contacts are not.
 pub fn is_versioned(kind: &str) -> bool {
     matches!(kind, "note" | "diary")
 }

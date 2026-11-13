@@ -56,7 +56,6 @@ pub(super) fn root_for(kind: &str) -> Result<&'static str, ToolError> {
         "note" => Ok(NOTES_ROOT),
         "diary" => Ok("/life/diary"),
         "todo" => Ok("/life/todos"),
-        "event" => Ok("/life/schedule"),
         "contact" => Ok("/life/contacts"),
         _ => Err(ToolError::invalid(format!("未知文档类型: {kind}"))),
     }
@@ -380,7 +379,7 @@ pub(super) fn doc_has_tag(doc: &Doc, tag: &str) -> bool {
     }
 }
 
-/// 文档的日期字段（event 的 date 优先，否则用创建时间前 10 位）。
+/// 文档的日期字段（frontmatter 的 date 优先，否则用创建时间前 10 位）。
 pub(super) fn doc_date(doc: &Doc) -> Option<String> {
     field_str(&doc.fields, "date").or_else(|| {
         if doc.created_at.len() >= 10 {

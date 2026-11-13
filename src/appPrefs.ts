@@ -3,7 +3,7 @@ export type FontScale = 'standard' | 'large' | 'extra'
 export interface AppPrefs {
   /** Local-only display name; never leaves the device. */
   displayName: string
-  /** Master switch for due reminders (todos and schedules). */
+  /** Master switch for due reminders (todos). */
   remindersEnabled: boolean
   /** UI type scale; rem-based styles follow the root font size. */
   fontScale: FontScale

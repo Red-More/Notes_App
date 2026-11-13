@@ -92,7 +92,7 @@ pub fn fs_glob(
 }
 
 /// 内容搜索：FTS5 优先，未命中时 LIKE 回退，响应中 `fallback` 如实标记。
-/// `type` 按文档类型过滤（note/todo/event/contact/diary）。（模型面：身份固定为 Agent）
+/// `type` 按文档类型过滤（note/todo/contact/diary）。（模型面：身份固定为 Agent）
 #[tauri::command]
 pub fn fs_grep(
     state: State<'_, VfsState>,
@@ -132,17 +132,19 @@ pub fn user_read(
 }
 
 /// 界面搜索（用户面：身份固定为 User，绕过 Agent 文件夹 ACL）。
+/// `path` 可选，用于把检索范围限定到某个虚拟目录（如 `/life/agent`）。
 #[tauri::command]
 pub fn user_search(
     state: State<'_, VfsState>,
     pattern: String,
     r#type: Option<String>,
+    path: Option<String>,
     max_results: Option<usize>,
 ) -> Result<GrepResponse, ToolError> {
     let vfs = crate::lock(&state.0);
     vfs.grep(GrepRequest {
         pattern,
-        path: None,
+        path,
         max_results,
         context_lines: None,
         doc_type: r#type,

@@ -27,7 +27,6 @@ import type {
   NewChatMessage,
   Note,
   NoteVersion,
-  Schedule,
   SkillDetail,
   SkillInput,
   SkillSummary,
@@ -45,6 +44,8 @@ export type NoteSort = 'updated' | 'created' | 'title'
 export type DocListParams = {
   kind?: string
   folderId?: number
+  /** Recursive virtual-directory scope, e.g. `/life/agent`. */
+  root?: string
   unclassified?: boolean
   search?: string
   sort?: string
@@ -79,7 +80,7 @@ export type DocSaveParams = {
 
 /**
  * 通用文档 API：整个应用唯一的内容入口。
- * 领域适配（Note/Todo/Schedule/Contact）全部在下方 `api` 中完成。
+ * 领域适配（Note/Diary/Todo/Contact）全部在下方 `api` 中完成。
  */
 export const docApi = {
   list: (params: DocListParams) => invoke<Doc[]>('doc_list', params),
@@ -93,14 +94,6 @@ export const docApi = {
   setPinned: (params: { ids: number[]; pinned: boolean }) => invoke<void>('doc_set_pinned', params),
   move: (params: { ids: number[]; folderId: number | null }) => invoke<void>('doc_move', params),
 
-  listVersions: (docId: number, includeAuto = false) =>
-    invoke<DocVersion[]>('version_list', { docId, includeAuto }),
-  /** Fetch one version's body on demand; the list omits bodies. */
-  versionContent: (versionId: number) => invoke<string>('version_content', { versionId }),
-  createVersion: (docId: number) => invoke<DocVersion>('version_create', { docId }),
-  restoreVersion: (versionId: number) => invoke<Doc>('version_restore', { versionId }),
-  deleteVersion: (versionId: number) => invoke<void>('version_delete', { versionId }),
-
   listFolders: () => invoke<FolderStats>('folder_list'),
   createFolder: (name: string) => invoke<Folder>('folder_create', { name }),
   renameFolder: (params: { id: number; name: string }) => invoke<void>('folder_rename', params),
@@ -109,8 +102,17 @@ export const docApi = {
   setFolderPinned: (params: { id: number; pinned: boolean }) =>
     invoke<void>('folder_set_pinned', params),
 
+  listVersions: (docId: number, includeAuto = false) =>
+    invoke<DocVersion[]>('version_list', { docId, includeAuto }),
+  /** Fetch one version's body on demand; the list omits bodies. */
+  versionContent: (versionId: number) => invoke<string>('version_content', { versionId }),
+  createVersion: (docId: number) => invoke<DocVersion>('version_create', { docId }),
+  restoreVersion: (versionId: number) => invoke<Doc>('version_restore', { versionId }),
+  deleteVersion: (versionId: number) => invoke<void>('version_delete', { versionId }),
+
   exportDoc: (params: { docId: number; destPath: string; withAssets?: boolean }) =>
     invoke<void>('export_doc', params),
+
   exportDocs: (params: { ids: number[]; destPath: string }) => invoke<void>('export_docs', params),
   exportFolder: (params: { folderId: number; destPath: string }) =>
     invoke<void>('export_folder', params),
@@ -150,6 +152,13 @@ function docToNote(doc: Doc): Note {
     updatedAt: doc.updatedAt,
     deletedAt: doc.deletedAt,
   }
+}
+
+/** The day a diary is filed under: frontmatter `date`, else its update time. */
+function docDate(doc: Doc): string {
+  const date = doc.fields.date
+  if (typeof date === 'string' && date) return date.slice(0, 10)
+  return doc.updatedAt.slice(0, 10)
 }
 
 /** Derive completion from Markdown checkboxes when an Agent edited the body. */
@@ -195,20 +204,6 @@ async function restorePreviousRevision(docId: number) {
     .sort((a, b) => b.versionNumber - a.versionNumber)[0]
   if (!previous) throw new Error('没有可恢复的历史版本')
   return docApi.restoreVersion(previous.id)
-}
-
-function docToSchedule(doc: Doc): Schedule {
-  return {
-    id: doc.id,
-    title: doc.title,
-    date: str(doc.fields.date) || doc.updatedAt.slice(0, 10),
-    startTime: nullableStr(doc.fields.startTime),
-    endTime: nullableStr(doc.fields.endTime),
-    note: nullableStr(doc.fields.note),
-    reminder: bool(doc.fields.reminder) ? 1 : 0,
-    createdAt: doc.createdAt,
-    updatedAt: doc.updatedAt,
-  }
 }
 
 function docToContact(doc: Doc): Contact {
@@ -279,11 +274,13 @@ export const api = {
   // 界面面命令：身份在 Rust 侧固定为 User，前端不声明 principal。
   userRead: (params: { path: string; includeMeta?: boolean }) =>
     invoke<VfsReadResult>('user_read', params),
-  userSearch: (params: { pattern: string; type?: string; maxResults?: number }) =>
+  userSearch: (params: { pattern: string; type?: string; path?: string; maxResults?: number }) =>
     invoke<VfsGrepResponse>('user_search', params),
 
   // ---- Notes (doc kind = note) ----
-  listNotes: async (params: { folderId?: number; unclassified?: boolean; sort?: NoteSort }) => {
+  listNotes: async (
+    params: { folderId?: number; unclassified?: boolean; sort?: NoteSort } = {},
+  ) => {
     const docs = await docApi.list({
       kind: 'note',
       folderId: params.folderId,
@@ -306,9 +303,9 @@ export const api = {
     const docs = paths.length
       ? await docApi.list({
           kind: 'note',
+          paths,
           folderId: params.folderId,
           unclassified: params.unclassified,
-          paths,
         })
       : []
     return {
@@ -399,6 +396,32 @@ export const api = {
   deleteFolder: (id: number) => docApi.deleteFolder(id),
   setFolderPinned: (params: { id: number; pinned: boolean }) => docApi.setFolderPinned(params),
 
+  // ---- Diary (doc kind = diary, path = /life/diary/YYYY-MM-DD.md) ----
+  /** One day's diary; null when that date has no document yet. */
+  getDiary: async (date: string) => {
+    const target = `/life/diary/${date}.md`
+    // Canonical path is authoritative: no timezone or timestamp participates.
+    const exact = await docApi.list({ kind: 'diary', paths: [target] })
+    if (exact.length) return docToNote(exact[0])
+
+    // Legacy fallback for non-canonical filenames lacking a frontmatter date.
+    const docs = await docApi.list({ kind: 'diary', month: date.slice(0, 7) })
+    const doc = docs.find((item) => docDate(item) === date)
+    return doc ? docToNote(doc) : null
+  },
+  /** Lazily scaffold an empty date; the title doubles as the file stem. */
+  createDiary: async (params: { date: string; title?: string; content?: string }) =>
+    docToNote(
+      await docApi.create({
+        kind: 'diary',
+        title: params.title?.trim() || params.date,
+        content: params.content ?? '',
+        fields: { date: params.date },
+      }),
+    ),
+  saveDiary: async (params: { id: number; title: string; content: string }) =>
+    docApi.save({ id: params.id, title: params.title, content: params.content }),
+
   /** 手动重建检索索引（M1-5）；正常写入时索引自动维护。 */
   rebuildSearchIndex: () => invoke<number>('search_reindex'),
 
@@ -452,58 +475,7 @@ export const api = {
     await docApi.purge([id])
   },
 
-  // ---- Schedules (doc kind = event) ----
-  listSchedules: async (month: string) => {
-    // Calendar only renders fields, never the body.
-    const docs = await docApi.list({ kind: 'event', month, includeContent: false })
-    return docs.map(docToSchedule)
-  },
-  createSchedule: async (params: {
-    title: string
-    date: string
-    startTime?: string | null
-    endTime?: string | null
-    note?: string | null
-    reminder?: boolean
-  }) =>
-    docToSchedule(
-      await docApi.create({
-        kind: 'event',
-        title: params.title,
-        content: '',
-        fields: {
-          date: params.date,
-          startTime: params.startTime ?? null,
-          endTime: params.endTime ?? null,
-          note: params.note ?? null,
-          reminder: params.reminder ?? false,
-        },
-      }),
-    ),
-  updateSchedule: async (params: {
-    id: number
-    title: string
-    date: string
-    startTime?: string | null
-    endTime?: string | null
-    note?: string | null
-    reminder?: boolean
-  }) =>
-    docApi.save({
-      id: params.id,
-      title: params.title,
-      fields: {
-        date: params.date,
-        startTime: params.startTime ?? null,
-        endTime: params.endTime ?? null,
-        note: params.note ?? null,
-        reminder: params.reminder ?? false,
-      },
-    }),
-  deleteSchedule: async (id: number) => {
-    await docApi.delete([id])
-    await docApi.purge([id])
-  },
+
 
   // ---- Contacts (doc kind = contact) ----
   listContacts: async (params: { tag?: string; search?: string }) => {

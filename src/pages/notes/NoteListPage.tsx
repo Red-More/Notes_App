@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { save } from '@tauri-apps/plugin-dialog'
-import { api } from '../../api'
+import { api, docApi } from '../../api'
 import {
   useCollapsibleHeader,
   useDebouncedSearch,
@@ -8,11 +8,12 @@ import {
   useLongPress,
 } from '../../hooks'
 import { exportTs, formatAmPmDateTime, friendlyError } from '../../utils'
-import type { FolderStats, Note } from '../../types'
+import type { Doc, FolderStats, Note } from '../../types'
 import { ConfirmDialog, Modal, OverlayPortal } from '../../components/ui'
 import { toast } from '../../toast'
 import {
   IconCheck,
+  IconChevronDown,
   IconClose,
   IconExport,
   IconFolder,
@@ -27,7 +28,6 @@ import {
 import PageHeader from '../../components/PageHeader'
 import FAB from '../../components/FAB'
 import EmptyState from '../../components/EmptyState'
-import ChipRow from '../../components/ChipRow'
 
 interface Props {
   isActive: boolean
@@ -37,8 +37,64 @@ interface Props {
   onOpenFolders: () => void
 }
 
-/** Tab filter: all notes, unclassified notes, or a specific folder. */
+/** Tab filter: all notes, unclassified notes, or a specific note folder. */
 type FolderFilter = 'all' | 'uncat' | number
+
+/** System folders that can be browsed from the 全部 chip dropdown. */
+const SYSTEM_FOLDERS = [
+  { path: '/life/todos', label: '待办' },
+  { path: '/life/diary', label: '日记' },
+  { path: '/life/contacts', label: '联系人' },
+  { path: '/life/agent', label: 'AI 工作区' },
+] as const
+
+const KIND_LABELS: Record<string, string> = {
+  note: '笔记',
+  diary: '日记',
+  todo: '待办',
+  contact: '联系人',
+}
+
+/** Path-aware label: Agent artifacts are not plain notes. */
+function docKindLabel(doc: Doc): string {
+  if (doc.path.startsWith('/life/agent/')) return 'AI 产物'
+  return KIND_LABELS[doc.kind] ?? doc.kind
+}
+
+/** One rendered row: writable notes and browsed system docs share the card. */
+interface Row {
+  id: number
+  title: string
+  preview: string
+  meta: string
+  isPinned: number
+  createdAt: string
+  updatedAt: string
+}
+
+function noteRow(note: Note): Row {
+  return {
+    id: note.id,
+    title: note.title,
+    preview: note.content,
+    meta: `${formatAmPmDateTime(note.updatedAt)} · ${note.content.length}字`,
+    isPinned: note.isPinned,
+    createdAt: note.createdAt,
+    updatedAt: note.updatedAt,
+  }
+}
+
+function docRow(doc: Doc): Row {
+  return {
+    id: doc.id,
+    title: doc.title,
+    preview: doc.content,
+    meta: `${docKindLabel(doc)} · ${formatAmPmDateTime(doc.updatedAt)}`,
+    isPinned: doc.pinned,
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
+  }
+}
 
 /** Items rendered per batch before the sentinel triggers the next one. */
 const PAGE = 50
@@ -84,9 +140,12 @@ export default function NoteListPage({
   onOpenNote,
   onOpenFolders,
 }: Props) {
-  const [notes, setNotes] = useState<Note[]>([])
+  const [notes, setNotes] = useState<Row[]>([])
   const [stats, setStats] = useState<FolderStats | null>(null)
   const [filter, setFilter] = useState<FolderFilter>('all')
+  /** Active system-folder browse scope; null means the normal note tabs. */
+  const [browse, setBrowse] = useState<{ path: string; label: string } | null>(null)
+  const [scopeOpen, setScopeOpen] = useState(false)
   const [searchInput, setSearchInput, query] = useDebouncedSearch()
   const [searchFallback, setSearchFallback] = useState(false)
   const [sortKey, setSortKey] = useState<SortKey>('updated')
@@ -104,26 +163,33 @@ export default function NoteListPage({
   const { largeTitleRef, searchWrapRef, scrollRef, contentShiftRef, scrollEl } =
     useCollapsibleHeader()
 
-  // Search goes through fs_grep (FTS5 with LIKE fallback); list mode is a plain doc query.
-  const fetchNotes = useCallback(
-    async (rawSearch: string) => {
-      const search = rawSearch.trim()
-      const filters = {
-        folderId: typeof filter === 'number' ? filter : undefined,
-        unclassified: filter === 'uncat' || undefined,
-      }
-      if (search) {
-        return api.searchNotes({ search, ...filters })
-      }
-      return { notes: await api.listNotes(filters), fallback: false }
-    },
-    [filter],
-  )
+  // Note tabs: search goes through fs_grep (FTS5 with LIKE fallback); list mode
+  // is a plain doc query. Browse mode: one recursive doc query on the root.
+  const fetchRows = useCallback(async (): Promise<{ rows: Row[]; fallback: boolean }> => {
+    const search = query.trim()
+    if (browse) {
+      const docs = await docApi.list({
+        root: browse.path,
+        search: search || undefined,
+        previewChars: 120,
+      })
+      return { rows: docs.map(docRow), fallback: false }
+    }
+    const filters = {
+      folderId: typeof filter === 'number' ? filter : undefined,
+      unclassified: filter === 'uncat' || undefined,
+    }
+    if (search) {
+      const result = await api.searchNotes({ search, ...filters })
+      return { rows: result.notes.map(noteRow), fallback: result.fallback }
+    }
+    return { rows: (await api.listNotes(filters)).map(noteRow), fallback: false }
+  }, [browse, filter, query])
 
   const load = useCallback(async () => {
     try {
-      const result = await fetchNotes(query)
-      setNotes(result.notes)
+      const result = await fetchRows()
+      setNotes(result.rows)
       setSearchFallback(result.fallback)
       setStats(await api.listFolders())
     } catch (e) {
@@ -132,7 +198,7 @@ export default function NoteListPage({
     } finally {
       setLoading(false)
     }
-  }, [fetchNotes, query])
+  }, [fetchRows])
 
   // Elastic overscroll shared by every list; the notes list also refreshes.
   const { pullDist, springing, refreshing } = useElasticOverscroll(scrollEl, {
@@ -152,9 +218,9 @@ export default function NoteListPage({
     let cancelled = false
     const run = async () => {
       try {
-        const result = await fetchNotes(query)
+        const result = await fetchRows()
         if (cancelled) return
-        setNotes(result.notes)
+        setNotes(result.rows)
         setSearchFallback(result.fallback)
         setVisible(PAGE)
         if (cancelled) return
@@ -170,11 +236,11 @@ export default function NoteListPage({
     return () => {
       cancelled = true
     }
-  }, [fetchNotes, query, version])
+  }, [fetchRows, version])
 
   // Re-sort the current (already filtered/searched) result set on the client:
   // pinned notes stay on top, then the chosen dimension and direction apply.
-  const sortedNotes = useMemo(() => {
+  const sortedRows = useMemo(() => {
     const arr = [...notes]
     arr.sort((a, b) => {
       if (a.isPinned !== b.isPinned) return b.isPinned - a.isPinned
@@ -187,7 +253,7 @@ export default function NoteListPage({
           cmp = a.createdAt.localeCompare(b.createdAt)
           break
         case 'size':
-          cmp = a.content.length - b.content.length
+          cmp = a.preview.length - b.preview.length
           break
         default:
           cmp = a.updatedAt.localeCompare(b.updatedAt)
@@ -227,24 +293,47 @@ export default function NoteListPage({
     })
   }
 
-  const { bind, didLongPress } = useLongPress((note: Note) => {
+  const { bind, didLongPress } = useLongPress((row: Row) => {
     // A completed hold always acts on the pressed note: enter selection mode
     // with it selected, or toggle it when selection is already active.
+    if (browse) return
     if (selectMode) {
-      toggleSelected(note.id)
+      toggleSelected(row.id)
     } else {
       setSelectMode(true)
-      setSelected(new Set([note.id]))
+      setSelected(new Set([row.id]))
     }
   })
 
-  const handleCardClick = (note: Note) => {
+  const handleCardClick = (row: Row) => {
     if (didLongPress()) return
-    if (selectMode) {
-      toggleSelected(note.id)
+    if (!browse && selectMode) {
+      toggleSelected(row.id)
     } else {
-      onOpenNote(note.id, null)
+      // Every VFS document opens in the shared editor, editable in place.
+      onOpenNote(row.id, null)
     }
+  }
+
+  /** Switch to a note tab (leaves any system-folder browse scope). */
+  const selectFilter = (next: FolderFilter) => {
+    setBrowse(null)
+    setScopeOpen(false)
+    setFilter(next)
+    setSelectMode(false)
+    setSelected(new Set())
+    setNotes([])
+    setLoading(true)
+  }
+
+  /** Browse one system folder (待办/日记/联系人/AI 工作区). */
+  const selectScope = (scope: { path: string; label: string }) => {
+    setScopeOpen(false)
+    setBrowse(scope)
+    setSelectMode(false)
+    setSelected(new Set())
+    setNotes([])
+    setLoading(true)
   }
 
   const selectedIds = useMemo(() => [...selected], [selected])
@@ -319,8 +408,7 @@ export default function NoteListPage({
     setSortOpen(false)
   }
 
-  const tabs: Array<{ key: FolderFilter; label: string }> = [
-    { key: 'all', label: '全部' },
+  const noteTabs: Array<{ key: FolderFilter; label: string }> = [
     ...(stats?.folders.map((f) => ({
       key: f.id as FolderFilter,
       label: f.name,
@@ -369,7 +457,7 @@ export default function NoteListPage({
             { icon: <IconFolder size={22} />, label: '文件夹管理', onClick: onOpenFolders },
           ]}
           search={{
-            placeholder: '搜索笔记标题和内容',
+            placeholder: browse ? `搜索${browse.label}内容` : '搜索笔记标题和内容',
             value: searchInput,
             onChange: setSearchInput,
             action: (
@@ -424,7 +512,60 @@ export default function NoteListPage({
         )}
       </div>
 
-      <ChipRow items={tabs} value={filter} onChange={setFilter} />
+      <div className="chips">
+        {/* 全部 carries a nested dropdown to browse sibling system folders. */}
+        <div
+          className={`chip chip-split ${!browse && filter === 'all' ? 'active' : ''}`}
+        >
+          <button type="button" className="chip-main" onClick={() => selectFilter('all')}>
+            全部
+          </button>
+          <button
+            type="button"
+            className="chip-drop"
+            onClick={() => setScopeOpen((o) => !o)}
+            aria-label="切换文件夹范围"
+            aria-expanded={scopeOpen}
+          >
+            <IconChevronDown size={14} />
+          </button>
+        </div>
+        {browse && (
+          <button type="button" className="chip active" onClick={() => selectScope(browse)}>
+            {browse.label}
+          </button>
+        )}
+        {noteTabs.map((tab) => (
+          <button
+            key={String(tab.key)}
+            type="button"
+            className={`chip ${!browse && filter === tab.key ? 'active' : ''}`}
+            onClick={() => selectFilter(tab.key)}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {scopeOpen && (
+        <>
+          <div className="popover-backdrop" onClick={() => setScopeOpen(false)} />
+          <div className="scope-menu">
+            <div className="sort-popover-title">浏览其他文件夹</div>
+            {SYSTEM_FOLDERS.map((scope) => (
+              <button
+                key={scope.path}
+                type="button"
+                className={`sort-option ${browse?.path === scope.path ? 'active' : ''}`}
+                onClick={() => selectScope(scope)}
+              >
+                {scope.label}
+                {browse?.path === scope.path && <IconCheck size={16} />}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
 
       {query && searchFallback && (
         <div className="search-fallback-hint" role="status">
@@ -448,34 +589,39 @@ export default function NoteListPage({
             ) : notes.length === 0 ? (
               <EmptyState
                 icon={<IconNote size={44} />}
-                text={query ? '没有匹配的笔记' : '还没有笔记，点击 + 创建'}
+                text={
+                  query
+                    ? '没有匹配的内容'
+                    : browse
+                      ? `「${browse.label}」暂无文件`
+                      : '还没有笔记，点击 + 创建'
+                }
               />
             ) : (
               <>
-                {sortedNotes.slice(0, visible).map((note) => (
+                {sortedRows.slice(0, visible).map((row) => (
                   <div
-                    key={note.id}
-                    className={`note-card ${selectMode && selected.has(note.id) ? 'selected' : ''}`}
-                    onClick={() => handleCardClick(note)}
-                    {...bind(note)}
+                    key={row.id}
+                    className={`note-card ${selectMode && selected.has(row.id) ? 'selected' : ''}`}
+                    onClick={() => handleCardClick(row)}
+                    {...(!browse ? bind(row) : {})}
                   >
                     {selectMode && (
                       <span className="check-dot">
-                        {selected.has(note.id) && <IconCheck size={14} />}
+                        {selected.has(row.id) && <IconCheck size={14} />}
                       </span>
                     )}
                     <div className="note-card-title">
-                      {note.isPinned === 1 && <span className="pin-badge">📌</span>}
+                      {row.isPinned === 1 && <span className="pin-badge">📌</span>}
                       <span className="title-text">
-                        <Highlight text={note.title} needle={query} />
+                        <Highlight text={row.title} needle={query} />
                       </span>
                     </div>
                     <div className="note-card-content">
-                      <Highlight text={note.content} needle={query} />
+                      <Highlight text={row.preview} needle={query} />
                     </div>
                     <div className="note-card-meta">
-                      <span className="note-card-time">{formatAmPmDateTime(note.updatedAt)}</span>
-                      <span className="note-card-words">{note.content.length}字</span>
+                      <span className="note-card-time">{row.meta}</span>
                     </div>
                   </div>
                 ))}
@@ -486,7 +632,7 @@ export default function NoteListPage({
         </div>
       </div>
 
-      <FAB label="新建笔记" onClick={() => onOpenNote(null, activeFolderId)} />
+      {!browse && <FAB label="新建笔记" onClick={() => onOpenNote(null, activeFolderId)} />}
 
       {selectMode && isActive && (
         <OverlayPortal>

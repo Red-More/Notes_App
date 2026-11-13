@@ -2,9 +2,8 @@
 //!
 //! 路径约定：
 //! - 笔记：`/life/notes[/<folder>]/<slug>.md`
-//! - 日记：`/life/diary/<slug>.md`
+//! - 日记：`/life/diary/YYYY-MM-DD.md`
 //! - 待办：`/life/todos/<slug>.md`
-//! - 日程：`/life/schedule/<date>-<slug>.md`
 //! - 联系人：`/life/contacts/<slug>.md`
 //!
 //! id 使用 inode，移动文件不改变 id；自动保存原地更新 head rev，不追加历史，
@@ -62,8 +61,8 @@ pub fn list(vfs: &VirtualFs, query: ListQuery) -> Result<Vec<Doc>, ToolError> {
     let mut args: Vec<SqlValue> = vec![SqlValue::Integer(deleted)];
 
     // A folder tab shows whatever lives inside it, so kind is ignored when a
-    // folder id is given (folder list now spans notes, todos, diary, agent...).
-    if query.folder_id.is_none() {
+    // folder id or an explicit root scope is given.
+    if query.folder_id.is_none() && query.root.is_none() {
         if let Some(kind) = kind_filter.as_deref() {
             sql.push_str(" AND m.kind = ?");
             args.push(SqlValue::Text(kind.to_string()));
@@ -75,6 +74,8 @@ pub fn list(vfs: &VirtualFs, query: ListQuery) -> Result<Vec<Doc>, ToolError> {
         push_direct_child_filter(&mut sql, &mut args, &dir);
     } else if query.unclassified.unwrap_or(false) {
         push_direct_child_filter(&mut sql, &mut args, NOTES_ROOT);
+    } else if let Some(root) = query.root.as_deref() {
+        push_root_filter(&mut sql, &mut args, root)?;
     } else if let Some(kind) = kind_filter.as_deref() {
         let root = root_for(kind)?;
         sql.push_str(" AND i.path LIKE ? ESCAPE '\\'");
@@ -181,21 +182,7 @@ pub fn create(
         }
     };
 
-    let stem = match kind {
-        "event" => {
-            let date = util::field_str(&fields, "date").unwrap_or_default();
-            if date.is_empty() {
-                safe_segment(title, "event")
-            } else {
-                format!(
-                    "{}-{}",
-                    safe_segment(&date, "undated"),
-                    safe_segment(title, "event")
-                )
-            }
-        }
-        _ => safe_segment(title, kind),
-    };
+    let stem = safe_segment(title, kind);
 
     let path = {
         let conn = vfs.conn();
@@ -475,6 +462,26 @@ pub fn move_many(
         )?;
     }
     tx.commit()?;
+    Ok(())
+}
+
+/// Restrict to a recursive virtual-directory scope such as `/life/agent`.
+/// The prefix is validated so a caller cannot widen the query to arbitrary paths.
+fn push_root_filter(
+    sql: &mut String,
+    args: &mut Vec<SqlValue>,
+    raw_root: &str,
+) -> Result<(), ToolError> {
+    let root = raw_root.trim().trim_end_matches('/');
+    let life_prefix = format!("{}/", cap_gate::ROOT);
+    if !root.starts_with(&life_prefix) || root.contains("..") {
+        return Err(ToolError::invalid(format!("未知目录范围: {raw_root}")));
+    }
+    sql.push_str(" AND i.path LIKE ? ESCAPE '\\'");
+    args.push(SqlValue::Text(format!(
+        "{}%",
+        cap_gate::escape_like(&format!("{root}/"))
+    )));
     Ok(())
 }
 

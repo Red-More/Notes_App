@@ -46,7 +46,7 @@ export default function AccountSection() {
       <SettingsRow
         icon={<IconInfo size={20} />}
         title="数据归属"
-        subtitle="笔记、待办、日程与人脉保存在本机 life.db"
+        subtitle="笔记、日记、待办与人脉保存在本机 life.db"
         value="仅本机"
       />
 

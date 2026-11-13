@@ -65,18 +65,6 @@ export interface Todo {
   updatedAt: string
 }
 
-export interface Schedule {
-  id: number
-  title: string
-  date: string
-  startTime: string | null
-  endTime: string | null
-  note: string | null
-  reminder: number
-  createdAt: string
-  updatedAt: string
-}
-
 export interface Contact {
   id: number
   name: string

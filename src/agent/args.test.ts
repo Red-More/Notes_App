@@ -23,7 +23,7 @@ describe('tool argument normalization', () => {
     expect(argString('  /life ')).toBe('/life')
     expect(argGrepType('TODO')).toBe('todo')
     expect(argGrepType('日记')).toBe('diary')
-    expect(argGrepType('schedule')).toBe('event')
+    expect(argGrepType('schedule')).toBeUndefined()
     expect(argGrepType('unknown-kind')).toBeUndefined()
   })
 })

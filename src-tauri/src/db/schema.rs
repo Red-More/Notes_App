@@ -7,8 +7,8 @@
 //! closes it, deletes the file (plus `-wal` / `-shm`) and lets `create` build
 //! the schema again. See `db/mod.rs`.
 //!
-//! Design principle stays the same: documents are data. Notes, todos, contacts
-//! and schedules are Markdown under `/life/`; SQLite only owns the namespace,
+//! Design principle stays the same: documents are data. Notes, diary entries,
+//! todos and contacts are Markdown under `/life/`; SQLite only owns the namespace,
 //! revision chains, structured mirrors and search indexes. FTS5 is maintained
 //! by the application inside the same transaction (there are no triggers).
 
@@ -27,7 +27,6 @@ const DEFAULT_DIRS: &[&str] = &[
     "/life/notes",
     "/life/todos",
     "/life/contacts",
-    "/life/schedule",
     "/life/agent",
     "/life/.agents",
     "/life/.agents/skills",
@@ -39,7 +38,6 @@ const DEFAULT_DIR_TITLES: &[(&str, &str)] = &[
     ("/life/diary", "日记"),
     ("/life/todos", "待办"),
     ("/life/contacts", "联系人"),
-    ("/life/schedule", "日程"),
     ("/life/agent", "AI 工作区"),
 ];
 

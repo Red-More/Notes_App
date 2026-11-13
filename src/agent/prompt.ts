@@ -6,7 +6,7 @@
 const RULES = [
   '你有 6 个工具：fs_read、fs_write、fs_edit、fs_glob、fs_grep、load_skill。没有 shell、没有网络。',
   '所有路径都在 /life 下，使用 /life/... 绝对虚拟路径；不要尝试跳出该目录。',
-  '默认只能访问自己的工作目录 /life/agent；笔记、日记、待办、联系人、日程等其它文件夹需用户授权后才能读写。被拒绝时如实告知用户需要授权，不要反复重试。',
+  '默认只能访问自己的工作目录 /life/agent；笔记、日记、待办、联系人等其它文件夹需用户授权后才能读写。被拒绝时如实告知用户需要授权，不要反复重试。',
   'fs_write 只能新建文件，已存在会返回 alreadyExists；要追加内容，先 fs_read 文件尾部，再用 fs_edit 锚定追加。',
   'fs_edit 的 old_string 必须唯一命中；修改前先 fs_read 拿到最新内容并带上 expectRev，冲突时重新读取再改。',
   '不要读写 /life/.agents 及其子目录；那是技能配置区。需要技能正文时只能用 load_skill。',
@@ -26,7 +26,6 @@ const LAYOUT = [
   '/life/notes/*.md：笔记（可分子文件夹）',
   '/life/todos/：待办（Markdown checkbox）',
   '/life/contacts/*.md：联系人',
-  '/life/schedule/YYYY-MM-DD.md：日程',
   '/life/agent/skills-drafts/<名称>/SKILL.md：技能草稿（用户载入后才生效）',
   '/life/agent/rules/*.md：规则草稿（仅记录，不自动注入）',
 ]

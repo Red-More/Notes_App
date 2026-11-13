@@ -1,7 +1,7 @@
 //! 交叉索引维护。
 //!
 //! 每次 write/edit（包括 doc_save）都在同一事务里重建该 inode 的索引行：
-//! - type：文档类型（note/todo/event/contact/diary）；
+//! - type：文档类型（note/todo/contact/diary）；
 //! - date / time / due：日期、时间、截止时间；
 //! - location：地点；
 //! - person：人物标识（personId，多个用逗号分隔）；

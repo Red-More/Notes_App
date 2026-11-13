@@ -8,7 +8,7 @@ import { installKeyboardViewport } from './system/keyboard'
 import NoteListPage from './pages/notes/NoteListPage'
 import FolderManagePage from './pages/notes/FolderManagePage'
 import TodoPage from './pages/todos/TodoPage'
-import SchedulePage from './pages/schedules/SchedulePage'
+import DiaryPage from './pages/diary/DiaryPage'
 import ContactPage from './pages/contacts/ContactPage'
 
 // The editor carries CodeMirror + the preview renderer; keep them out of the
@@ -18,10 +18,12 @@ const NoteEditorPage = lazy(() => import('./pages/notes/NoteEditorPage'))
 const ChatPage = lazy(() => import('./pages/chat/ChatPage'))
 const SettingsPage = lazy(() => import('./pages/settings/SettingsPage'))
 
-type Tab = 'chat' | 'notes' | 'todos' | 'schedules' | 'contacts'
+type Tab = 'chat' | 'notes' | 'todos' | 'diary' | 'contacts'
+
+type EditorMode = 'note' | 'diary'
 
 type Overlay =
-  | { kind: 'editor'; noteId: number | null; folderId: number | null }
+  | { kind: 'editor'; noteId: number | null; folderId?: number | null; mode?: EditorMode; diaryDate?: string }
   | { kind: 'folders' }
   | { kind: 'settings' }
 
@@ -29,7 +31,7 @@ const TABS: Array<{ key: Tab; label: string; icon: typeof IconNote }> = [
   { key: 'chat', label: '对话', icon: IconChat },
   { key: 'notes', label: '笔记', icon: IconNote },
   { key: 'todos', label: '待办', icon: IconTodo },
-  { key: 'schedules', label: '日程', icon: IconCalendar },
+  { key: 'diary', label: '日记', icon: IconCalendar },
   { key: 'contacts', label: '人脉', icon: IconUsers },
 ]
 
@@ -318,9 +320,11 @@ function App() {
       <>
         <Suspense fallback={<div className="editor-page note-editor-page" />}>
           <NoteEditorPage
-            key={overlay.noteId ?? 'new'}
+            key={`${overlay.noteId ?? 'new'}-${overlay.diaryDate ?? ''}`}
             noteId={overlay.noteId}
             folderId={overlay.folderId}
+            mode={overlay.mode}
+            diaryDate={overlay.diaryDate}
             onBack={closeOverlay}
           />
         </Suspense>
@@ -370,15 +374,24 @@ function App() {
               isActive={index === 1}
               version={dataVersion}
               onOpenSettings={openSettings}
-              onOpenNote={(noteId, folderId) => setOverlay({ kind: 'editor', noteId, folderId })}
+              onOpenNote={(noteId, folderId) =>
+                setOverlay({ kind: 'editor', noteId, folderId })
+              }
               onOpenFolders={() => setOverlay({ kind: 'folders' })}
             />
           </section>
           <section className="pager-page" role="tabpanel" id="panel-todos" aria-label="待办">
             <TodoPage isActive={index === 2} onOpenSettings={openSettings} />
           </section>
-          <section className="pager-page" role="tabpanel" id="panel-schedules" aria-label="日程">
-            <SchedulePage isActive={index === 3} onOpenSettings={openSettings} />
+          <section className="pager-page" role="tabpanel" id="panel-diary" aria-label="日记">
+            <DiaryPage
+              isActive={index === 3}
+              version={dataVersion}
+              onOpenSettings={openSettings}
+              onOpenDiary={(date, noteId) =>
+                setOverlay({ kind: 'editor', noteId, mode: 'diary', diaryDate: date })
+              }
+            />
           </section>
           <section className="pager-page" role="tabpanel" id="panel-contacts" aria-label="人脉">
             <ContactPage isActive={index === 4} onOpenSettings={openSettings} />
