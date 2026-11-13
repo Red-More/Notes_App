@@ -41,7 +41,6 @@ import {
   IconUsers,
 } from '../../components/Icons'
 import DiffViewerModal from '../../components/DiffViewerModal'
-import { useKeyboardInset } from '../../system/keyboard'
 
 interface Props {
   isActive: boolean
@@ -266,7 +265,6 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
   const [diffView, setDiffView] = useState<{ paths: string[]; title: string } | null>(null)
   // Maps an item id to its row so a timeline dot can scroll it into view.
   const rowRefs = useRef(new Map<string, HTMLDivElement>())
-  const kbInset = useKeyboardInset()
 
   // The runtime owns the Agent, the run status, the queue and write ordering.
   const runtime = useMemo(() => new AgentRuntime({ deps: createRuntimeDeps() }), [])
@@ -320,8 +318,9 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     saveDraft(draftKey, { text: input, assetIds: attachments.map((item) => item.id) })
   }, [draftKey, input, attachments])
 
-  // The chat composer grows by whole wrapped lines (CJK/emoji included) between
-  // 2x and 4x its one-line baseline, then scrolls internally.
+  // The chat composer grows by whole wrapped lines (CJK/emoji included). The
+  // elastic range comes from [2h0, 4h0] in CSS, so the visual height can be
+  // tuned in one place without desynchronizing this measurement.
   useLayoutEffect(() => {
     const el = inputElRef.current
     if (!el) return
@@ -335,8 +334,8 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     const line = parseFloat(styles.lineHeight) || 22
     const padding = (parseFloat(styles.paddingTop) || 0) + (parseFloat(styles.paddingBottom) || 0)
     const baseline = line + padding
-    const min = baseline * 2
-    const max = baseline * 4
+    const min = parseFloat(styles.minHeight) || baseline * 2
+    const max = parseFloat(styles.maxHeight) || baseline * 4
     const needed = el.scrollHeight
     const next = Math.min(Math.max(needed, min), max)
     el.style.height = `${next}px`
@@ -344,10 +343,19 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     el.classList.toggle('capped', needed > max)
   }, [input, expanded])
 
-  // Keep the latest turn visible when the soft keyboard opens.
+  // Keep the latest turn visible whenever the viewport changes: the soft
+  // keyboard shrinks either the layout viewport (adjustResize) or the visual
+  // viewport (overlay), and both must re-anchor the transcript.
   useEffect(() => {
-    if (kbInset > 0) scrollToBottom()
-  }, [kbInset, scrollToBottom])
+    const onViewportChange = () => scrollToBottom()
+    const vv = window.visualViewport
+    vv?.addEventListener('resize', onViewportChange)
+    window.addEventListener('resize', onViewportChange)
+    return () => {
+      vv?.removeEventListener('resize', onViewportChange)
+      window.removeEventListener('resize', onViewportChange)
+    }
+  }, [scrollToBottom])
 
   // While expanded, the tabbar is hidden so the composer reaches the keyboard.
   useEffect(() => {
@@ -1005,7 +1013,7 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
             ))}
           </div>
         )}
-        <div className="chat-composer-row">
+        <div className="chat-composer-box">
           <div className="chat-input-wrap">
             <textarea
               ref={inputElRef}
@@ -1024,64 +1032,66 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
                 }
               }}
             />
-            <button
-              type="button"
-              className={`chat-expand ${expanded ? 'active' : ''}`}
-              aria-label={expanded ? '收起输入框' : '展开输入框'}
-              aria-pressed={expanded}
-              title={expanded ? '收起输入框' : '展开输入框'}
-              onClick={() => setExpanded((prev) => !prev)}
-            >
-              {expanded ? <IconCollapse size={15} /> : <IconExpand size={15} />}
-            </button>
           </div>
-          {!streaming && hasModel && (
-            <button
-              type="button"
-              className="chat-attach"
-              aria-label="添加附件"
-              onClick={() => setAttachMenuOpen(true)}
-            >
-              <IconPaperclip size={20} />
-            </button>
-          )}
-          {streaming && (
-            <button
-              type="button"
-              className="chat-queue-mode"
-              title="切换追加方式：追加立即注入，排队在本轮结束后执行"
-              onClick={() => setQueueMode((prev) => (prev === 'steer' ? 'followUp' : 'steer'))}
-            >
-              {queueMode === 'steer' ? '追加' : '排队'}
-              {queuedCount > 0 ? ` ${queuedCount}` : ''}
-            </button>
-          )}
-          {streaming ? (
-            <>
+          <div className="chat-actions">
+            {!streaming && hasModel && (
+              <button
+                type="button"
+                className="chat-attach"
+                aria-label="添加附件"
+                onClick={() => setAttachMenuOpen(true)}
+              >
+                <IconPaperclip size={19} />
+              </button>
+            )}
+            {streaming && (
+              <button
+                type="button"
+                className="chat-queue-mode"
+                title="切换追加方式：追加立即注入，排队在本轮结束后执行"
+                onClick={() => setQueueMode((prev) => (prev === 'steer' ? 'followUp' : 'steer'))}
+              >
+                {queueMode === 'steer' ? '追加' : '排队'}
+                {queuedCount > 0 ? ` ${queuedCount}` : ''}
+              </button>
+            )}
+            {streaming ? (
+              <>
+                <button
+                  type="button"
+                  className="chat-send"
+                  aria-label={queueMode === 'steer' ? '追加指令' : '排队指令'}
+                  disabled={input.trim() === ''}
+                  onClick={() => void queueMessage()}
+                >
+                  <IconSend size={19} />
+                </button>
+                <button type="button" className="chat-send stop" aria-label="停止" onClick={stop}>
+                  <IconStop size={19} />
+                </button>
+              </>
+            ) : (
               <button
                 type="button"
                 className="chat-send"
-                aria-label={queueMode === 'steer' ? '追加指令' : '排队指令'}
-                disabled={input.trim() === ''}
-                onClick={() => void queueMessage()}
+                aria-label="发送"
+                disabled={(input.trim() === '' && attachments.length === 0) || !hasModel || loading}
+                onClick={() => void send()}
               >
-                <IconSend size={20} />
+                <IconSend size={19} />
               </button>
-              <button type="button" className="chat-send stop" aria-label="停止" onClick={stop}>
-                <IconStop size={20} />
-              </button>
-            </>
-          ) : (
-            <button
-              type="button"
-              className="chat-send"
-              aria-label="发送"
-              disabled={(input.trim() === '' && attachments.length === 0) || !hasModel || loading}
-              onClick={() => void send()}
-            >
-              <IconSend size={20} />
-            </button>
-          )}
+            )}
+          </div>
+          <button
+            type="button"
+            className={`chat-expand ${expanded ? 'active' : ''}`}
+            aria-label={expanded ? '收起输入框' : '展开输入框'}
+            aria-pressed={expanded}
+            title={expanded ? '收起输入框' : '展开输入框'}
+            onClick={() => setExpanded((prev) => !prev)}
+          >
+            {expanded ? <IconCollapse size={15} /> : <IconExpand size={15} />}
+          </button>
         </div>
         <input
           ref={imageInputRef}

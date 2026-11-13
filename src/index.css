@@ -3433,14 +3433,22 @@ body.split-resizing {
   padding-bottom: calc(8px + var(--safe-bottom));
 }
 
-.chat-page.expanded .chat-composer-row {
+.chat-page.expanded .chat-composer-box {
   flex: 1;
   min-height: 0;
-  align-items: flex-end;
+  /* Text on top, action area pinned inside the box's bottom-right corner. */
+  flex-direction: column;
+  align-items: stretch;
 }
 
 .chat-page.expanded .chat-input-wrap {
-  align-self: stretch;
+  flex: 1;
+  min-height: 0;
+}
+
+.chat-page.expanded .chat-actions {
+  align-self: flex-end;
+  padding: 6px 2px 2px;
 }
 
 /* Body class is toggled while expanded, so the tabbar leaves the keyboard area. */
@@ -3448,18 +3456,39 @@ body.chat-expanded .tabbar {
   display: none;
 }
 
+/* While the soft keyboard is open the tabbar is covered, never lifted with the
+   composer (UX keyboard avoidance). */
+body.kb-open .tabbar {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* Only the composer avoids the keyboard; the tabbar above stays covered. In
+   adjustResize mode --kb-inset is 0 and the shrunken layout viewport already
+   places the composer above the keyboard. The page drops its tabbar clearance
+   because that bar is hidden while the keyboard is open. */
+body.kb-open .chat-page {
+  padding-bottom: 0;
+}
+
+body.kb-open .chat-composer,
+body.kb-open .chat-page.expanded .chat-composer {
+  padding-bottom: calc(var(--kb-inset, 0px) + 4px);
+}
+
 .chat-input-wrap {
   position: relative;
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
   display: flex;
 }
 
-/* Corner control inside the input; opens the full-height composer. */
+/* Corner control pinned to the composer container's top-right corner, so it
+   never drifts when the textarea grows or the action area changes width. */
 .chat-expand {
   position: absolute;
-  top: 7px;
-  right: 9px;
+  top: 6px;
+  right: 6px;
   width: 26px;
   height: 26px;
   display: flex;
@@ -3491,11 +3520,32 @@ body.chat-expanded .tabbar {
   text-decoration: underline;
 }
 
-.chat-composer-row {
+/* One rounded container owns the text area AND both action buttons, so the
+   row never overflows and the buttons never detach from the input. */
+.chat-composer-box {
+  position: relative;
   display: flex;
   align-items: flex-end;
-  gap: 8px;
+  gap: 4px;
   width: 100%;
+  min-width: 0;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  background: var(--surface);
+}
+
+.chat-composer-box:focus-within {
+  border-color: var(--accent-border);
+}
+
+/* Fixed-size action area; participates in the same flex row as the text area. */
+.chat-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  padding-bottom: 4px;
 }
 
 .chat-queue-mode {
@@ -3512,15 +3562,16 @@ body.chat-expanded .tabbar {
 }
 
 .chat-input {
-  flex: 1;
-  /* One-line baseline; the elastic range is [2h0, 4h0] (UX-03). */
-  --composer-h0: 42px;
+  flex: 1 1 auto;
+  min-width: 0;
+  /* One-line baseline; 1.5x the previous 40px baseline, keeping [2h0, 4h0]. */
+  --composer-h0: 60px;
   min-height: calc(2 * var(--composer-h0));
   max-height: calc(4 * var(--composer-h0));
-  padding: 10px 40px 10px 14px;
-  border: 1px solid var(--border);
+  padding: 9px 14px 9px 12px;
+  border: none;
   border-radius: 20px;
-  background: var(--surface);
+  background: transparent;
   color: var(--text);
   font: inherit;
   font-size: 15px;
@@ -3537,29 +3588,21 @@ body.chat-expanded .tabbar {
   overflow-y: auto;
 }
 
-.chat-input:focus {
-  border-color: var(--accent-border);
-}
-
 /* Expanded: the textarea owns the remaining height and scrolls internally. */
 .chat-page.expanded .chat-input {
   height: 100%;
   min-height: 0;
   max-height: none;
   overflow-y: auto;
+  /* Keep text clear of the corner expand button in the full-width layout. */
   padding-right: 40px;
   touch-action: pan-y;
 }
 
-.chat-page.expanded .chat-expand {
-  top: 8px;
-  right: 10px;
-}
-
 .chat-send {
   flex: 0 0 auto;
-  width: 44px;
-  height: 44px;
+  width: 38px;
+  height: 38px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3577,13 +3620,13 @@ body.chat-expanded .tabbar {
 /* Attach button mirrors the send button's footprint but stays neutral. */
 .chat-attach {
   flex: 0 0 auto;
-  width: 44px;
-  height: 44px;
+  width: 38px;
+  height: 38px;
   display: flex;
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  background: var(--surface);
+  background: var(--surface-2);
   border: 1px solid var(--border);
   color: var(--text-2);
 }
