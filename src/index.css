@@ -3446,7 +3446,7 @@ body.split-resizing {
   min-height: 0;
 }
 
-.chat-page.expanded .chat-actions {
+.chat-page.expanded .chat-composer-actions {
   align-self: flex-end;
   padding: 6px 2px 2px;
 }
@@ -3540,7 +3540,7 @@ body.kb-open .chat-page.expanded .chat-composer {
 }
 
 /* Fixed-size action area; participates in the same flex row as the text area. */
-.chat-actions {
+.chat-composer-actions {
   flex: 0 0 auto;
   display: flex;
   align-items: flex-end;
@@ -3633,6 +3633,8 @@ body.kb-open .chat-page.expanded .chat-composer {
 
 .chat-attach:disabled {
   color: var(--text-3);
+  opacity: 0.55;
+  cursor: default;
 }
 
 .chat-attachments {
