@@ -27,7 +27,7 @@ export default function TodoEditor({ todo, initialDue, onClose, onSaved }: Props
   const [due, setDue] = useState<string | null>(todo?.dueDate ?? initialDue ?? null)
   const [repeat, setRepeat] = useState<RepeatValue>(
     REPEAT_OPTIONS.some((o) => o.value === todo?.repeat)
-      ? (todo!.repeat as RepeatValue)
+      ? (todo?.repeat as RepeatValue)
       : 'none',
   )
   const [pickerOpen, setPickerOpen] = useState(false)
