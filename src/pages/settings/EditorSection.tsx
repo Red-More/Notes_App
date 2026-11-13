@@ -29,6 +29,20 @@ import {
   setMermaidEnhance,
   subscribeMermaidEnhance,
 } from '../../editor/mermaidPrefs'
+import {
+  DEFAULT_SYNTAX_PREFS,
+  SYNTAX_COLORS,
+  SYNTAX_PALETTES,
+  SYNTAX_TOKENS,
+  getSyntaxPrefs,
+  resetSyntaxPrefs,
+  resolveSyntaxColor,
+  setSyntaxPrefs,
+  type SyntaxColorKey,
+  type SyntaxPaletteKey,
+  type SyntaxPrefs,
+  type SyntaxToken,
+} from '../../editor/syntaxPrefs'
 import { toast } from '../../toast'
 import { IconImage, IconNote, IconSave, IconSettings, IconInfo } from '../../components/Icons'
 import ChipRow from '../../components/ChipRow'
@@ -124,9 +138,12 @@ export default function EditorSection() {
   const [strategyOpen, setStrategyOpen] = useState(false)
   const [indentOpen, setIndentOpen] = useState(false)
   const [layoutOpen, setLayoutOpen] = useState(false)
+  const [syntax, setSyntaxState] = useState(() => getSyntaxPrefs())
+  const [syntaxOpen, setSyntaxOpen] = useState(false)
   const strategySave = useSettingSave()
   const indentSave = useSettingSave()
   const layoutSave = useSettingSave()
+  const syntaxSave = useSettingSave()
   const mermaidSave = useSettingSave()
   const mermaidEnhance = useSyncExternalStore(
     subscribeMermaidEnhance,
@@ -141,6 +158,12 @@ export default function EditorSection() {
       : (strategyMeta?.label ?? '智能保存')
   const indentValue = `${editorPrefs.indentStyle === 'tabs' ? 'Tab' : '空格'} · ${editorPrefs.indentSize}`
   const layoutValue = `${layout.ratio}% / ${100 - layout.ratio}%`
+  const syntaxPaletteLabel =
+    SYNTAX_PALETTES.find((palette) => palette.key === syntax.palette)?.label ?? '默认'
+  const syntaxValue =
+    Object.keys(syntax.colors).length > 0 || syntax.disabled.length > 0
+      ? `${syntaxPaletteLabel} · 自定义`
+      : syntaxPaletteLabel
 
   const chooseStrategy = (key: SaveStrategyKey) => {
     const next = { ...strategy, key }
@@ -176,6 +199,33 @@ export default function EditorSection() {
     setLayout(DEFAULT_LAYOUT_PREFS)
     void layoutSave.run(() => setLayoutPrefs(DEFAULT_LAYOUT_PREFS))
     toast('已恢复默认布局设置')
+  }
+
+  const updateSyntax = (next: SyntaxPrefs) => {
+    setSyntaxState(next)
+    void syntaxSave.run(() => setSyntaxPrefs(next))
+  }
+
+  /** Switching palettes clears single-token overrides so the preset reads cleanly. */
+  const chooseSyntaxPalette = (palette: SyntaxPaletteKey) => {
+    updateSyntax({ ...syntax, palette, colors: {} })
+  }
+
+  const chooseSyntaxColor = (token: SyntaxToken, color: SyntaxColorKey) => {
+    updateSyntax({ ...syntax, colors: { ...syntax.colors, [token]: color } })
+  }
+
+  const toggleSyntaxToken = (token: SyntaxToken) => {
+    const disabled = syntax.disabled.includes(token)
+      ? syntax.disabled.filter((key) => key !== token)
+      : [...syntax.disabled, token]
+    updateSyntax({ ...syntax, disabled })
+  }
+
+  const restoreSyntax = () => {
+    setSyntaxState(DEFAULT_SYNTAX_PREFS)
+    void syntaxSave.run(() => resetSyntaxPrefs())
+    toast('已恢复默认语法高亮')
   }
 
   return (
@@ -292,6 +342,68 @@ export default function EditorSection() {
         </p>
         <button type="button" className="restore-default" onClick={resetLayout}>
           恢复默认设置
+        </button>
+      </SettingsExpandableRow>
+
+      <SettingsExpandableRow
+        icon={<IconSettings size={20} />}
+        title="语法高亮"
+        subtitle="调整 Markdown 语法配色、单个标记颜色与显示开关"
+        value={syntaxValue}
+        status={<SaveStatus state={syntaxSave.state} error={syntaxSave.error} />}
+        open={syntaxOpen}
+        onToggle={() => setSyntaxOpen((open) => !open)}
+      >
+        <div className="settings-detail-field">
+          <span className="settings-detail-label">配色主题</span>
+          <ChipRow
+            items={SYNTAX_PALETTES}
+            value={syntax.palette}
+            onChange={chooseSyntaxPalette}
+          />
+        </div>
+        <div className="syntax-token-list">
+          {SYNTAX_TOKENS.map((token) => {
+            const enabled = !syntax.disabled.includes(token.key)
+            const activeColor = resolveSyntaxColor(syntax, token.key)
+            return (
+              <div className="syntax-token-row" key={token.key}>
+                <span className="syntax-token-label">{token.label}</span>
+                <div
+                  className="syntax-swatches"
+                  role="group"
+                  aria-label={`${token.label}颜色`}
+                >
+                  {SYNTAX_COLORS.map((slot) => (
+                    <button
+                      key={slot.key}
+                      type="button"
+                      className={`syntax-swatch${activeColor === slot.key ? ' active' : ''}`}
+                      style={{ background: slot.css }}
+                      aria-label={`${token.label}：${slot.label}`}
+                      aria-pressed={activeColor === slot.key}
+                      disabled={!enabled}
+                      onClick={() => chooseSyntaxColor(token.key, slot.key)}
+                    />
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={enabled}
+                  aria-label={`${token.label}高亮`}
+                  className={`syntax-toggle${enabled ? ' on' : ''}`}
+                  onClick={() => toggleSyntaxToken(token.key)}
+                />
+              </div>
+            )
+          })}
+        </div>
+        <p className="settings-detail-note">
+          颜色随浅色 / 深色主题自动适配；关闭某项后该语法恢复正文颜色。
+        </p>
+        <button type="button" className="restore-default" onClick={restoreSyntax}>
+          恢复默认高亮
         </button>
       </SettingsExpandableRow>
 

@@ -4,7 +4,7 @@ import {
   useImperativeHandle,
   useRef,
 } from 'react'
-import { EditorState, Prec, RangeSetBuilder } from '@codemirror/state'
+import { Compartment, EditorState, Prec, RangeSetBuilder } from '@codemirror/state'
 import {
   Decoration,
   EditorView,
@@ -37,7 +37,6 @@ import {
 import {
   HighlightStyle,
   bracketMatching,
-  defaultHighlightStyle,
   indentOnInput,
   indentUnit,
   syntaxHighlighting,
@@ -56,10 +55,19 @@ import { linter } from '@codemirror/lint'
 import { markdown } from '@codemirror/lang-markdown'
 import { languages } from '@codemirror/language-data'
 import { indentationMarkers } from '@replit/codemirror-indentation-markers'
-import { tags } from '@lezer/highlight'
+import { tags, type Tag } from '@lezer/highlight'
 import { findUnclosedFence } from '../editor/diagnostics'
 import { insertMarkdownLink, toggleInlineMarker } from '../editor/commands'
 import { indentUnitFor, type EditorPrefs } from '../editor/prefs'
+import {
+  SYNTAX_TOKENS,
+  getSyntaxPrefs,
+  resolveSyntaxColor,
+  subscribeSyntaxPrefs,
+  syntaxColorCss,
+  type SyntaxPrefs,
+  type SyntaxToken,
+} from '../editor/syntaxPrefs'
 import { assetDataUrl } from '../assets'
 import { requestImageZoom } from '../system/imageZoom'
 import {
@@ -138,9 +146,20 @@ const editorTheme = EditorView.theme({
     fontVariantNumeric: 'tabular-nums',
   },
   '.cm-activeLineGutter': { backgroundColor: 'transparent', color: 'var(--accent)' },
-  '.cm-activeLine': { backgroundColor: 'var(--surface-2)' },
-  '.cm-selectionBackground': { backgroundColor: 'var(--accent-weak)' },
-  '&.cm-focused .cm-selectionBackground': { backgroundColor: 'var(--accent-border)' },
+  // The active line paints above CodeMirror's selection layer, so it must stay
+  // translucent or the selection on the caret's line becomes invisible.
+  '.cm-activeLine': { backgroundColor: 'var(--editor-active-line)' },
+  '.cm-selectionBackground': { backgroundColor: 'var(--editor-selection)' },
+  // Match the base theme's focused selector so the stronger color wins.
+  '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground': {
+    backgroundColor: 'var(--editor-selection-strong)',
+  },
+  // Search matches use an underline instead of a background: an inline
+  // background paints above the selection layer and would punch holes in it.
+  '.cm-selectionMatch': {
+    backgroundColor: 'transparent',
+    boxShadow: 'inset 0 -1px 0 var(--accent-border)',
+  },
   '.cm-cursor': { borderLeftColor: 'var(--accent)', borderLeftWidth: '2px' },
   '.cm-placeholder': { color: 'var(--text-3)' },
   '.cm-tooltip': {
@@ -162,23 +181,59 @@ const editorTheme = EditorView.theme({
   '.cm-lintRange-warning': { textDecoration: 'underline wavy var(--accent)' },
 })
 
-const markdownHighlightStyle = HighlightStyle.define([
-  { tag: tags.heading1, color: 'var(--accent-deep)', fontWeight: '700' },
-  { tag: [tags.heading2, tags.heading3], color: 'var(--text)', fontWeight: '700' },
-  { tag: [tags.heading4, tags.heading5, tags.heading6], color: 'var(--text)', fontWeight: '600' },
-  { tag: tags.strong, fontWeight: '700' },
-  { tag: tags.emphasis, fontStyle: 'italic' },
-  { tag: tags.strikethrough, textDecoration: 'line-through' },
-  { tag: tags.link, color: 'var(--info)' },
-  { tag: tags.url, color: 'var(--info)' },
-  { tag: tags.monospace, color: 'var(--accent-deep)' },
-  { tag: tags.quote, color: 'var(--text-2)' },
-  {
-    tag: [tags.processingInstruction, tags.contentSeparator, tags.punctuation],
-    color: 'var(--text-3)',
-  },
-  { tag: tags.list, color: 'var(--accent)' },
-])
+/** Lezer tags each configurable token category covers. */
+const TOKEN_TAGS: Record<SyntaxToken, Tag | readonly Tag[]> = {
+  heading1: tags.heading1,
+  heading2: tags.heading2,
+  heading3: tags.heading3,
+  heading4: [tags.heading4, tags.heading5, tags.heading6],
+  strong: tags.strong,
+  emphasis: tags.emphasis,
+  strikethrough: tags.strikethrough,
+  link: [tags.link, tags.url],
+  code: tags.monospace,
+  quote: tags.quote,
+  list: tags.list,
+  punctuation: [tags.processingInstruction, tags.contentSeparator, tags.punctuation],
+}
+
+/** Weight / decoration that stays fixed while the user tunes colors. */
+const TOKEN_BASE_STYLE: Record<
+  SyntaxToken,
+  { fontWeight?: string; fontStyle?: string; textDecoration?: string }
+> = {
+  heading1: { fontWeight: '700' },
+  heading2: { fontWeight: '700' },
+  heading3: { fontWeight: '600' },
+  heading4: { fontWeight: '600' },
+  strong: { fontWeight: '700' },
+  emphasis: { fontStyle: 'italic' },
+  strikethrough: { textDecoration: 'line-through' },
+  link: { textDecoration: 'underline' },
+  code: {},
+  quote: { fontStyle: 'italic' },
+  list: {},
+  punctuation: {},
+}
+
+/**
+ * Build the Markdown highlight style from the persisted palette, per-token
+ * overrides and category switches. Disabled categories get no rule at all, so
+ * they fall back to the plain text color.
+ */
+function buildSyntaxHighlight(prefs: SyntaxPrefs) {
+  const styles = SYNTAX_TOKENS.filter((token) => !prefs.disabled.includes(token.key)).map(
+    (token) => ({
+      tag: TOKEN_TAGS[token.key],
+      color: syntaxColorCss(resolveSyntaxColor(prefs, token.key)),
+      ...TOKEN_BASE_STYLE[token.key],
+    }),
+  )
+  return syntaxHighlighting(HighlightStyle.define(styles))
+}
+
+/** Swapped at runtime when the syntax preferences change. */
+const syntaxHighlightCompartment = new Compartment()
 
 const HEADING_COMPLETIONS: Completion[] = [
   { label: '一级标题', apply: '# ', type: 'keyword' },
@@ -421,8 +476,7 @@ function buildExtensions(prefs: EditorPrefs, refs: EditorRefs) {
     dropCursor(),
     EditorState.allowMultipleSelections.of(true),
     indentOnInput(),
-    syntaxHighlighting(markdownHighlightStyle),
-    syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+    syntaxHighlightCompartment.of(buildSyntaxHighlight(getSyntaxPrefs())),
     bracketMatching(),
     closeBrackets(),
     autocompletion({ override: [markdownCompletions] }),
@@ -549,6 +603,22 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
     useEffect(() => {
       onPasteImagesRef.current = onPasteImages
     }, [onPasteImages])
+
+    // Apply palette / token color / switch changes without recreating the view,
+    // so the caret, undo history and scroll position survive.
+    useEffect(
+      () =>
+        subscribeSyntaxPrefs(() => {
+          const view = viewRef.current
+          if (!view) return
+          view.dispatch({
+            effects: syntaxHighlightCompartment.reconfigure(
+              buildSyntaxHighlight(getSyntaxPrefs()),
+            ),
+          })
+        }),
+      [],
+    )
 
     // Create the view once per editor session; prefs are read per session.
     useEffect(() => {
