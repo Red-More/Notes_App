@@ -4726,17 +4726,333 @@ body.kb-open .chat-page.expanded .chat-composer {
   padding-bottom: 4px;
 }
 
-.chat-queue-mode {
+/* Split send control while a run is active: mode label + caret picker. */
+.chat-send-split {
   flex: 0 0 auto;
-  height: 32px;
-  padding: 0 10px;
-  border-radius: 16px;
+  display: flex;
+  align-items: stretch;
+  height: 38px;
+  border-radius: 19px;
+  overflow: hidden;
+  background: var(--accent);
+  color: #fff;
+}
+
+.chat-send-split.disabled {
+  background: var(--border);
+}
+
+.chat-send-mode {
+  padding: 0 9px 0 14px;
+  border: none;
+  background: none;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.chat-send-mode:disabled {
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.chat-send-caret {
+  width: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-left: 1px solid rgba(255, 255, 255, 0.28);
+  background: none;
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.chat-send-split.disabled .chat-send-caret {
+  border-left-color: rgba(20, 22, 28, 0.12);
+  color: var(--text-3);
+}
+
+/* Mode picker floats above the composer, anchored to its rounded box. */
+.chat-queue-menu {
+  position: absolute;
+  right: 6px;
+  bottom: calc(100% + 10px);
+  z-index: 60;
+  width: min(300px, calc(100vw - 40px));
+  padding: 6px;
   border: 1px solid var(--border);
-  background: var(--surface-2);
-  color: var(--text-2);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: 0 8px 30px rgba(20, 22, 28, 0.16);
+}
+
+.chat-queue-menu-title {
+  padding: 4px 10px 6px;
   font-size: 12px;
+  color: var(--text-3);
+}
+
+.chat-queue-option {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 10px;
+  background: none;
+  text-align: left;
+}
+
+.chat-queue-option.active {
+  background: var(--accent-weak);
+}
+
+.chat-queue-option-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.chat-queue-option-note {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-3);
+}
+
+.chat-queue-option-check {
+  color: var(--accent);
+}
+
+/* Queue status bar: pinned to the composer's top edge, never scrolls. */
+.chat-queue-bar {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chat-queue-head {
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+  text-align: left;
+}
+
+.chat-queue-count {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
   font-variant-numeric: tabular-nums;
-  align-self: center;
+}
+
+/* Fixed one-line height: the preview ellipsizes instead of wrapping. */
+.chat-queue-preview {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.chat-queue-caret {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--text-3);
+}
+
+.chat-queue-bar.expanded .chat-queue-list {
+  animation: queue-list-up 180ms ease;
+}
+
+/* 3.5 rows visible; anything longer scrolls inside the panel. */
+.chat-queue-list {
+  max-height: calc(3.5 * 38px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.chat-queue-item {
+  position: relative;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 6px 0 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  user-select: none;
+  touch-action: pan-y;
+}
+
+.chat-queue-item:last-child {
+  border-bottom: none;
+}
+
+.chat-queue-item.failed {
+  cursor: pointer;
+}
+
+.chat-queue-item.dragging {
+  z-index: 2;
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(20, 22, 28, 0.18);
+}
+
+.chat-queue-item.leaving {
+  pointer-events: none;
+  animation: queue-suck 280ms ease-in forwards;
+}
+
+.chat-queue-kind {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.chat-queue-kind.steer {
+  color: var(--accent-deep);
+  background: var(--accent-weak);
+}
+
+.chat-queue-kind.followUp {
+  color: #3568c9;
+  background: rgba(59, 111, 216, 0.1);
+}
+
+.chat-queue-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.chat-queue-state {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.chat-queue-state.failed {
+  color: var(--danger);
+}
+
+.chat-queue-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+
+.chat-queue-dot.delivered,
+.chat-queue-dot.consumed {
+  background: #3b82f6;
+}
+
+.chat-queue-dot.failed {
+  background: var(--danger);
+}
+
+.chat-queue-remove {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-3);
+  font-size: 15px;
+  line-height: 1;
+}
+
+.chat-queue-remove:disabled {
+  opacity: 0.3;
+}
+
+/* Long-press hint: when this item will take effect. */
+.chat-queue-eta {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: calc(100% + 6px);
+  z-index: 4;
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: rgba(20, 22, 28, 0.92);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.4;
+  pointer-events: none;
+  box-shadow: 0 6px 18px rgba(20, 22, 28, 0.24);
+}
+
+/* First-run explanation, gone after three seconds. */
+.chat-queue-guide {
+  align-self: flex-start;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--accent-weak);
+  color: var(--accent-deep);
+  font-size: 12px;
+  animation: queue-guide-in 200ms ease;
+}
+
+@keyframes queue-suck {
+  to {
+    transform: translateY(-34px) scale(0.96);
+    opacity: 0;
+  }
+}
+
+@keyframes queue-list-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes queue-guide-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .chat-input {

@@ -101,7 +101,7 @@ function toolResultText(result: unknown): string {
 }
 
 /** Plain text of a user message (string or content blocks). */
-function userText(message: { content?: unknown }): string {
+export function userText(message: { content?: unknown }): string {
   const content = message.content
   if (typeof content === 'string') return content
   if (Array.isArray(content)) {

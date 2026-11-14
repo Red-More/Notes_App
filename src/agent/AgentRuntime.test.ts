@@ -150,6 +150,13 @@ function memoryDeps(conversation: ChatConversation) {
         list.filter((record) => record.id < messageId),
       )
     },
+    deleteMessage: async (conversationId, messageId) => {
+      const list = rows.get(conversationId) ?? []
+      rows.set(
+        conversationId,
+        list.filter((record) => record.id !== messageId),
+      )
+    },
     loadSkills: async () => [],
     loadMcpTools: async () => [],
     loadAsset: async () => ({ data: '', mime: 'image/png' }),
@@ -499,9 +506,16 @@ describe('AgentRuntime', () => {
     await runtime.followUp('第二问')
     expect(runtime.snapshot().queued).toBe(1)
     expect(store.runs.filter((run) => run.status === 'queued')).toHaveLength(1)
-    // The queued user message is written up front so re-entry can show it.
+    // The queued user message is written up front so the queue survives restarts.
     expect((store.rows.get(1) ?? []).filter((row) => row.role === 'user').map((row) => row.content))
       .toEqual(['第一问', '第二问'])
+    // It stays in the status bar, never in the transcript before it starts.
+    expect(
+      runtime.snapshot().items.filter((item) => item.kind === 'user').map((item) => item.text),
+    ).toEqual(['第一问'])
+    expect(runtime.snapshot().queueItems.map((item) => `${item.mode}:${item.text}`)).toEqual([
+      'followUp:第二问',
+    ])
 
     await runtime.dispose()
     await pending
@@ -511,7 +525,93 @@ describe('AgentRuntime', () => {
     expect(runtime.snapshot().queued).toBe(1)
     expect(
       runtime.snapshot().items.filter((item) => item.kind === 'user').map((item) => item.text),
+    ).toEqual(['第一问'])
+    expect(runtime.snapshot().queueItems).toMatchObject([
+      { mode: 'followUp', text: '第二问', status: 'pending' },
+    ])
+  })
+
+  it('confirms a steer and retires its entry when the bubble renders', async () => {
+    const { streamFn, runs } = controlledStreamFn()
+    const { runtime, store } = runtimeWith(streamFn)
+
+    await runtime.open(conversation(), profile)
+    const pending = runtime.prompt({ text: '第一问' })
+    await waitFor(() => runs.length === 1)
+    await waitFor(() => runtime.snapshot().items.some((item) => item.kind === 'assistant'))
+
+    runtime.steer('改道')
+    const steerEntry = () => runtime.snapshot().queueItems[0]
+    expect(steerEntry()).toMatchObject({ mode: 'steer', text: '改道', status: 'pending' })
+    await waitFor(() => steerEntry()?.status === 'delivered')
+
+    // The first answer ends: pi drains the steering queue before the next
+    // request and renders the guidance as a user bubble.
+    runs[0].finish('第一答')
+    await waitFor(() => runs.length === 2)
+    await waitFor(() => steerEntry()?.status === 'consumed')
+    expect(
+      runtime.snapshot().items.filter((item) => item.kind === 'user').map((item) => item.text),
+    ).toEqual(['第一问', '改道'])
+    // The pre-written steering row is not duplicated by its message_end.
+    expect(
+      (store.rows.get(1) ?? []).filter((row) => row.role === 'user').map((row) => row.content),
+    ).toEqual(['第一问', '改道'])
+
+    runs[1].finish('第二答')
+    await pending
+  })
+
+  it('starts a queued follow-up only after the loop ends', async () => {
+    const { streamFn, runs } = controlledStreamFn()
+    const { runtime } = runtimeWith(streamFn)
+
+    await runtime.open(conversation(), profile)
+    const pending = runtime.prompt({ text: '第一问' })
+    await waitFor(() => runs.length === 1)
+    await waitFor(() => runtime.snapshot().items.some((item) => item.kind === 'assistant'))
+
+    await runtime.followUp('第二问')
+    expect(runs).toHaveLength(1)
+    expect(runtime.snapshot().queueItems).toMatchObject([
+      { mode: 'followUp', text: '第二问', status: 'pending' },
+    ])
+
+    runs[0].finish('第一答')
+    await waitFor(() => runs.length === 2)
+    const entry = () => runtime.snapshot().queueItems[0]
+    await waitFor(() => entry()?.status === 'consumed')
+    expect(
+      runtime.snapshot().items.filter((item) => item.kind === 'user').map((item) => item.text),
     ).toEqual(['第一问', '第二问'])
+
+    runs[1].finish('第二答')
+    await pending
+    runtime.dismissQueueEntry(entry().id)
+    expect(runtime.snapshot().queueItems).toHaveLength(0)
+  })
+
+  it('withdraws a queued follow-up without touching earlier messages', async () => {
+    const { streamFn, runs } = controlledStreamFn()
+    const { runtime, store } = runtimeWith(streamFn)
+
+    await runtime.open(conversation(), profile)
+    const pending = runtime.prompt({ text: '第一问' })
+    await waitFor(() => runs.length === 1)
+    await waitFor(() => runtime.snapshot().items.some((item) => item.kind === 'assistant'))
+
+    await runtime.followUp('不要了')
+    await runtime.removeQueueEntry(runtime.snapshot().queueItems[0].id)
+
+    expect(runtime.snapshot().queued).toBe(0)
+    expect(runtime.snapshot().queueItems).toHaveLength(0)
+    expect(
+      (store.rows.get(1) ?? []).filter((row) => row.role === 'user').map((row) => row.content),
+    ).toEqual(['第一问'])
+    expect(store.runs.some((run) => run.status === 'cancelled')).toBe(true)
+
+    runs[0].finish('收尾')
+    await pending
   })
 
   it('starts a resume run from the user turn and drops the partial answer', async () => {

@@ -10,6 +10,7 @@ import { clearDraft, loadDraft, saveDraft } from '../../chatDraft'
 import type { AgentProfile } from '../../agent/runtime'
 import { profileFromSettings } from '../../agent/runtime'
 import { AgentRuntime } from '../../agent/AgentRuntime'
+import type { QueueEntry, QueueEntryMode } from '../../agent/AgentRuntime'
 import { createRuntimeDeps } from '../../agent/runtimeDeps'
 import {
   documentPath,
@@ -52,6 +53,7 @@ import {
   IconTrash,
 } from '../../components/Icons'
 import MessageActions from './MessageActions'
+import QueueStatusBar from './QueueStatusBar'
 
 interface Props {
   isActive: boolean
@@ -111,6 +113,34 @@ interface Attachment {
 const MAX_CHAT_IMAGES = 8
 const MAX_CHAT_IMAGE_BYTES = 32 * 1024 * 1024
 const MAX_CHAT_TOTAL_BYTES = 40 * 1024 * 1024
+
+/**
+ * 发送模式：`steer` 由 pi 在本批工具全部返回后、下一轮请求前注入（临时改道）；
+ * `followUp` 等整个 Agent 循环结束，再由运行时开一条新 run（接续下一件事）。
+ */
+const QUEUE_MODE_KEY = 'notes:chat-queue-mode'
+const QUEUE_GUIDE_KEY = 'notes:chat-queue-guide'
+const QUEUE_MODES: Array<{ mode: QueueEntryMode; label: string; note: string }> = [
+  { mode: 'steer', label: '插话（steer）', note: '本批工具结束后、下一轮请求前生效' },
+  { mode: 'followUp', label: '排队（followUp）', note: '本轮彻底结束后再开始新一轮' },
+]
+
+/** Default steer; the last choice is remembered locally. */
+function readQueueMode(): QueueEntryMode {
+  try {
+    return localStorage.getItem(QUEUE_MODE_KEY) === 'followUp' ? 'followUp' : 'steer'
+  } catch {
+    return 'steer'
+  }
+}
+
+function vibrate(ms = 8): void {
+  try {
+    if (typeof navigator.vibrate === 'function') navigator.vibrate(ms)
+  } catch {
+    // Haptics are best effort.
+  }
+}
 
 /** User attachment strip; a stale asset shows a visible placeholder. */
 function BubbleImages({ ids }: { ids: number[] }) {
@@ -329,9 +359,15 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
   const [loading, setLoading] = useState(true)
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set())
   const [expandedThinking, setExpandedThinking] = useState<Set<string>>(new Set())
-  // While a run is active, the composer enqueues instead of prompting.
-  const [queueMode, setQueueMode] = useState<'steer' | 'followUp'>('steer')
-  const [queuedCount, setQueuedCount] = useState(0)
+  // While a run is active, the composer injects (steer) or queues (followUp).
+  const [queueMode, setQueueMode] = useState<QueueEntryMode>(readQueueMode)
+  const [modeMenuOpen, setModeMenuOpen] = useState(false)
+  // Optimistic queue items rendered by the status bar above the composer.
+  const [queueItems, setQueueItems] = useState<QueueEntry[]>([])
+  const [queueExpanded, setQueueExpanded] = useState(false)
+  const [leavingQueueIds, setLeavingQueueIds] = useState<Set<string>>(new Set())
+  const [queueGuide, setQueueGuide] = useState(false)
+  const [stepCount, setStepCount] = useState(0)
   // Last interrupted run, restored from the ledger after a restart.
   const [interrupted, setInterrupted] = useState<AgentRun | null>(null)
   const [docPreview, setDocPreview] = useState<DocPreview | null>(null)
@@ -371,6 +407,12 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
   const stickToBottom = useRef(true)
   const touchStartY = useRef(0)
   const bootRef = useRef(false)
+  // Iron rule: the composer text stays in the draft layer until the queue
+  // entry is confirmed; failures restore it from the entry itself.
+  const pendingSubmitText = useRef<string | null>(null)
+  const handledQueueFailures = useRef<Set<string>>(new Set())
+  const guideShownRef = useRef(false)
+  const consumeTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>())
 
   const scrollToBottom = useCallback((force = false) => {
     const el = scrollRef.current
@@ -538,9 +580,12 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     [setAttachmentList],
   )
 
-  // Drafts live only in localStorage until the first message is sent.
+  // Drafts live only in localStorage until the first message is sent. While a
+  // queue submission is unconfirmed the text stays here, not in the cleared
+  // composer: clearing the input must never destroy it before the receipt.
   const draftKey = conversation ? String(conversation.id) : 'new'
   useEffect(() => {
+    if (pendingSubmitText.current !== null) return
     saveDraft(draftKey, { text: input, assetIds: attachments.map((item) => item.id) })
   }, [draftKey, input, attachments])
 
@@ -620,8 +665,21 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
       runtime.subscribe((snapshot) => {
         setItems(snapshot.items)
         setStreaming(snapshot.status !== 'idle')
-        setQueuedCount(snapshot.queued)
+        setQueueItems(snapshot.queueItems)
+        setStepCount(snapshot.stepCount)
         setInterrupted(snapshot.interrupted)
+        // The picker and the expanded panel never outlive their trigger.
+        if (snapshot.status === 'idle') setModeMenuOpen(false)
+        if (snapshot.queueItems.length === 0) setQueueExpanded(false)
+        // First queue item ever: explain the two modes once, then stop nagging.
+        if (snapshot.queueItems.length > 0 && !guideShownRef.current) {
+          guideShownRef.current = true
+          try {
+            if (localStorage.getItem(QUEUE_GUIDE_KEY) !== '1') setQueueGuide(true)
+          } catch {
+            setQueueGuide(true)
+          }
+        }
         // The first message of a draft adopts the conversation the backend
         // created atomically with it; mirror it into the list and page state.
         if (snapshot.conversation) {
@@ -660,6 +718,73 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [items])
+
+  // Confirmation arrived: the draft backup can be released. Failures are
+  // rolled back by the effect below instead.
+  useEffect(() => {
+    const text = pendingSubmitText.current
+    if (text === null) return
+    const entry = [...queueItems].reverse().find((item) => item.text === text)
+    if (!entry || entry.status === 'pending' || entry.status === 'failed') return
+    pendingSubmitText.current = null
+    saveDraft(draftKey, { text: input, assetIds: attachments.map((item) => item.id) })
+  }, [queueItems, draftKey, input, attachments])
+
+  // 失败回填：恢复原文（不覆盖用户新输入）并给出一行提示。
+  useEffect(() => {
+    const failed = queueItems.filter(
+      (item) => item.status === 'failed' && !handledQueueFailures.current.has(item.id),
+    )
+    if (failed.length === 0) return
+    for (const item of failed) handledQueueFailures.current.add(item.id)
+    const latest = failed[failed.length - 1]
+    if (pendingSubmitText.current === latest.text) pendingSubmitText.current = null
+    setInput((prev) => (prev.trim() === '' ? latest.text : prev))
+    toast('未发出，已放回输入框')
+  }, [queueItems])
+
+  // 被聊天流吸走：气泡渲染的同时播放退场动画，动画结束再移除条目。
+  useEffect(() => {
+    const consumed = queueItems.filter(
+      (item) => item.status === 'consumed' && !consumeTimers.current.has(item.id),
+    )
+    if (consumed.length === 0) return
+    for (const item of consumed) {
+      setLeavingQueueIds((prev) => new Set(prev).add(item.id))
+      const timer = setTimeout(() => {
+        consumeTimers.current.delete(item.id)
+        runtime.dismissQueueEntry(item.id)
+        setLeavingQueueIds((prev) => {
+          const next = new Set(prev)
+          next.delete(item.id)
+          return next
+        })
+      }, 280)
+      consumeTimers.current.set(item.id, timer)
+    }
+  }, [queueItems, runtime])
+
+  useEffect(
+    () => () => {
+      for (const timer of consumeTimers.current.values()) clearTimeout(timer)
+      consumeTimers.current.clear()
+    },
+    [],
+  )
+
+  // 首次出现状态栏时解释两种模式，三秒后自动消失，看过不再弹。
+  useEffect(() => {
+    if (!queueGuide) return
+    const timer = setTimeout(() => {
+      setQueueGuide(false)
+      try {
+        localStorage.setItem(QUEUE_GUIDE_KEY, '1')
+      } catch {
+        // Ignore.
+      }
+    }, 3000)
+    return () => clearTimeout(timer)
+  }, [queueGuide])
 
   const openConversation = useCallback(
     async (conv: ChatConversation): Promise<boolean> => {
@@ -959,16 +1084,34 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     )
   }, [input, submitPrompt])
 
-  /** Enqueue guidance while a run is active; the agent injects it at the next boundary. */
+  /**
+   * 流式回复中提交的补充消息：
+   * - steer：pi 在本批工具全部返回后、下一轮请求前注入（改道）；
+   * - followUp：等本轮彻底结束后由运行时开新一轮（接续）。
+   * The input clears optimistically while the draft layer keeps the text until
+   * the runtime confirms delivery; a failed entry restores it.
+   */
   const queueMessage = useCallback(() => {
     const text = input.trim()
     if (!streaming || text === '') return
     stickToBottom.current = true
+    pendingSubmitText.current = text
+    setInput('')
+    vibrate()
     if (queueMode === 'steer') runtime.steer(text)
     else void runtime.followUp(text)
-    setInput('')
-    toast(queueMode === 'steer' ? '已追加，当前回复结束后生效' : '已排队，本轮结束后执行')
   }, [input, queueMode, runtime, streaming])
+
+  /** Remember the chosen mode locally; the first run defaults to steer. */
+  const chooseQueueMode = useCallback((mode: QueueEntryMode) => {
+    setQueueMode(mode)
+    setModeMenuOpen(false)
+    try {
+      localStorage.setItem(QUEUE_MODE_KEY, mode)
+    } catch {
+      // Storage unavailable: the choice only lives for this session.
+    }
+  }, [])
 
   /**
    * Regenerate the reply to the user turn that produced `messageId`:
@@ -1596,6 +1739,21 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
       )}
 
       <div className={`chat-composer ${expanded ? 'expanded' : ''}`}>
+        <QueueStatusBar
+          items={queueItems}
+          stepCount={stepCount}
+          expanded={queueExpanded}
+          leavingIds={leavingQueueIds}
+          onToggle={() => setQueueExpanded((open) => !open)}
+          onRemove={(id) => void runtime.removeQueueEntry(id)}
+          onRetry={(id) => runtime.retryQueueEntry(id)}
+          onMove={(id, targetIndex) => runtime.moveQueueEntry(id, targetIndex)}
+        />
+        {queueGuide && (
+          <div className="chat-queue-guide" role="note">
+            插话＝立刻改道，排队＝忙完再说
+          </div>
+        )}
         {interrupted && !streaming && (
           <button type="button" className="chat-resume" onClick={resumeRun}>
             上次回答中断
@@ -1660,32 +1818,37 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
               </button>
             )}
             {streaming && (
-              <button
-                type="button"
-                className="chat-queue-mode"
-                title="切换追加方式：追加立即注入，排队在本轮结束后执行"
-                onClick={() => setQueueMode((prev) => (prev === 'steer' ? 'followUp' : 'steer'))}
-              >
-                {queueMode === 'steer' ? '追加' : '排队'}
-                {queuedCount > 0 ? ` ${queuedCount}` : ''}
-              </button>
-            )}
-            {streaming ? (
               <>
-                <button
-                  type="button"
-                  className="chat-send"
-                  aria-label={queueMode === 'steer' ? '追加指令' : '排队指令'}
-                  disabled={input.trim() === ''}
-                  onClick={() => void queueMessage()}
-                >
-                  <IconSend size={19} />
-                </button>
+                {/* Split control: the label sends in the current mode, the
+                    caret opens the mode picker. Idle runs show a plain send
+                    button instead, so the caret disappears entirely. */}
+                <div className={`chat-send-split ${input.trim() === '' ? 'disabled' : ''}`}>
+                  <button
+                    type="button"
+                    className="chat-send-mode"
+                    aria-label={queueMode === 'steer' ? '插话' : '排队'}
+                    disabled={input.trim() === ''}
+                    onClick={() => void queueMessage()}
+                  >
+                    {queueMode === 'steer' ? '插话' : '排队'}
+                  </button>
+                  <button
+                    type="button"
+                    className="chat-send-caret"
+                    aria-label="切换插话或排队"
+                    aria-haspopup="listbox"
+                    aria-expanded={modeMenuOpen}
+                    onClick={() => setModeMenuOpen((open) => !open)}
+                  >
+                    ▾
+                  </button>
+                </div>
                 <button type="button" className="chat-send stop" aria-label="停止" onClick={stop}>
                   <IconStop size={19} />
                 </button>
               </>
-            ) : (
+            )}
+            {!streaming && (
               <button
                 type="button"
                 className="chat-send"
@@ -1697,6 +1860,32 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
               </button>
             )}
           </div>
+          {modeMenuOpen && streaming && (
+            <>
+              <div className="popover-backdrop" onClick={() => setModeMenuOpen(false)} />
+              <div className="chat-queue-menu" role="listbox" aria-label="发送方式">
+                <div className="chat-queue-menu-title">发送方式</div>
+                {QUEUE_MODES.map((option) => (
+                  <button
+                    key={option.mode}
+                    type="button"
+                    role="option"
+                    aria-selected={queueMode === option.mode}
+                    className={`chat-queue-option ${queueMode === option.mode ? 'active' : ''}`}
+                    onClick={() => chooseQueueMode(option.mode)}
+                  >
+                    <span className="chat-queue-option-row">
+                      <span>{option.label}</span>
+                      {queueMode === option.mode && (
+                        <span className="chat-queue-option-check">✓</span>
+                      )}
+                    </span>
+                    <span className="chat-queue-option-note">{option.note}</span>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
           <button
             type="button"
             className={`chat-expand ${expanded ? 'active' : ''}`}

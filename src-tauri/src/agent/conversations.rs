@@ -486,6 +486,33 @@ pub fn truncate_from(
     delete_messages(vfs, conversation_id, message_id, true)
 }
 
+/// Delete exactly one message row; withdrawing a queued follow-up must not
+/// touch rows submitted after it.
+pub fn delete_message(
+    vfs: &VirtualFs,
+    conversation_id: i64,
+    message_id: i64,
+) -> Result<usize, ToolError> {
+    let conn = vfs.conn();
+    ensure_exists(conn, conversation_id)?;
+    let at = now(conn)?;
+    let tx = conn.unchecked_transaction()?;
+    let removed = tx.execute(
+        "DELETE FROM messages WHERE conversation_id = ?1 AND id = ?2",
+        params![conversation_id, message_id],
+    )?;
+    tx.execute(
+        "UPDATE conversations
+         SET updated_at = ?1,
+             last_message_at = (SELECT MAX(created_at) FROM messages
+                                WHERE conversation_id = ?2)
+         WHERE id = ?2",
+        params![at, conversation_id],
+    )?;
+    tx.commit()?;
+    Ok(removed)
+}
+
 fn delete_messages(
     vfs: &VirtualFs,
     conversation_id: i64,

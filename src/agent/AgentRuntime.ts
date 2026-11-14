@@ -29,6 +29,7 @@ import {
   nextItemId,
   projectHistory,
   reduceEvent,
+  userText,
   type Bubble,
   type ChatView,
   type Item,
@@ -36,6 +37,32 @@ import {
 } from './chatView'
 
 export type RuntimeStatus = 'idle' | 'running' | 'cancelling'
+
+/**
+ * One composer submission that has not reached the transcript yet.
+ *
+ * `steer` is injected by pi after the current tool batch, before the next
+ * request; `followUp` waits in the run ledger until the whole loop ends.
+ */
+export type QueueEntryMode = 'steer' | 'followUp'
+
+/**
+ * `pending`  = still waiting (deletable),
+ * `delivered` = handed to the agent/ledger, waiting to be consumed,
+ * `consumed` = the bubble is being rendered; the bar plays its exit animation,
+ * `failed`   = rollback the composer text and offer a retry.
+ */
+export type QueueEntryStatus = 'pending' | 'delivered' | 'consumed' | 'failed'
+
+export interface QueueEntry {
+  id: string
+  mode: QueueEntryMode
+  text: string
+  status: QueueEntryStatus
+  /** Ledger run id for a follow-up; retry/withdraw target. */
+  runId?: number
+  error?: string
+}
 
 export interface PromptInput {
   text: string
@@ -50,6 +77,8 @@ export interface AgentRuntimeDeps {
   truncate(conversationId: number, messageId: number): Promise<void>
   /** Delete `messageId` itself and everything newer (edit rewrites that turn). */
   truncateFrom(conversationId: number, messageId: number): Promise<void>
+  /** Delete exactly one row; withdrawing a queued follow-up must not touch later rows. */
+  deleteMessage(conversationId: number, messageId: number): Promise<void>
   loadSkills(): Promise<SkillSummary[]>
   loadMcpTools(): Promise<McpToolInfo[]>
   /** Bytes of one image asset, for replaying and sending user attachments. */
@@ -88,6 +117,10 @@ export interface RuntimeSnapshot {
   /** Pending runs read from the ledger (survives page switches). */
   queued: number
   items: Item[]
+  /** Composer submissions that have not reached the transcript yet. */
+  queueItems: QueueEntry[]
+  /** Tool calls started in the current run; drives the steer ETA copy. */
+  stepCount: number
   /** Executing run, if any; re-entry can render its status. */
   run: AgentRun | null
   /** Last interrupted run, for the "continue" banner. */
@@ -122,6 +155,15 @@ function assistantIndexes(records: ChatMessageRecord[]): number[] {
   return indexes
 }
 
+/** Short failure copy for the queue bar; the row itself stays actionable. */
+function queueErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message.trim() !== '') return error.message
+  return '未发出，请重试'
+}
+
+/** Confirmation deadline for the optimistic queue entry. */
+const QUEUE_CONFIRM_TIMEOUT_MS = 3000
+
 export class AgentRuntime {
   private readonly deps: AgentRuntimeDeps
   private readonly streamFn?: StreamFn
@@ -154,7 +196,14 @@ export class AgentRuntime {
   private cancelRequested = false
   private pumping = false
   /** Steering texts already written; their pi user events must not duplicate. */
-  private steering: { text: string; runId: number | null }[] = []
+  private steering: { entryId: string; text: string; runId: number | null; consumed: boolean }[] = []
+  /** Optimistic composer queue surfaced by the status bar. */
+  private queueItems: QueueEntry[] = []
+  private queueSeq = 0
+  /** Entries the user withdrew while their submission was still in flight. */
+  private cancelledQueue = new Set<string>()
+  /** Confirmation deadlines, so a stuck write can never leave a gray dot forever. */
+  private queueTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
   constructor(options: AgentRuntimeOptions) {
     this.deps = options.deps
@@ -171,19 +220,37 @@ export class AgentRuntime {
     this.profile = profile
     this.resetState()
 
-    const records = await this.deps.loadMessages(conversation.id)
-    this.view = createView(projectHistory(records))
     // Restore the ledger view: queued work and the interrupted banner survive
     // page switches because they are read from SQLite, not memory.
-    const runState = await this.deps.loadRunState(conversation.id).catch(
-      () => ({ active: null, latest: null, queued: [] }) as AgentRunState,
-    )
+    const [records, runState] = await Promise.all([
+      this.deps.loadMessages(conversation.id),
+      this.deps.loadRunState(conversation.id).catch(
+        () => ({ active: null, latest: null, queued: [] }) as AgentRunState,
+      ),
+    ])
     this.currentRun = runState.active
     this.queue = runState.queued
     this.interrupted = runState.latest?.status === 'interrupted' ? runState.latest : null
+    // A queued follow-up is visible in the status bar, not in the transcript.
+    // Its row exists already (the queue is the database), so hide it from both
+    // the projected items and the replayed agent history until it starts.
+    const queuedMessageIds = new Set(
+      runState.queued
+        .map((item) => item.userMessage?.id)
+        .filter((id): id is number => typeof id === 'number'),
+    )
+    const history = records.filter((record) => !queuedMessageIds.has(record.id))
+    this.view = createView(projectHistory(history))
+    this.queueItems = runState.queued.map((item) => ({
+      id: `restored-${item.run.runId}`,
+      mode: 'followUp',
+      text: item.userMessage?.content ?? '',
+      status: 'pending',
+      runId: item.run.runId,
+    }))
 
     if (profile) {
-      await this.attachAgent(profile, records)
+      await this.attachAgent(profile, history)
     }
     this.emit()
   }
@@ -217,6 +284,10 @@ export class AgentRuntime {
     this.limit = null
     this.cancelRequested = false
     this.steering = []
+    this.queueItems = []
+    this.cancelledQueue.clear()
+    for (const timer of this.queueTimers.values()) clearTimeout(timer)
+    this.queueTimers.clear()
   }
 
   private async attachAgent(
@@ -292,42 +363,100 @@ export class AgentRuntime {
     await this.runTurn(text, imageAssetIds)
   }
 
-  /** Inject guidance at the next turn boundary, persisted with its run marker. */
+  /**
+   * 插话（steer）：pi 只会在**本批工具调用全部返回后、下一轮请求发出前**
+   * 通过 `getSteeringMessages` 抽取一次，所以它用来临时改道，而不是排队。
+   * The composer adds an optimistic status-bar entry; it is confirmed only
+   * after the guidance row is written, then injected into pi's steering queue.
+   */
   steer(text: string): void {
     const message = text.trim()
+    const entry = this.pushQueueEntry('steer', message)
     const conversation = this.conversation
-    if (!message || !conversation) return
-    if (!this.agent) return
     const runId = this.currentRun?.runId ?? null
-    // Record the text so its pi user event does not persist a second row.
-    this.steering.push({ text: message, runId })
-    this.enqueueWrite(conversation.id, [
-      { role: 'user', content: message, runId, steerOfRun: runId },
-    ])
-    this.agent.steer({ role: 'user', content: message, timestamp: Date.now() } as AgentMessage)
-    this.emit()
-  }
-
-  /** Queue a run; it starts when the current one reaches a terminal state. */
-  async followUp(text: string): Promise<void> {
-    const message = text.trim()
-    const conversation = this.conversation
-    if (!message || !conversation) return
-    const started = await this.startRun(conversation, 'prompt', {
-      role: 'user',
-      content: message,
-    })
-    if (started.run.status !== 'running') {
-      this.queue.push({ run: started.run, userMessage: started.message })
-      this.addUserItem(started, message)
-      this.emit()
+    const agent = this.agent
+    if (message === '') {
+      this.failQueueEntry(entry.id, '内容为空')
       return
     }
-    // No executor was active, so the queued message starts immediately.
-    this.beginRun(started)
-    this.addUserItem(started, message)
-    this.emit()
-    await this.runTurn(message)
+    if (!conversation || !agent || runId === null || this.status === 'idle') {
+      this.failQueueEntry(entry.id, '当前没有进行中的回复')
+      return
+    }
+    // Record the text first so its pi user event does not persist a second row.
+    const steering = { entryId: entry.id, text: message, runId, consumed: false }
+    this.steering.push(steering)
+    this.enqueueWriteTracked(conversation.id, [
+      { role: 'user', content: message, runId, steerOfRun: runId },
+    ]).then(
+      () => {
+        // Withdrawn, timed out, or the run changed while the row was written.
+        const current = this.queueItems.find((item) => item.id === entry.id)
+        if (this.cancelledQueue.has(entry.id) || !current || current.status === 'failed') {
+          this.steering = this.steering.filter((item) => item !== steering)
+          return
+        }
+        if (this.agent !== agent || this.currentRun?.runId !== runId) {
+          this.steering = this.steering.filter((item) => item !== steering)
+          this.failQueueEntry(entry.id, '回复已结束，插话未生效')
+          return
+        }
+        agent.steer({ role: 'user', content: message, timestamp: Date.now() } as AgentMessage)
+        this.updateQueueEntry(entry.id, { status: 'delivered' })
+      },
+      (error) => {
+        this.steering = this.steering.filter((item) => item !== steering)
+        this.failQueueEntry(entry.id, queueErrorMessage(error))
+      },
+    )
+  }
+
+  /**
+   * 排队（followUp）：整个 agent 循环自然结束后，运行时再开一条**新的 run**
+   * （不是插进当前循环），因此文本先落进运行账本，等 `pumpQueue` 启动时才渲染。
+   */
+  async followUp(text: string): Promise<void> {
+    const message = text.trim()
+    const entry = this.pushQueueEntry('followUp', message)
+    const conversation = this.conversation
+    if (message === '') {
+      this.failQueueEntry(entry.id, '内容为空')
+      return
+    }
+    if (!conversation) {
+      this.failQueueEntry(entry.id, '会话尚未就绪')
+      return
+    }
+    try {
+      const started = await this.startRun(conversation, 'prompt', {
+        role: 'user',
+        content: message,
+      })
+      // Withdrawn or timed out while the ledger insert was in flight.
+      const current = this.queueItems.find((item) => item.id === entry.id)
+      if (this.cancelledQueue.has(entry.id) || !current || current.status === 'failed') {
+        this.cancelledQueue.delete(entry.id)
+        await this.discardRun(conversation.id, started)
+        return
+      }
+      this.updateQueueEntry(entry.id, { runId: started.run.runId })
+      if (started.run.status !== 'running') {
+        // An executor owns the conversation; this run waits in the ledger and
+        // stays in the status bar instead of the transcript.
+        this.queue.push({ run: started.run, userMessage: started.message })
+        this.emit()
+        return
+      }
+      // No executor was active, so this message starts a fresh run now.
+      this.beginRun(started)
+      this.addUserItem(started, message)
+      this.updateQueueEntry(entry.id, { status: 'delivered' })
+      this.consumeQueueEntry(entry.id)
+      this.emit()
+      await this.runTurn(message)
+    } catch (error) {
+      this.failQueueEntry(entry.id, queueErrorMessage(error))
+    }
   }
 
   private startRun(
@@ -359,7 +488,11 @@ export class AgentRuntime {
   }
 
   /** Append the optimistic user bubble; its row id comes from the ledger insert. */
-  private addUserItem(started: AgentRunStart, text: string, imageAssetIds: number[] = []): void {
+  private addUserItem(
+    started: { message: ChatMessageRecord | null },
+    text: string,
+    imageAssetIds: number[] = [],
+  ): void {
     const generated = started.message
       ? { view: this.view, id: `m-${started.message.id}` }
       : nextItemId(this.view, 'u')
@@ -375,6 +508,174 @@ export class AgentRuntime {
         },
       ],
     }
+  }
+
+  // ---------------------------------------------------------------- queue bar
+
+  private pushQueueEntry(mode: QueueEntryMode, text: string): QueueEntry {
+    const entry: QueueEntry = { id: `q-${(this.queueSeq += 1)}`, mode, text, status: 'pending' }
+    this.queueItems = [...this.queueItems, entry]
+    this.queueTimers.set(
+      entry.id,
+      setTimeout(() => {
+        this.queueTimers.delete(entry.id)
+        const current = this.queueItems.find((item) => item.id === entry.id)
+        if (!current || current.status !== 'pending') return
+        // A follow-up with a ledger row is confirmed even while it waits.
+        if (current.mode === 'followUp' && current.runId !== undefined) return
+        this.failQueueEntry(entry.id, '投递超时')
+      }, QUEUE_CONFIRM_TIMEOUT_MS),
+    )
+    this.emit()
+    return entry
+  }
+
+  private updateQueueEntry(id: string, patch: Partial<QueueEntry>): void {
+    let changed = false
+    this.queueItems = this.queueItems.map((item) => {
+      if (item.id !== id) return item
+      changed = true
+      return { ...item, ...patch }
+    })
+    if (changed && patch.status && patch.status !== 'pending') {
+      const timer = this.queueTimers.get(id)
+      if (timer) {
+        clearTimeout(timer)
+        this.queueTimers.delete(id)
+      }
+    }
+    if (changed) this.emit()
+  }
+
+  private failQueueEntry(id: string, error: string): void {
+    this.updateQueueEntry(id, { status: 'failed', error })
+  }
+
+  /** The bubble is rendered: the bar plays its exit animation, then dismisses. */
+  private consumeQueueEntry(id: string): void {
+    this.updateQueueEntry(id, { status: 'consumed' })
+  }
+
+  /** Remove one item after its exit animation (or after an explicit delete). */
+  dismissQueueEntry(id: string): void {
+    if (!this.queueItems.some((item) => item.id === id)) return
+    const timer = this.queueTimers.get(id)
+    if (timer) {
+      clearTimeout(timer)
+      this.queueTimers.delete(id)
+    }
+    this.queueItems = this.queueItems.filter((item) => item.id !== id)
+    this.cancelledQueue.delete(id)
+    this.emit()
+  }
+
+  /** Withdraw a queued item; delivered steering can no longer be recalled. */
+  async removeQueueEntry(id: string): Promise<void> {
+    const entry = this.queueItems.find((item) => item.id === id)
+    if (!entry || entry.status === 'delivered' || entry.status === 'consumed') return
+    if (entry.mode === 'steer') {
+      // Cancel the write/injection continuation still in flight. Order matters:
+      // dismissing clears stale markers, so mark cancellation afterwards.
+      this.steering = this.steering.filter((item) => item.entryId !== id)
+      this.dismissQueueEntry(id)
+      this.cancelledQueue.add(id)
+      return
+    }
+    const conversationId = this.conversation?.id
+    this.dismissQueueEntry(id)
+    if (entry.runId === undefined) {
+      // The ledger insert has not landed yet; the continuation discards it.
+      this.cancelledQueue.add(id)
+      return
+    }
+    const index = this.queue.findIndex((item) => item.run.runId === entry.runId)
+    if (index >= 0) {
+      const [queued] = this.queue.splice(index, 1)
+      this.emit()
+      if (conversationId && queued.userMessage) {
+        await this.deps.deleteMessage(conversationId, queued.userMessage.id).catch((error) => {
+          console.error('撤回排队消息失败', error)
+        })
+      }
+    }
+    this.enqueueRunWrite(() => this.finishRunSafely(entry.runId!))
+    await this.drainRunWrites()
+  }
+
+  /** Re-submit a failed entry in its original mode. */
+  retryQueueEntry(id: string): void {
+    const entry = this.queueItems.find((item) => item.id === id)
+    if (!entry || entry.status !== 'failed') return
+    this.dismissQueueEntry(id)
+    if (entry.mode === 'steer') this.steer(entry.text)
+    else void this.followUp(entry.text)
+  }
+
+  /** Long-press drag reorder; only follow-ups are orderable (steer is recency). */
+  moveQueueEntry(id: string, targetIndex: number): void {
+    const followUps = this.queueItems.filter(
+      (item) => item.mode === 'followUp' && item.status !== 'consumed',
+    )
+    const from = followUps.findIndex((item) => item.id === id)
+    if (from < 0) return
+    const to = Math.max(0, Math.min(followUps.length - 1, targetIndex))
+    if (to === from) return
+    const reordered = [...followUps]
+    const [moved] = reordered.splice(from, 1)
+    reordered.splice(to, 0, moved)
+    // Rebuild the visible list; non-follow-up entries keep their positions.
+    let cursor = 0
+    this.queueItems = this.queueItems.map((item) => {
+      if (item.mode !== 'followUp' || item.status === 'consumed') return item
+      const next = reordered[cursor]
+      cursor += 1
+      return next
+    })
+    // Mirror the order onto the in-memory ledger queue; the DB order stays
+    // run-id based, so a restart falls back to the original submission order.
+    const byRun = new Map(this.queue.map((item) => [item.run.runId, item]))
+    const ordered = reordered
+      .map((item) => (item.runId === undefined ? undefined : byRun.get(item.runId)))
+      .filter((item): item is QueuedRun => item !== undefined)
+    const rest = this.queue.filter(
+      (item) => !ordered.some((queued) => queued.run.runId === item.run.runId),
+    )
+    this.queue = [...ordered, ...rest]
+    this.emit()
+  }
+
+  private clearQueueEntries(): void {
+    if (this.queueItems.length === 0) return
+    for (const item of this.queueItems) this.cancelledQueue.add(item.id)
+    this.queueItems = []
+    this.steering = []
+    for (const timer of this.queueTimers.values()) clearTimeout(timer)
+    this.queueTimers.clear()
+    this.emit()
+  }
+
+  /** Close a not-yet-started ledger run and drop its withdrawn user row. */
+  private async discardRun(conversationId: number, started: AgentRunStart): Promise<void> {
+    if (started.message) {
+      await this.deps.deleteMessage(conversationId, started.message.id).catch((error) => {
+        console.error('删除撤回消息失败', error)
+      })
+    }
+    await this.finishRunSafely(started.run.runId)
+  }
+
+  private finishRunSafely(runId: number): Promise<unknown> {
+    return this.deps
+      .finishRun(runId, 'cancelled', {
+        partial: null,
+        errorCode: 'cancelled',
+        stepCount: 0,
+        writeCount: 0,
+        lastSeq: this.revision,
+      })
+      .catch((error) => {
+        console.error('关闭排队运行失败', error)
+      })
   }
 
   /** Read attachment bytes; a missing file fails the run with a readable error. */
@@ -445,6 +746,7 @@ export class AgentRuntime {
     await this.drain()
     await this.settleRun('cancelled')
     await this.cancelQueued()
+    this.clearQueueEntries()
     await this.drainRunWrites()
     this.status = 'idle'
     this.emit()
@@ -715,6 +1017,8 @@ export class AgentRuntime {
       status: this.status,
       queued: this.queue.length,
       items: this.view.items,
+      queueItems: this.queueItems,
+      stepCount: this.runSteps,
       run: this.currentRun,
       interrupted: this.interrupted,
       error: this.lastError,
@@ -736,6 +1040,11 @@ export class AgentRuntime {
   // ---------------------------------------------------------------- events
 
   private onEvent(event: AgentEvent): void {
+    // A steering row injected by pi is now rendered as a bubble: retire its
+    // status-bar entry exactly when the transcript shows it.
+    if (event.type === 'message_start' && event.message.role === 'user') {
+      this.consumeRenderedSteer(userText(event.message))
+    }
     const { view, effects } = reduceEvent(this.view, event)
     this.view = view
     for (const effect of effects) this.applyEffect(effect)
@@ -750,6 +1059,23 @@ export class AgentRuntime {
       this.cancelRequested = false
       this.status = 'idle'
       this.lastError = cancelled ? null : this.pickError()
+      // A steer that never reached a bubble expired with the run; surface it as
+      // failed so the composer text can come back instead of staying ghosted.
+      // Leftovers in pi's steering queue are dropped so they cannot leak into
+      // the next run. A user-requested stop drops the whole queue instead.
+      if (!cancelled) {
+        const expired = this.queueItems.filter(
+          (item) => item.mode === 'steer' && item.status === 'delivered',
+        )
+        if (expired.length > 0) {
+          this.agent?.clearSteeringQueue()
+          const ids = new Set(expired.map((item) => item.id))
+          this.steering = this.steering.filter((item) => !ids.has(item.entryId))
+          for (const item of expired) {
+            this.failQueueEntry(item.id, '回复已结束，插话未生效')
+          }
+        }
+      }
       this.emit()
       // Settle the ledger row, then start the next queued run if any.
       void this.settleRun(
@@ -788,6 +1114,14 @@ export class AgentRuntime {
     }
     // Token deltas only fill the buffer; one render per frame.
     this.scheduleFlush()
+  }
+
+  /** A steering row surfaced in the transcript; the bar can now retire it. */
+  private consumeRenderedSteer(text: string): void {
+    const match = this.steering.find((item) => !item.consumed && item.text === text)
+    if (!match) return
+    match.consumed = true
+    this.consumeQueueEntry(match.entryId)
   }
 
   /** Read the failure code the reducer attached to the last settled bubble. */
@@ -870,13 +1204,25 @@ export class AgentRuntime {
 
   /** Serialized writes: transcript order must match event order. */
   private enqueueWrite(conversationId: number, messages: NewChatMessage[]): void {
-    this.writing = this.writing.then(
+    void this.enqueueWriteTracked(conversationId, messages)
+  }
+
+  /**
+   * Same serialized chain, but the caller gets this batch's own settlement so
+   * the composer can confirm (or roll back) the optimistic queue entry.
+   */
+  private enqueueWriteTracked(
+    conversationId: number,
+    messages: NewChatMessage[],
+  ): Promise<void> {
+    const write = this.writing.then(
       () => this.deps.append(conversationId, messages).then(() => undefined),
       () => this.deps.append(conversationId, messages).then(() => undefined),
     )
-    this.writing = this.writing.catch((error) => {
+    this.writing = write.catch((error) => {
       console.error('保存 Agent 消息失败', error)
     })
+    return write
   }
 
   /** Resolve once every queued write has settled. */
@@ -953,7 +1299,15 @@ export class AgentRuntime {
     const queued = [...this.queue]
     this.queue = []
     this.emit()
+    const conversationId = this.conversation?.id
     for (const item of queued) {
+      // Withdraw the queued turn entirely: neither its run nor its user row
+      // should survive a stop.
+      if (conversationId && item.userMessage) {
+        await this.deps.deleteMessage(conversationId, item.userMessage.id).catch((error) => {
+          console.error('撤回排队消息失败', error)
+        })
+      }
       this.enqueueRunWrite(() =>
         this.deps.finishRun(item.run.runId, 'cancelled', {
           partial: null,
@@ -975,6 +1329,8 @@ export class AgentRuntime {
     const imageAssetIds = next.userMessage?.imageAssetIds ?? []
     if (text.trim() === '' && imageAssetIds.length === 0) {
       this.queue.shift()
+      const empty = this.queueItems.find((item) => item.runId === next.run.runId)
+      if (empty) this.dismissQueueEntry(empty.id)
       this.emit()
       return
     }
@@ -990,6 +1346,16 @@ export class AgentRuntime {
       this.interrupted = null
       this.view = beginPrompt(this.view)
       this.status = 'running'
+      // The queued row becomes a bubble now; its status-bar item is retired in
+      // the same frame so the two never coexist visually.
+      this.addUserItem({ message: next.userMessage }, text, imageAssetIds)
+      const entry = this.queueItems.find(
+        (item) => item.runId === run.runId && item.status !== 'consumed',
+      )
+      if (entry) {
+        this.updateQueueEntry(entry.id, { status: 'delivered' })
+        this.consumeQueueEntry(entry.id)
+      }
       this.emit()
       await this.runTurn(text, imageAssetIds)
     } finally {

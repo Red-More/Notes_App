@@ -580,6 +580,9 @@ export const chatApi = {
   /** Remove `messageId` and everything newer; editing rewrites that user turn. */
   truncateFrom: (params: { conversationId: number; messageId: number }) =>
     invoke<number>('chat_truncate_from', params),
+  /** Remove exactly one row; withdrawing a queued follow-up must not touch later rows. */
+  deleteMessage: (params: { conversationId: number; messageId: number }) =>
+    invoke<number>('chat_delete_message', params),
   /** Write the run row and its user message in one transaction. */
   runStart: (params: {
     conversationId: number | null
