@@ -19,7 +19,7 @@ vi.mock('../api', () => ({
   skillApi: { read: vi.fn() },
 }))
 
-import { createTools } from './tools'
+import { createTools, TOOL_DESCRIPTORS } from './tools'
 
 const fileResult = {
   kind: 'file' as const,
@@ -47,6 +47,14 @@ beforeEach(() => {
   mocks.fsRead.mockResolvedValue(fileResult)
   mocks.fsGlob.mockResolvedValue([])
   mocks.fsGrep.mockResolvedValue({ hits: [], total: 0, fallback: false })
+})
+
+describe('tool registry descriptors', () => {
+  it('uses English identifiers instead of Chinese labels', () => {
+    for (const item of createTools()) expect(item.label).toBe(item.name)
+    expect(TOOL_DESCRIPTORS.fs_read).toBe('fs_read')
+    expect(TOOL_DESCRIPTORS.load_skill).toBe('load_skill')
+  })
 })
 
 describe('agent tools cannot forge their principal', () => {

@@ -27,6 +27,19 @@ import type {
 
 const AGENTS_PREFIX = '/life/.agents'
 
+/**
+ * Canonical English descriptors for the model-visible registry.
+ * Chinese labels are deprecated; the identifier is the single display name.
+ */
+export const TOOL_DESCRIPTORS = {
+  fs_read: 'fs_read',
+  fs_write: 'fs_write',
+  fs_edit: 'fs_edit',
+  fs_glob: 'fs_glob',
+  fs_grep: 'fs_grep',
+  load_skill: 'load_skill',
+} as const
+
 /** `.agents` 只读且不对模型开放：技能正文由 loader 按需注入（M3）。 */
 function assertReadable(path: string): void {
   if (path === AGENTS_PREFIX || path.startsWith(`${AGENTS_PREFIX}/`)) {
@@ -144,7 +157,7 @@ export function createTools(
 ): AgentTool[] {
   const read: AgentTool = {
     name: 'fs_read',
-    label: '读取文档',
+    label: TOOL_DESCRIPTORS.fs_read,
     description:
       '读取一个文件，或列出目录。文件返回正文、行数与 rev。默认只能访问自己的工作目录 /life/agent；其它目录需用户授权。修改前先 read 拿到最新 rev。',
     parameters: Type.Object({
@@ -191,7 +204,7 @@ export function createTools(
 
   const write: AgentTool = {
     name: 'fs_write',
-    label: '新建文档',
+    label: TOOL_DESCRIPTORS.fs_write,
     description:
       '新建一个 Markdown 文档。只能新建，不能覆盖：目标已存在会返回 alreadyExists。默认只能写自己的工作目录 /life/agent；其它目录需用户授权。追加内容请先 read 文件尾部，再用 fs_edit 锚定追加。',
     parameters: Type.Object({
@@ -235,7 +248,7 @@ export function createTools(
 
   const edit: AgentTool = {
     name: 'fs_edit',
-    label: '编辑文档',
+    label: TOOL_DESCRIPTORS.fs_edit,
     description:
       '按字符串替换修改已有文档，追加新 rev。old_string 必须唯一命中；追加内容时把它设为文件末尾附近的一段原文。带上 expectRev 可在版本冲突时被拒绝。默认只能改自己的工作目录 /life/agent；其它目录需用户授权。',
     parameters: Type.Object({
@@ -289,7 +302,7 @@ export function createTools(
 
   const glob: AgentTool = {
     name: 'fs_glob',
-    label: '查找路径',
+    label: TOOL_DESCRIPTORS.fs_glob,
     description: '按路径模式查找文件或目录，最多 200 条。默认只能看到自己的工作目录 /life/agent；其它目录需用户授权。',
     parameters: Type.Object({
       pattern: Type.String({
@@ -325,7 +338,7 @@ export function createTools(
 
   const grep: AgentTool = {
     name: 'fs_grep',
-    label: '内容搜索',
+    label: TOOL_DESCRIPTORS.fs_grep,
     description: '按内容搜索，返回 path:line 与上下文片段。默认最多 50 条；默认只能搜到已授权目录（/life/agent），其它目录需用户授权。',
     parameters: Type.Object({
       pattern: Type.String({ description: '要搜索的文字' }),
@@ -375,9 +388,9 @@ export function createTools(
 
   const loadSkill: AgentTool = {
     name: 'load_skill',
-    label: '加载技能',
+    label: TOOL_DESCRIPTORS.load_skill,
     description:
-      '按需读取一个已启用技能的完整指令。参数 name 使用技能索引中的 id 或名称；命中技能触发词后应先调用它，再按正文步骤执行。',
+      '按需读取一个已启用技能的完整指令。参数 name 使用已启用技能的 id 或名称；若系统提示词中没有技能索引，请依据用户明确给出的技能名称调用，再按正文步骤执行。',
     parameters: Type.Object({
       name: Type.String({ description: '技能索引中的 id 或名称，例如 contact-manager' }),
     }),

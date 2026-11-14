@@ -159,6 +159,63 @@ describe('history projection', () => {
     expect(items[2].kind === 'tool' && items[2].status).toBe('done')
   })
 
+  it('hydrates the assistant tool-call payload and merges its result row', () => {
+    const records: ChatMessageRecord[] = [
+      record({ id: 1, role: 'user', content: '改文件' }),
+      record({
+        id: 2,
+        role: 'assistant',
+        content: '',
+        toolCalls: JSON.stringify([
+          {
+            type: 'toolCall',
+            id: 'call_1',
+            name: 'fs_read',
+            arguments: { path: '/life/a.md' },
+          },
+        ]),
+      }),
+      record({
+        id: 3,
+        role: 'tool',
+        content: '读取完成',
+        toolCallId: 'call_1',
+        toolName: 'fs_read',
+        toolArgs: '{"path":"/life/a.md"}',
+        toolDurationMs: 30,
+      }),
+      record({ id: 4, role: 'assistant', content: '完成' }),
+    ]
+
+    const items = project({ records, events: [] })
+    expect(items.map((item) => item.kind)).toEqual(['user', 'tool', 'assistant'])
+    const card = items[1]
+    expect(card.kind === 'tool' && card.callId).toBe('call_1')
+    expect(card.kind === 'tool' && card.status).toBe('done')
+    expect(card.kind === 'tool' && card.args).toBe('{"path":"/life/a.md"}')
+    expect(card.kind === 'tool' && card.unfinished).toBe(false)
+  })
+
+  it('keeps an invocation visible when its result row is missing', () => {
+    const records: ChatMessageRecord[] = [
+      record({ id: 1, role: 'user', content: '查一下' }),
+      record({
+        id: 2,
+        role: 'assistant',
+        content: '',
+        toolCalls: JSON.stringify([
+          { type: 'toolCall', id: 'call_2', name: 'fs_glob', arguments: {} },
+        ]),
+      }),
+    ]
+
+    const items = project({ records, events: [] })
+    const card = items.find((item) => item.kind === 'tool')
+    expect(card?.kind === 'tool' && card.callId).toBe('call_2')
+    expect(card?.kind === 'tool' && card.status).toBe('running')
+    expect(card?.kind === 'tool' && card.unfinished).toBe(true)
+  })
+
   it('restores tool arguments and duration from persisted rows', () => {
     const records: ChatMessageRecord[] = [
       record({ id: 1, role: 'user', content: '改文件' }),

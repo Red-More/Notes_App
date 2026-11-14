@@ -218,6 +218,52 @@ pub(crate) fn insert_on(
     })
 }
 
+/// Bind one conversation to another model entry (in-place model switching).
+///
+/// `updated_at` is left untouched: it orders the sidebar by activity, and a
+/// model switch alone is not a transcript change.
+pub fn set_model(vfs: &VirtualFs, id: i64, provider: &str) -> Result<Conversation, ToolError> {
+    let conn = vfs.conn();
+    let entry = crate::agent::model_store::resolve(conn, provider)?;
+    let changed = conn.execute(
+        "UPDATE conversations SET provider = ?1, model = ?2 WHERE id = ?3",
+        params![entry.id, entry.model_id, id],
+    )?;
+    if changed == 0 {
+        return Err(ToolError::NotFound {
+            path: format!("conversation#{id}"),
+        });
+    }
+    conversation_row(conn, id)
+}
+
+/// Read one conversation row; `last_message_at` stays NULL for empty drafts.
+fn conversation_row(conn: &Connection, id: i64) -> Result<Conversation, ToolError> {
+    conn.query_row(
+        "SELECT c.id, c.title, c.provider, c.model, c.created_at, c.updated_at,
+                c.last_message_at,
+                (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id)
+         FROM conversations c WHERE c.id = ?1",
+        params![id],
+        |r| {
+            Ok(Conversation {
+                id: r.get(0)?,
+                title: r.get(1)?,
+                provider: r.get(2)?,
+                model: r.get(3)?,
+                created_at: r.get(4)?,
+                updated_at: r.get(5)?,
+                last_message_at: r.get(6)?,
+                message_count: r.get(7)?,
+            })
+        },
+    )
+    .optional()?
+    .ok_or_else(|| ToolError::NotFound {
+        path: format!("conversation#{id}"),
+    })
+}
+
 pub fn rename(vfs: &VirtualFs, id: i64, title: String) -> Result<(), ToolError> {
     let conn = vfs.conn();
     // 与 create 保持一致：空标题回退为默认标题，避免产生空白会话行。

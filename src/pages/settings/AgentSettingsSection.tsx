@@ -1,10 +1,18 @@
-import { useEffect, useState } from 'react'
-import { chatApi } from '../../api'
-import type { AgentModelInfo, AgentSettings, LlmParams, ModelApiFormat } from '../../types'
+import { useEffect, useMemo, useState } from 'react'
+import { chatApi, skillApi } from '../../api'
+import type {
+  AgentModelInfo,
+  AgentSettings,
+  LlmParams,
+  ModelApiFormat,
+  SkillSummary,
+} from '../../types'
 import { toast } from '../../toast'
 import { friendlyError } from '../../utils'
 import { ConfirmDialog, Modal } from '../../components/ui'
 import ChipRow from '../../components/ChipRow'
+import { buildSkillsIndex } from '../../agent/skills'
+import { composeSystemPrompt, DEFAULT_SYSTEM_PROMPT, MAX_SYSTEM_PROMPT_BYTES } from '../../agent/prompt'
 
 const FORMAT_OPTIONS: Array<{ key: ModelApiFormat; label: string }> = [
   { key: 'openai-chat', label: 'OpenAI Chat Completions' },
@@ -70,6 +78,16 @@ const CACHE_OPTIONS: Array<{ key: NonNullable<LlmParams['cacheRetention']>; labe
 const INPUT_WINDOW_CHIPS = [128000, 256000, 512000, 1000000]
 const OUTPUT_WINDOW_CHIPS = [4000, 8000, 16000, 32768]
 
+/** UTF-8 byte counter; each render encodes the current draft texts. */
+const TEXT_ENCODER = new TextEncoder()
+
+/** Mirror the backend's Anthropic `/v1` strip so duplicate detection compares
+ * against the URL that is actually stored. */
+function storedBaseUrl(format: ModelApiFormat, baseUrl: string, fullUrl: boolean): string {
+  if (format !== 'anthropic-messages' || fullUrl) return baseUrl
+  return baseUrl.endsWith('/v1') ? baseUrl.slice(0, -3) : baseUrl
+}
+
 /** Tool rounds stay local: they limit the agent loop and are never sent as a
  * provider parameter. 500 matches the previous runtime ceiling. */
 const DEFAULT_TOOL_ROUNDS = 500
@@ -89,6 +107,9 @@ interface Draft {
   models: string[]
   modelsLoading: boolean
   modelsError: string
+  /** Create several entries from one API key / endpoint in a single submit. */
+  batchMode: boolean
+  selectedModelIds: string[]
 }
 
 function emptyDraft(): Draft {
@@ -107,6 +128,8 @@ function emptyDraft(): Draft {
     models: [],
     modelsLoading: false,
     modelsError: '',
+    batchMode: false,
+    selectedModelIds: [],
   }
 }
 
@@ -390,15 +413,39 @@ export default function AgentSettingsSection() {
   const [draft, setDraft] = useState<Draft | null>(null)
   const [busy, setBusy] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<AgentModelInfo | null>(null)
+  // Prompt blocks are edited separately so model refreshes never clobber edits.
+  const [systemPromptText, setSystemPromptText] = useState('')
+  const [rulesText, setRulesText] = useState('')
+  const [injectSkills, setInjectSkills] = useState(false)
+  const [skills, setSkills] = useState<SkillSummary[]>([])
+  const [promptBusy, setPromptBusy] = useState(false)
 
   const refresh = async () => setSettings(await chatApi.settings())
 
   useEffect(() => {
-    chatApi
-      .settings()
-      .then((value) => setSettings(value))
+    Promise.all([chatApi.settings(), skillApi.list().catch(() => [])])
+      .then(([value, list]) => {
+        setSettings(value)
+        setSystemPromptText(value.systemPrompt)
+        setRulesText(value.rules)
+        setInjectSkills(value.injectSkills)
+        setSkills(list)
+      })
       .catch((e) => console.error('读取模型列表失败', e))
   }, [])
+
+  const skillsIndex = useMemo(() => buildSkillsIndex(skills), [skills])
+  // This preview is produced by the same composer the runtime uses upstream.
+  const requestPrompt = useMemo(
+    () =>
+      composeSystemPrompt({
+        systemPrompt: systemPromptText,
+        rules: rulesText,
+        skillsIndex,
+        injectSkills,
+      }),
+    [systemPromptText, rulesText, skillsIndex, injectSkills],
+  )
 
   const patchDraft = (patch: Partial<Draft>) =>
     setDraft((current) => (current ? { ...current, ...patch } : current))
@@ -406,6 +453,20 @@ export default function AgentSettingsSection() {
     setDraft((current) =>
       current ? { ...current, params: { ...current.params, ...patch } } : current,
     )
+  const toggleSelectedModel = (model: string) =>
+    setDraft((current) => {
+      if (!current) return current
+      const selected = current.selectedModelIds.includes(model)
+        ? current.selectedModelIds.filter((item) => item !== model)
+        : [...current.selectedModelIds, model]
+      return { ...current, selectedModelIds: selected }
+    })
+  const toggleAllModels = () =>
+    setDraft((current) => {
+      if (!current) return current
+      const all = current.selectedModelIds.length === current.models.length
+      return { ...current, selectedModelIds: all ? [] : [...current.models] }
+    })
 
   const openCreate = () => setDraft(emptyDraft())
 
@@ -428,6 +489,8 @@ export default function AgentSettingsSection() {
         models: [],
         modelsLoading: false,
         modelsError: '',
+        batchMode: false,
+        selectedModelIds: [],
       })
     } catch (e) {
       toast(friendlyError(e))
@@ -472,6 +535,8 @@ export default function AgentSettingsSection() {
       patchDraft({
         models: list,
         modelId: draft.modelId.trim() || list[0] || '',
+        // Batch mode starts with everything selected; unchecking stays manual.
+        selectedModelIds: draft.batchMode ? list : [],
         modelsLoading: false,
       })
       toast(`已拉取 ${list.length} 个模型`)
@@ -513,11 +578,86 @@ export default function AgentSettingsSection() {
     }
   }
 
+  /** One API key / endpoint, many model entries: skip duplicates already bound. */
+  const saveBatch = async (params: LlmParams) => {
+    if (!draft) return
+    if (!draft.apiKey.trim()) {
+      toast('API Key 必填')
+      return
+    }
+    const selected = draft.selectedModelIds
+    if (selected.length === 0) {
+      toast('请至少勾选一个模型')
+      return
+    }
+    const baseUrl = draft.baseUrl.trim()
+    const storedUrl = storedBaseUrl(draft.format, baseUrl, draft.fullUrl)
+    const bound = new Set(
+      (settings?.models ?? [])
+        .filter(
+          (item) =>
+            item.format === draft.format &&
+            item.fullUrl === draft.fullUrl &&
+            storedBaseUrl(item.format, item.baseUrl, item.fullUrl) === storedUrl,
+        )
+        .map((item) => item.modelId),
+    )
+    const pending = selected.filter((modelId) => !bound.has(modelId))
+    if (pending.length === 0) {
+      toast('所选模型均已存在，无需重复添加')
+      return
+    }
+    setBusy(true)
+    let added = 0
+    const failures: string[] = []
+    try {
+      for (const modelId of pending) {
+        try {
+          const saved = await chatApi.saveModel({
+            format: draft.format,
+            baseUrl,
+            modelId,
+            fullUrl: draft.fullUrl,
+            apiKey: draft.apiKey.trim(),
+          })
+          await chatApi.paramsSet(saved.id, params)
+          added += 1
+        } catch (e) {
+          failures.push(`${modelId}：${friendlyError(e)}`)
+        }
+      }
+      await refresh()
+      if (failures.length === 0) {
+        setDraft(null)
+        toast(`已添加 ${added} 个模型`)
+      } else {
+        toast(`已添加 ${added} 个模型，${failures.length} 个失败：${failures[0]}`)
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const saveDraft = async () => {
     if (!draft) return
+    const extra = parseJsonObject(draft.extraText, 'extra')
+    if (extra === null) return
+    const params: LlmParams = {
+      ...draft.params,
+      toolRounds: draft.params.toolRounds ?? DEFAULT_TOOL_ROUNDS,
+      extra: Object.keys(extra).length > 0 ? extra : undefined,
+    }
+    if (!draft.baseUrl.trim()) {
+      toast('请填写请求地址')
+      return
+    }
+    if (draft.batchMode && !draft.id) {
+      await saveBatch(params)
+      return
+    }
     const modelId = draft.modelId.trim()
-    if (!draft.baseUrl.trim() || !modelId) {
-      toast('请填写请求地址与 Model ID')
+    if (!modelId) {
+      toast('请填写 Model ID')
       return
     }
     if (!draft.id && !draft.apiKey.trim()) {
@@ -528,13 +668,6 @@ export default function AgentSettingsSection() {
     if (draft.id && existing && !existing.configured && !draft.apiKey.trim()) {
       toast('该模型尚未保存 API Key，请填写')
       return
-    }
-    const extra = parseJsonObject(draft.extraText, 'extra')
-    if (extra === null) return
-    const params: LlmParams = {
-      ...draft.params,
-      toolRounds: draft.params.toolRounds ?? DEFAULT_TOOL_ROUNDS,
-      extra: Object.keys(extra).length > 0 ? extra : undefined,
     }
     setBusy(true)
     try {
@@ -555,6 +688,28 @@ export default function AgentSettingsSection() {
       toast(friendlyError(e))
     } finally {
       setBusy(false)
+    }
+  }
+
+  const savePrompt = async () => {
+    setPromptBusy(true)
+    try {
+      await chatApi.savePromptConfig({
+        systemPrompt: systemPromptText,
+        rules: rulesText,
+        injectSkills,
+      })
+      const next = await chatApi.settings()
+      setSettings(next)
+      // Reflect the normalized values exactly as they will be sent.
+      setSystemPromptText(next.systemPrompt)
+      setRulesText(next.rules)
+      setInjectSkills(next.injectSkills)
+      toast('Prompt 配置已保存')
+    } catch (e) {
+      toast(friendlyError(e))
+    } finally {
+      setPromptBusy(false)
     }
   }
 
@@ -604,6 +759,13 @@ export default function AgentSettingsSection() {
     }
   }
 
+  const systemPromptBytes = TEXT_ENCODER.encode(systemPromptText).length
+  const rulesBytes = TEXT_ENCODER.encode(rulesText).length
+  const requestBytes = TEXT_ENCODER.encode(requestPrompt).length
+  const promptChanged =
+    systemPromptText !== (settings?.systemPrompt ?? '') ||
+    rulesText !== (settings?.rules ?? '') ||
+    injectSkills !== (settings?.injectSkills ?? false)
   const editing = draft?.id !== '' && draft != null
   const matchedPreset = draft
     ? URL_PRESETS.find(
@@ -617,6 +779,89 @@ export default function AgentSettingsSection() {
       <p className="settings-note">
         模型列表（Model List）：系统不提供预置模型，所有模型均由你添加；添加前需填写 API Key。
       </p>
+
+      <div className="form-field">
+        <span className="form-label">System Prompt</span>
+        <textarea
+          className="form-input param-json"
+          rows={4}
+          value={systemPromptText}
+          placeholder={DEFAULT_SYSTEM_PROMPT}
+          onChange={(e) => setSystemPromptText(e.target.value)}
+        />
+        <div className="field-counter">
+          <p className="settings-note">
+            逐字作为 system 消息发送；留空恢复默认句子，不做任何隐式改写。
+          </p>
+          <span className="counter-text">{systemPromptBytes}/32768</span>
+        </div>
+      </div>
+
+      <div className="form-field">
+        <span className="form-label">Rules</span>
+        <textarea
+          className="form-input param-json"
+          rows={5}
+          value={rulesText}
+          placeholder="留空则请求不携带规则。"
+          onChange={(e) => setRulesText(e.target.value)}
+        />
+        <div className="field-counter">
+          <p className="settings-note">仅发送你填写的规则，不含任何系统预设。</p>
+          <span className="counter-text">{rulesBytes}/32768</span>
+        </div>
+      </div>
+
+      <div className="form-field">
+        <label className="settings-switch-row compact function-toggle">
+          <input
+            type="checkbox"
+            checked={injectSkills}
+            onChange={(e) => setInjectSkills(e.target.checked)}
+          />
+          <span className="settings-switch-desc">注入技能索引（仅启用技能）</span>
+        </label>
+        <div className="prompt-preview">{skillsIndex || '（暂无已启用技能）'}</div>
+        <p className="settings-note">
+          关闭时请求中不包含技能索引；启用技能仍决定 load_skill 是否可读取。
+        </p>
+      </div>
+
+      <div className="form-field">
+        <span className="form-label">实际请求内容（System Message）</span>
+        <textarea
+          className="form-input param-json"
+          rows={8}
+          readOnly
+          value={requestPrompt}
+        />
+        <div className="field-counter">
+          <p className="settings-note">
+            保存后与上行 system 消息逐字一致；工具声明单独传输。
+          </p>
+          <span className="counter-text">
+            {requestBytes}/{MAX_SYSTEM_PROMPT_BYTES}
+          </span>
+        </div>
+      </div>
+
+      <div className="form-field">
+        <button
+          type="button"
+          className="restore-default"
+          disabled={
+            promptBusy ||
+            systemPromptBytes > 32768 ||
+            rulesBytes > 32768 ||
+            requestBytes > MAX_SYSTEM_PROMPT_BYTES ||
+            !promptChanged
+          }
+          onClick={() => void savePrompt()}
+        >
+          {promptBusy ? '保存中…' : '保存 Prompt 配置'}
+        </button>
+      </div>
+
       <div className="form-field">
         <button type="button" className="btn btn-primary model-add" onClick={openCreate}>
           添加模型（Model Add）
@@ -694,21 +939,27 @@ export default function AgentSettingsSection() {
               <button type="button" className="btn btn-plain" disabled={busy} onClick={resetDraft}>
                 重置
               </button>
-              <button
-                type="button"
-                className="btn btn-plain"
-                disabled={busy}
-                onClick={() => void testDraft()}
-              >
-                测试连接
-              </button>
+              {!draft.batchMode && (
+                <button
+                  type="button"
+                  className="btn btn-plain"
+                  disabled={busy}
+                  onClick={() => void testDraft()}
+                >
+                  测试连接
+                </button>
+              )}
               <button
                 type="button"
                 className="btn btn-primary"
                 disabled={busy}
                 onClick={() => void saveDraft()}
               >
-                {editing ? '保存' : '添加模型'}
+                {editing
+                  ? '保存'
+                  : draft.batchMode
+                    ? `批量添加${draft.selectedModelIds.length > 0 ? `（${draft.selectedModelIds.length}）` : ''}`
+                    : '添加模型'}
               </button>
             </div>
           }
@@ -718,7 +969,13 @@ export default function AgentSettingsSection() {
             <select
               className="form-input"
               value={draft.format}
-              onChange={(e) => patchDraft({ format: e.target.value as ModelApiFormat })}
+              onChange={(e) =>
+                patchDraft({
+                  format: e.target.value as ModelApiFormat,
+                  models: [],
+                  selectedModelIds: [],
+                })
+              }
             >
               {FORMAT_OPTIONS.map((item) => (
                 <option key={item.key} value={item.key}>
@@ -727,6 +984,29 @@ export default function AgentSettingsSection() {
               ))}
             </select>
           </div>
+
+          {!editing && (
+            <div className="form-field">
+              <label className="settings-switch-row compact function-toggle">
+                <input
+                  type="checkbox"
+                  checked={draft.batchMode}
+                  onChange={(e) =>
+                    patchDraft({
+                      batchMode: e.target.checked,
+                      selectedModelIds: [],
+                      models: [],
+                      extraText: '',
+                      params: { toolRounds: DEFAULT_TOOL_ROUNDS },
+                    })
+                  }
+                />
+                <span className="settings-switch-desc">
+                  批量添加：一次注入 API Key，绑定多个模型实例
+                </span>
+              </label>
+            </div>
+          )}
 
           <div className="form-field">
             <span className="form-label">预设请求地址（可选）</span>
@@ -741,6 +1021,7 @@ export default function AgentSettingsSection() {
                     format: preset.format,
                     fullUrl: false,
                     models: [],
+                    selectedModelIds: [],
                     modelsError: '',
                   })
                 }
@@ -771,66 +1052,126 @@ export default function AgentSettingsSection() {
             <input
               className="form-input"
               value={draft.baseUrl}
-              onChange={(e) => patchDraft({ baseUrl: e.target.value, models: [] })}
+              onChange={(e) =>
+                patchDraft({ baseUrl: e.target.value, models: [], selectedModelIds: [] })
+              }
               placeholder={endpointPlaceholder(draft.format, draft.fullUrl)}
               autoComplete="off"
             />
             <p className="settings-note">{endpointHint(draft.format, draft.fullUrl)}</p>
           </div>
 
-          <div className="form-field">
-            <span className="form-label">
-              Model ID
-              <span className="form-required"> *</span>
-            </span>
-            <div className="chat-key-actions">
-              <input
-                className="form-input"
-                value={draft.modelId}
-                onChange={(e) => patchDraft({ modelId: e.target.value })}
-                placeholder="Input Model ID"
-                autoComplete="off"
-              />
-              <button
-                type="button"
-                className="restore-default"
-                disabled={draft.modelsLoading}
-                onClick={() => void fetchModels()}
-              >
-                {draft.modelsLoading ? '拉取中…' : '获取模型列表'}
-              </button>
+          {draft.batchMode ? (
+            <div className="form-field">
+              <span className="form-label">
+                Model IDs
+                <span className="form-required"> *</span>
+              </span>
+              <div className="chat-key-actions">
+                <button
+                  type="button"
+                  className="restore-default"
+                  disabled={draft.modelsLoading}
+                  onClick={() => void fetchModels()}
+                >
+                  {draft.modelsLoading ? '拉取中…' : '获取模型列表'}
+                </button>
+                {draft.models.length > 0 && (
+                  <button type="button" className="restore-default" onClick={toggleAllModels}>
+                    {draft.selectedModelIds.length === draft.models.length ? '清空' : '全选'}
+                  </button>
+                )}
+              </div>
+              {draft.models.length > 0 ? (
+                <div className="batch-model-list">
+                  {draft.models.map((model) => {
+                    const selected = draft.selectedModelIds.includes(model)
+                    return (
+                      <label
+                        key={model}
+                        className={`batch-model-option ${selected ? 'active' : ''}`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={() => toggleSelectedModel(model)}
+                        />
+                        <span>{model}</span>
+                      </label>
+                    )
+                  })}
+                </div>
+              ) : (
+                <p className="settings-note">
+                  填写 API Key 后点击「获取模型列表」，再勾选要绑定的模型。
+                </p>
+              )}
+              {draft.modelsError && (
+                <p className="settings-note param-error">{draft.modelsError}</p>
+              )}
+              <p className="settings-note">
+                所有勾选模型共用当前请求地址与 API Key；Display Name 默认使用 Model ID。
+              </p>
             </div>
-            {draft.models.length > 0 && (
-              <select
-                className="form-input"
-                value={draft.models.includes(draft.modelId) ? draft.modelId : ''}
-                onChange={(e) => patchDraft({ modelId: e.target.value })}
-              >
-                <option value="">从列表选择</option>
-                {draft.models.map((model) => (
-                  <option key={model} value={model}>
-                    {model}
-                  </option>
-                ))}
-              </select>
-            )}
-            {draft.modelsError && <p className="settings-note param-error">{draft.modelsError}</p>}
-          </div>
+          ) : (
+            <>
+              <div className="form-field">
+                <span className="form-label">
+                  Model ID
+                  <span className="form-required"> *</span>
+                </span>
+                <div className="chat-key-actions">
+                  <input
+                    className="form-input"
+                    value={draft.modelId}
+                    onChange={(e) => patchDraft({ modelId: e.target.value })}
+                    placeholder="Input Model ID"
+                    autoComplete="off"
+                  />
+                  <button
+                    type="button"
+                    className="restore-default"
+                    disabled={draft.modelsLoading}
+                    onClick={() => void fetchModels()}
+                  >
+                    {draft.modelsLoading ? '拉取中…' : '获取模型列表'}
+                  </button>
+                </div>
+                {draft.models.length > 0 && (
+                  <select
+                    className="form-input"
+                    value={draft.models.includes(draft.modelId) ? draft.modelId : ''}
+                    onChange={(e) => patchDraft({ modelId: e.target.value })}
+                  >
+                    <option value="">从列表选择</option>
+                    {draft.models.map((model) => (
+                      <option key={model} value={model}>
+                        {model}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {draft.modelsError && (
+                  <p className="settings-note param-error">{draft.modelsError}</p>
+                )}
+              </div>
 
-          <div className="form-field">
-            <span className="form-label">Display Name（选填，留空显示 Model ID）</span>
-            <div className="field-counter">
-              <input
-                className="form-input"
-                value={draft.label}
-                maxLength={64}
-                onChange={(e) => patchDraft({ label: e.target.value })}
-                placeholder="Input Display Name"
-                autoComplete="off"
-              />
-              <span className="counter-text">{draft.label.length}/64</span>
-            </div>
-          </div>
+              <div className="form-field">
+                <span className="form-label">Display Name（选填，留空显示 Model ID）</span>
+                <div className="field-counter">
+                  <input
+                    className="form-input"
+                    value={draft.label}
+                    maxLength={64}
+                    onChange={(e) => patchDraft({ label: e.target.value })}
+                    placeholder="Input Display Name"
+                    autoComplete="off"
+                  />
+                  <span className="counter-text">{draft.label.length}/64</span>
+                </div>
+              </div>
+            </>
+          )}
 
           <div className="form-field">
             <span className="form-label">
@@ -856,18 +1197,24 @@ export default function AgentSettingsSection() {
             </div>
           </div>
 
-          <button
-            type="button"
-            className="restore-default"
-            onClick={() => patchDraft({ advancedOpen: !draft.advancedOpen })}
-          >
-            {draft.advancedOpen ? '收起高级设置' : '高级设置'}
-          </button>
-          {draft.advancedOpen && (
-            <ParamsEditor draft={draft} patchParams={patchParams} patchDraft={patchDraft} />
+          {!draft.batchMode && (
+            <>
+              <button
+                type="button"
+                className="restore-default"
+                onClick={() => patchDraft({ advancedOpen: !draft.advancedOpen })}
+              >
+                {draft.advancedOpen ? '收起高级设置' : '高级设置'}
+              </button>
+              {draft.advancedOpen && (
+                <ParamsEditor draft={draft} patchParams={patchParams} patchDraft={patchDraft} />
+              )}
+            </>
           )}
           <p className="settings-note">
-            保存前可先「测试连接」；测试会发送一次真实请求（max_tokens=1），消耗极少量 token。
+            {draft.batchMode
+              ? '批量添加会复用同一密钥，参数使用默认值；添加后可在列表中逐条编辑。'
+              : '保存前可先「测试连接」；测试会发送一次真实请求（max_tokens=1），消耗极少量 token。'}
           </p>
         </Modal>
       )}

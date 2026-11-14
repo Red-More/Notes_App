@@ -101,7 +101,7 @@
 | 历史还原 | 官方 `Context` 可直接序列化 | `toAgentMessages()` 从 `ChatMessageRecord[]` 手工还原 | 只还原 user/assistant/toolResult 三种消息 |
 | 错误气泡 | 无对应概念 | `record.isError` 的 assistant 记录被跳过 | UI 失败气泡不进入模型上下文 |
 | 用量还原 | 官方 `Usage` 由响应携带 | 历史 assistant 一律 `zeroUsage()`、`stopReason='stop'` | 重新打开会话后历史 token/成本为 0 |
-| system prompt | `initialState.systemPrompt` | `buildSystemPrompt(skillsIndex)` 生成 | 十条铁律 + 目录约定 + 技能索引 |
+| system prompt | `initialState.systemPrompt` | `composeSystemPrompt()` 按设置拼接 | System Prompt + 可选 Rules + 可选技能索引 + 今日日期，全部在请求预览中可见 |
 | 工具装配 | `initialState.tools` | `createTools(skills)` 生成 6 个工具 | 5 个 `fs_*` + `load_skill` |
 | 工具执行模式 | 默认 `parallel` | 显式 `toolExecution: 'parallel'` | 读并行；`fs_write`/`fs_edit` 自行声明 `sequential` |
 | 工具配额 | 无内置上限 | `beforeToolCall` 扫描 `context.messages` | 单轮最多 500 步、最多 8 次写入 |

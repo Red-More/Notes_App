@@ -3257,4 +3257,79 @@ fn thousand_document_search_performance() {
     );
 }
 
+#[test]
+fn prompt_config_round_trips_and_defaults() {
+    let vfs = test_vfs();
+    assert_eq!(
+        model_store::system_prompt(vfs.conn()),
+        model_store::DEFAULT_SYSTEM_PROMPT
+    );
+    assert_eq!(model_store::rules(vfs.conn()), "");
+    assert!(!model_store::inject_skills(vfs.conn()));
+
+    model_store::save_prompt_config(vfs.conn(), "  回答要简短  ", "1. 不要编造\n2. 用中文", true)
+        .unwrap();
+    assert_eq!(model_store::system_prompt(vfs.conn()), "回答要简短");
+    assert_eq!(model_store::rules(vfs.conn()), "1. 不要编造\n2. 用中文");
+    assert!(model_store::inject_skills(vfs.conn()));
+
+    model_store::save_prompt_config(vfs.conn(), "   ", "  ", false).unwrap();
+    assert_eq!(
+        model_store::system_prompt(vfs.conn()),
+        model_store::DEFAULT_SYSTEM_PROMPT
+    );
+    assert_eq!(model_store::rules(vfs.conn()), "");
+    assert!(!model_store::inject_skills(vfs.conn()));
+}
+
+#[test]
+fn prompt_config_rejects_oversized_blocks_without_partial_writes() {
+    let vfs = test_vfs();
+    let oversized = "x".repeat(33 * 1024);
+    model_store::save_prompt_config(vfs.conn(), "原文", "原规则", true).unwrap();
+
+    match model_store::save_prompt_config(vfs.conn(), "新提示词", &oversized, false).unwrap_err() {
+        ToolError::InvalidArgument { message } => assert_eq!(message, "Rules 超过 32 KB"),
+        other => panic!("unexpected rules error: {other:?}"),
+    }
+    // Validation runs before any write, so a rejected save changes nothing.
+    assert_eq!(model_store::system_prompt(vfs.conn()), "原文");
+    assert_eq!(model_store::rules(vfs.conn()), "原规则");
+    assert!(model_store::inject_skills(vfs.conn()));
+
+    match model_store::save_prompt_config(vfs.conn(), &oversized, "", false).unwrap_err() {
+        ToolError::InvalidArgument { message } => {
+            assert_eq!(message, "系统提示词超过 32 KB")
+        }
+        other => panic!("unexpected system prompt error: {other:?}"),
+    }
+    assert_eq!(model_store::system_prompt(vfs.conn()), "原文");
+}
+
+#[test]
+fn conversation_model_can_be_rebound_in_place() {
+    let vfs = test_vfs();
+    let first = add_model(&vfs, "模型一", "model-one");
+    let second = add_model(&vfs, "模型二", "model-two");
+    let conv = conversations::create(
+        &vfs,
+        Some("切换".into()),
+        first.id.clone(),
+        first.model_id.clone(),
+    )
+    .unwrap();
+    // Pin the activity clock so the assertion proves a model switch does not
+    // reorder the sidebar (which sorts by updated_at).
+    vfs.conn()
+        .execute(
+            "UPDATE conversations SET updated_at = '2020-01-01 00:00:00' WHERE id = ?1",
+            params![conv.id],
+        )
+        .unwrap();
+    let updated = conversations::set_model(&vfs, conv.id, &second.id).unwrap();
+    assert_eq!(updated.provider, second.id);
+    assert_eq!(updated.model, second.model_id);
+    assert_eq!(updated.updated_at, "2020-01-01 00:00:00");
+}
+
 // ---------------------------------------------------------------------------

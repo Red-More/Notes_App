@@ -11,6 +11,7 @@ pub mod conversations;
 pub mod discovery;
 pub mod llm;
 pub mod model_store;
+pub mod normalize;
 pub mod params;
 pub mod runs;
 pub mod secrets;

@@ -49,6 +49,17 @@ pub fn chat_rename(state: State<'_, VfsState>, id: i64, title: String) -> Result
     conversations::rename(&vfs, id, title)
 }
 
+/// Rebind a conversation to another model entry without losing its transcript.
+#[tauri::command]
+pub fn chat_set_model(
+    state: State<'_, VfsState>,
+    conversation_id: i64,
+    model_entry: String,
+) -> Result<conversations::Conversation, ToolError> {
+    let vfs = crate::lock(&state.0);
+    conversations::set_model(&vfs, conversation_id, &model_entry)
+}
+
 #[tauri::command]
 pub fn chat_delete(state: State<'_, VfsState>, id: i64) -> Result<(), ToolError> {
     let vfs = crate::lock(&state.0);
@@ -200,6 +211,31 @@ pub fn agent_settings(
     model_store::cleanup_legacy(vfs.conn(), &agent_state.secrets);
     let keys = key_status(vfs.conn(), &agent_state.secrets)?;
     model_store::settings(vfs.conn(), &keys)
+}
+
+/// Prompt payload config: the settings textarea equals what is sent upstream.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptConfigInput {
+    pub system_prompt: String,
+    #[serde(default)]
+    pub rules: String,
+    #[serde(default)]
+    pub inject_skills: bool,
+}
+
+#[tauri::command]
+pub fn agent_prompt_config_set(
+    state: State<'_, VfsState>,
+    input: PromptConfigInput,
+) -> Result<(), ToolError> {
+    let vfs = crate::lock(&state.0);
+    model_store::save_prompt_config(
+        vfs.conn(),
+        &input.system_prompt,
+        &input.rules,
+        input.inject_skills,
+    )
 }
 
 /// 新增或编辑模型条目。新增时 API Key 必填；编辑时留空表示保留旧 Key。

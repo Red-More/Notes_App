@@ -11,8 +11,15 @@ import type { AgentProfile } from '../../agent/runtime'
 import { profileFromSettings } from '../../agent/runtime'
 import { AgentRuntime } from '../../agent/AgentRuntime'
 import { createRuntimeDeps } from '../../agent/runtimeDeps'
-import { documentPath, partialLength, type Item, type ToolCard } from '../../agent/chatView'
+import {
+  documentPath,
+  partialLength,
+  turnToolIds,
+  type Item,
+  type ToolCard,
+} from '../../agent/chatView'
 import type {
+  AgentModelInfo,
   AgentRun,
   AgentSettings,
   ChatConversation,
@@ -38,7 +45,6 @@ import {
   IconSettings,
   IconStop,
   IconTrash,
-  IconUsers,
 } from '../../components/Icons'
 import DiffViewerModal from '../../components/DiffViewerModal'
 
@@ -105,18 +111,17 @@ function stripFrontmatter(text: string): string {
   return start < 0 ? '' : normalized.slice(start + 1)
 }
 
+/** Tone/icon hints only; the descriptor itself stays the English identifier. */
 const TOOL_META: Record<
   string,
   { label: string; tone: string; Icon: typeof IconNote }
 > = {
-  fs_read: { label: '读取', tone: 'read', Icon: IconEye },
-  fs_write: { label: '写入', tone: 'write', Icon: IconNote },
-  fs_edit: { label: '编辑', tone: 'edit', Icon: IconEdit },
-  fs_glob: { label: '查找', tone: 'search', Icon: IconSearch },
-  fs_grep: { label: '搜索', tone: 'search', Icon: IconSearch },
-  load_skill: { label: '技能', tone: 'skill', Icon: IconInfo },
-  think: { label: '思考', tone: 'think', Icon: IconInfo },
-  subagent: { label: '子智能体', tone: 'agent', Icon: IconUsers },
+  fs_read: { label: 'fs_read', tone: 'read', Icon: IconEye },
+  fs_write: { label: 'fs_write', tone: 'write', Icon: IconNote },
+  fs_edit: { label: 'fs_edit', tone: 'edit', Icon: IconEdit },
+  fs_glob: { label: 'fs_glob', tone: 'search', Icon: IconSearch },
+  fs_grep: { label: 'fs_grep', tone: 'search', Icon: IconSearch },
+  load_skill: { label: 'load_skill', tone: 'skill', Icon: IconInfo },
 }
 
 function formatDuration(ms: number): string {
@@ -136,14 +141,16 @@ function usageCost(usage: MessageUsage, model: { inputPrice?: number; outputPric
 
 interface ToolCardViewProps {
   card: ToolCard
+  /** 1-based position in this transcript's invocation chain. */
+  step: number
   expanded: boolean
   onToggle: (id: string) => void
   onOpen: (path: string) => void
   onUndo: (path: string) => void
 }
 
-/** One Agent trace node: semantic icon, summary header and collapsible detail. */
-function ToolCardView({ card, expanded, onToggle, onOpen, onUndo }: ToolCardViewProps) {
+/** One Agent trace node: semantic icon, summary header and auditable detail. */
+function ToolCardView({ card, step, expanded, onToggle, onOpen, onUndo }: ToolCardViewProps) {
   const path = documentPath(card)
   const meta = TOOL_META[card.toolName] ?? {
     label: card.toolName,
@@ -154,7 +161,13 @@ function ToolCardView({ card, expanded, onToggle, onOpen, onUndo }: ToolCardView
   const canUndo =
     card.status === 'done' && path !== null && ['fs_write', 'fs_edit'].includes(card.toolName)
   const collapsible = card.args.length > 120 || card.text.length > 200
-  const state = card.status === 'running' ? '执行中…' : card.status === 'error' ? '失败' : '完成'
+  const state = card.unfinished
+    ? '未完成'
+    : card.status === 'running'
+      ? '执行中…'
+      : card.status === 'error'
+        ? '失败'
+        : '完成'
   return (
     <div className={`chat-trace-node ${meta.tone} ${card.status}`}>
       <div className={`chat-trace-icon ${meta.tone}`}>
@@ -162,6 +175,7 @@ function ToolCardView({ card, expanded, onToggle, onOpen, onUndo }: ToolCardView
       </div>
       <div className="chat-trace-main">
         <div className="chat-trace-head">
+          <span className="chat-trace-step">#{step}</span>
           <span className="chat-trace-label">{meta.label}</span>
           {card.durationMs !== undefined && (
             <span className="chat-trace-duration">{formatDuration(card.durationMs)}</span>
@@ -178,23 +192,29 @@ function ToolCardView({ card, expanded, onToggle, onOpen, onUndo }: ToolCardView
             </button>
           )}
         </div>
-        {(path || card.text) && (
+        {(path || card.text || card.unfinished) && (
           <div className="chat-trace-summary">
             {path ? (
               <button type="button" className="chat-file-link" onClick={() => onOpen(path)}>
                 {path}
               </button>
-            ) : (
+            ) : card.text ? (
               <span className="chat-trace-preview">{card.text.split('\n')[0]}</span>
+            ) : (
+              <span className="chat-trace-preview">调用已发出但未获得结果</span>
             )}
           </div>
         )}
         {expanded && (
           <div className="chat-trace-detail">
-            {card.args && card.args !== '{}' && (
-              <div className="chat-tool-args">{card.args}</div>
-            )}
-            {card.text && <div className="chat-tool-result">{card.text}</div>}
+            <div className="chat-trace-audit">
+              <span>callId</span>
+              <code>{card.callId ?? card.id}</code>
+            </div>
+            <div className="chat-trace-section-title">arguments</div>
+            <div className="chat-tool-args">{card.args || '{}'}</div>
+            <div className="chat-trace-section-title">result</div>
+            <div className="chat-tool-result">{card.text || '（无返回）'}</div>
           </div>
         )}
         {canUndo && path && (
@@ -246,6 +266,9 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
   const [expanded, setExpanded] = useState(false)
   const [streaming, setStreaming] = useState(false)
   const [drawerOpen, setDrawerOpen] = useState(false)
+  // Top-bar model popover and its in-flight switch guard.
+  const [modelMenuOpen, setModelMenuOpen] = useState(false)
+  const [switchingModel, setSwitchingModel] = useState(false)
   const [renameId, setRenameId] = useState<number | null>(null)
   const [renameText, setRenameText] = useState('')
   const [loading, setLoading] = useState(true)
@@ -265,6 +288,9 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
   const [diffView, setDiffView] = useState<{ paths: string[]; title: string } | null>(null)
   // Maps an item id to its row so a timeline dot can scroll it into view.
   const rowRefs = useRef(new Map<string, HTMLDivElement>())
+  // Model popover focus targets for keyboard navigation.
+  const modelTriggerRef = useRef<HTMLButtonElement>(null)
+  const modelPopoverRef = useRef<HTMLDivElement>(null)
 
   // The runtime owns the Agent, the run status, the queue and write ordering.
   const runtime = useMemo(() => new AgentRuntime({ deps: createRuntimeDeps() }), [])
@@ -429,7 +455,7 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
   )
 
   const openConversation = useCallback(
-    async (conv: ChatConversation) => {
+    async (conv: ChatConversation): Promise<boolean> => {
       conversationRef.current = conv
       setConversation(conv)
       setExpanded(false)
@@ -447,8 +473,10 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
         // run all happen inside the runtime.
         await runtime.open(conv, profile)
         setItems(runtime.snapshot().items)
+        return true
       } catch (e) {
         toast(friendlyError(e))
+        return false
       } finally {
         setLoading(false)
         scrollToBottom()
@@ -477,6 +505,79 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
       setLoading(false)
     }
   }, [restoreDraft, runtime])
+
+  /** Switch the active model in place; an open conversation is rebound too. */
+  const switchModel = useCallback(
+    async (entry: AgentModelInfo) => {
+      if (switchingModel) return
+      if (streaming) {
+        toast('回复进行中，暂不能切换模型')
+        return
+      }
+      setModelMenuOpen(false)
+      setSwitchingModel(true)
+      try {
+        await chatApi.activateModel(entry.id)
+        const next = await chatApi.settings()
+        setSettings(next)
+        settingsRef.current = next
+        const conv = conversationRef.current
+        if (conv) {
+          const updated = await chatApi.setConversationModel({
+            conversationId: conv.id,
+            modelEntry: entry.id,
+          })
+          conversationRef.current = updated
+          setConversation(updated)
+          setConversations((prev) =>
+            prev.map((item) => (item.id === updated.id ? updated : item)),
+          )
+          // openConversation reports its own failure; do not claim success then.
+          if (!(await openConversation(updated))) return
+        } else {
+          await openDraft()
+        }
+        toast(`已切换到 ${entry.label}`)
+      } catch (error) {
+        toast(friendlyError(error))
+      } finally {
+        setSwitchingModel(false)
+      }
+    },
+    [openConversation, openDraft, streaming, switchingModel],
+  )
+
+  // Keyboard support: focus an option on open and let Escape close the menu.
+  useEffect(() => {
+    if (!modelMenuOpen) return
+    const popover = modelPopoverRef.current
+    const current = popover?.querySelector<HTMLButtonElement>('.chat-model-option.active')
+    const first = popover?.querySelector<HTMLButtonElement>('.chat-model-option:not(:disabled)')
+    ;(current && !current.disabled ? current : first)?.focus()
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      setModelMenuOpen(false)
+      modelTriggerRef.current?.focus()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [modelMenuOpen])
+
+  /** Arrow keys walk the model list; Enter keeps the button's default action. */
+  const moveModelFocus = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+    const options = Array.from(
+      event.currentTarget.querySelectorAll<HTMLButtonElement>('.chat-model-option:not(:disabled)'),
+    )
+    if (options.length === 0) return
+    event.preventDefault()
+    const index = options.indexOf(document.activeElement as HTMLButtonElement)
+    const next =
+      event.key === 'ArrowDown'
+        ? options[(index + 1) % options.length]
+        : options[index <= 0 ? options.length - 1 : index - 1]
+    next?.focus()
+  }, [])
 
   const bootstrap = useCallback(async () => {
     try {
@@ -679,6 +780,19 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     })
   }, [])
 
+  /** Expand/collapse every trace node of one assistant turn at once. */
+  const toggleTrace = useCallback((ids: string[]) => {
+    setExpandedTools((prev) => {
+      const next = new Set(prev)
+      const allOpen = ids.every((id) => next.has(id))
+      for (const id of ids) {
+        if (allOpen) next.delete(id)
+        else next.add(id)
+      }
+      return next
+    })
+  }, [])
+
   const toggleThinking = useCallback((id: string) => {
     setExpandedThinking((prev) => {
       const next = new Set(prev)
@@ -806,7 +920,15 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     }
   }, [renameId, renameText])
 
-  const activeModel = settings?.models.find((item) => item.id === settings.activeId) ?? null
+  // Single source of truth: the conversation binding wins, active model is the
+  // fallback. Never render two independent indicators for the same state.
+  const modelEntries = settings?.models ?? []
+  const activeModel =
+    (conversation
+      ? modelEntries.find((item) => item.id === conversation.provider)
+      : undefined) ??
+    modelEntries.find((item) => item.id === settings?.activeId) ??
+    null
   const modelLabel = activeModel
     ? `${activeModel.label} · ${activeModel.modelId}`
     : '未添加模型'
@@ -821,6 +943,15 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     contextWindow > 0
       ? Math.min(100, Math.round(((contextChars / 3) * 100) / contextWindow))
       : 0
+
+  // Stable 1-based numbering for the visible tool-call chain (trace audit).
+  const toolSteps = new Map<string, number>()
+  let toolStep = 0
+  for (const item of items) {
+    if (item.kind !== 'tool') continue
+    toolStep += 1
+    toolSteps.set(item.id, toolStep)
+  }
 
   return (
     <div className={`page chat-page ${expanded ? 'expanded' : ''}`}>
@@ -837,10 +968,70 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
         ]}
       />
 
-      <div className={`chat-status ${online && !networkIssue ? '' : 'offline'}`}>
-        {online && !networkIssue
-          ? modelLabel
-          : `${modelLabel} · ${online ? '网络异常' : '离线模式'}，消息可能发送失败`}
+      <div className={`chat-model-bar ${online && !networkIssue ? '' : 'offline'}`}>
+        <button
+          ref={modelTriggerRef}
+          type="button"
+          className="chat-model-trigger"
+          aria-haspopup="listbox"
+          aria-expanded={modelMenuOpen}
+          aria-controls="chat-model-options"
+          disabled={switchingModel}
+          onClick={() => setModelMenuOpen((open) => !open)}
+          onKeyDown={(event) => {
+            if (event.key !== 'ArrowDown') return
+            event.preventDefault()
+            setModelMenuOpen(true)
+          }}
+        >
+          <span className="chat-model-dot" />
+          <span className="chat-model-name">{modelLabel}</span>
+          <span className="chat-model-caret">{modelMenuOpen ? '▴' : '▾'}</span>
+        </button>
+        {(!online || networkIssue) && (
+          <span className="chat-model-note">
+            {online ? '网络异常' : '离线模式'}，消息可能发送失败
+          </span>
+        )}
+        {modelMenuOpen && (
+          <>
+            <div className="popover-backdrop" onClick={() => setModelMenuOpen(false)} />
+            <div
+              id="chat-model-options"
+              ref={modelPopoverRef}
+              className="chat-model-popover"
+              role="listbox"
+              aria-label="切换模型"
+              onKeyDown={moveModelFocus}
+            >
+              <div className="chat-model-popover-title">切换模型</div>
+              {modelEntries.length === 0 && (
+                <p className="settings-note">还没有模型，请到设置中添加</p>
+              )}
+              {modelEntries.map((entry) => {
+                const current = entry.id === activeModel?.id
+                return (
+                  <button
+                    key={entry.id}
+                    type="button"
+                    role="option"
+                    aria-selected={current}
+                    className={`chat-model-option ${current ? 'active' : ''}`}
+                    disabled={streaming || switchingModel}
+                    onClick={() => void switchModel(entry)}
+                  >
+                    <span className="chat-model-option-name">{entry.label}</span>
+                    <span className="chat-model-option-meta">
+                      {entry.modelId}
+                      {!entry.configured ? ' · 未配置 Key' : ''}
+                    </span>
+                    {current && <span className="chat-model-option-check">✓</span>}
+                  </button>
+                )
+              })}
+            </div>
+          </>
+        )}
       </div>
 
       <div className="page-scroll chat-scroll" ref={scrollRef} onScroll={handleScroll}>
@@ -856,11 +1047,13 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
             }
           />
         ) : (
-          items.map((item) => {
+          items.map((item, index) => {
             // Settled replies carry their touched paths computed at settle time.
             const changes = item.kind === 'assistant' && !item.streaming ? item.changes ?? [] : []
             const usage = item.kind === 'assistant' ? item.usage : null
             const cost = usage ? usageCost(usage, activeModel) : null
+            const traceIds =
+              item.kind === 'assistant' && !item.streaming ? turnToolIds(items, index) : []
             return (
               <div
                 key={item.id}
@@ -884,6 +1077,7 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
                   {item.kind === 'tool' ? (
                     <ToolCardView
                       card={item}
+                      step={toolSteps.get(item.id) ?? 1}
                       expanded={expandedTools.has(item.id)}
                       onToggle={toggleTool}
                       onOpen={(path) => void openDocPreview(path)}
@@ -904,6 +1098,11 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
                           {expandedThinking.has(item.id) && (
                             <div className="chat-thinking-body">{item.thinking}</div>
                           )}
+                        </div>
+                      )}
+                      {item.kind === 'assistant' && item.text !== '' && (
+                        <div className={`chat-bubble assistant ${item.isError ? 'error' : ''}`}>
+                          {item.text}
                         </div>
                       )}
                       {item.kind === 'user' && (
@@ -948,6 +1147,15 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
                           >
                             变更{changes.length > 0 ? ` ${changes.length}` : ''}
                           </button>
+                          {traceIds.length > 0 && (
+                            <button
+                              type="button"
+                              className="chat-action"
+                              onClick={() => toggleTrace(traceIds)}
+                            >
+                              轨迹 {traceIds.length}
+                            </button>
+                          )}
                           {usage && (
                             <span
                               className="chat-usage"

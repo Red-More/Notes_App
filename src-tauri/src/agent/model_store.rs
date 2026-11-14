@@ -23,10 +23,18 @@ use crate::vfs::error::ToolError;
 
 const KEY_MODELS: &str = "agent.models.v2";
 const KEY_ACTIVE: &str = "agent.active_model.v2";
+const KEY_SYSTEM_PROMPT: &str = "agent.system_prompt.v1";
+const KEY_RULES: &str = "agent.rules.v1";
+const KEY_INJECT_SKILLS: &str = "agent.skills_injection.v1";
 const MAX_ID_CHARS: usize = 32;
 const MAX_LABEL_CHARS: usize = 64;
 const MAX_BASE_URL_CHARS: usize = 200;
 const MAX_MODEL_CHARS: usize = 100;
+/// The proxy rejects prompts over 64KB; keep headroom for each prompt block.
+const MAX_PROMPT_BLOCK_BYTES: usize = 32 * 1024;
+
+/// Default base instruction; the settings textarea shows exactly this value.
+pub const DEFAULT_SYSTEM_PROMPT: &str = "You are a helpful assistant running LifeOS.";
 
 /// Request protocol used by one model entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +136,12 @@ pub struct AgentSettings {
     /// `None` until the user adds a model.
     pub active_id: Option<String>,
     pub models: Vec<ModelView>,
+    /// Verbatim base system prompt; defaults to [`DEFAULT_SYSTEM_PROMPT`].
+    pub system_prompt: String,
+    /// User-maintained rules; empty means the request carries no rules block.
+    pub rules: String,
+    /// Explicit opt-in for appending the enabled-skills index to the prompt.
+    pub inject_skills: bool,
 }
 
 /// All stored entries, newest last.
@@ -159,7 +173,71 @@ pub fn settings(conn: &Connection, keys: &[(String, bool)]) -> Result<AgentSetti
                 view(conn, item, configured)
             })
             .collect(),
+        system_prompt: system_prompt(conn),
+        rules: rules(conn),
+        inject_skills: inject_skills(conn),
     })
+}
+
+/// Persisted base system prompt; falls back to the default when unset.
+pub fn system_prompt(conn: &Connection) -> String {
+    read_setting_opt(conn, KEY_SYSTEM_PROMPT)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string())
+}
+
+/// Normalize one prompt block; `None` clears the setting.
+///
+/// `too_long` is the full error prefix so both blocks keep their wording.
+fn prompt_block(text: &str, too_long: &str) -> Result<Option<String>, ToolError> {
+    let trimmed = text.trim();
+    if trimmed.len() > MAX_PROMPT_BLOCK_BYTES {
+        return Err(ToolError::invalid(format!(
+            "{too_long} {} KB",
+            MAX_PROMPT_BLOCK_BYTES / 1024
+        )));
+    }
+    Ok(if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    })
+}
+
+/// Persist all prompt settings in one transaction.
+///
+/// Both blocks are validated before the first write so a rejected input can
+/// never leave a half-applied configuration (prompt saved, rules failed).
+pub fn save_prompt_config(
+    conn: &Connection,
+    system_prompt: &str,
+    rules: &str,
+    inject_skills: bool,
+) -> Result<(), ToolError> {
+    let system_prompt = prompt_block(system_prompt, "系统提示词超过")?;
+    let rules = prompt_block(rules, "Rules 超过")?;
+    let tx = conn.unchecked_transaction()?;
+    match system_prompt {
+        Some(text) => write_setting(&tx, KEY_SYSTEM_PROMPT, &text)?,
+        None => delete_setting(&tx, KEY_SYSTEM_PROMPT)?,
+    }
+    match rules {
+        Some(text) => write_setting(&tx, KEY_RULES, &text)?,
+        None => delete_setting(&tx, KEY_RULES)?,
+    }
+    write_setting(&tx, KEY_INJECT_SKILLS, if inject_skills { "1" } else { "0" })?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// User-maintained rules; empty means no rules block is sent.
+pub fn rules(conn: &Connection) -> String {
+    read_setting_opt(conn, KEY_RULES).unwrap_or_default()
+}
+
+/// Whether enabled skills' index is appended to the system prompt.
+pub fn inject_skills(conn: &Connection) -> bool {
+    read_setting_opt(conn, KEY_INJECT_SKILLS).is_some_and(|value| value == "1")
 }
 
 /// Settings row for one entry, including capability hints from `LlmParams`.

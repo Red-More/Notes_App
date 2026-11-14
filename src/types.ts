@@ -440,6 +440,12 @@ export interface AgentModelInfo {
 export interface AgentSettings {
   activeId: string | null
   models: AgentModelInfo[]
+  /** Verbatim base system prompt; defaults to the built-in sentence. */
+  systemPrompt: string
+  /** User-maintained rules; empty means the request carries no rules block. */
+  rules: string
+  /** Explicit opt-in for appending the enabled-skills index to the prompt. */
+  injectSkills: boolean
 }
 
 /** Layered per-model generation parameters persisted by Rust. */

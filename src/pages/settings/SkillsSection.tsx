@@ -346,7 +346,8 @@ export default function SkillsSection() {
           ))
         )}
         <p className="settings-note">
-          技能只注入 Prompt，不会注册工具或执行代码；命中时由模型主动调用 load_skill 读取正文。
+          启用技能只决定 load_skill 是否可读取；是否把技能索引注入系统提示词由「AI
+          助理 → Prompt 配置」显式控制。
         </p>
         <button type="button" className="restore-default" onClick={openCreate}>
           新建技能

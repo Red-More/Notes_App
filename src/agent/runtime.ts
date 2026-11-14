@@ -6,7 +6,7 @@
 import { Agent } from '@earendil-works/pi-agent-core'
 import type { AgentMessage, StreamFn } from '@earendil-works/pi-agent-core'
 import type { AssistantMessage, Model, ToolCall, Usage } from '@earendil-works/pi-ai'
-import { buildSystemPrompt } from './prompt'
+import { composeSystemPrompt, MAX_SYSTEM_PROMPT_BYTES } from './prompt'
 import { trimContext } from './context'
 import { nativeStreamFn } from './stream'
 import { createTools } from './tools'
@@ -29,6 +29,12 @@ export interface AgentProfile {
   maxTokens?: number
   reasoning?: boolean
   toolRounds?: number
+  /** Verbatim base system prompt shown in settings. */
+  systemPrompt?: string
+  /** User-maintained rules; empty means no rules block is sent. */
+  rules?: string
+  /** Explicit opt-in for appending the enabled-skills index. */
+  injectSkills?: boolean
 }
 
 /** Map the stored wire format to the pi-ai api descriptor. */
@@ -63,6 +69,9 @@ export function profileFromSettings(
     // conversations as well.
     model: entry.modelId || (model ?? ''),
     api: apiForFormat(entry.format),
+    systemPrompt: settings.systemPrompt,
+    rules: settings.rules,
+    injectSkills: settings.injectSkills,
   }
 }
 
@@ -218,6 +227,20 @@ export interface AgentLimitHooks {
   blocked?: (kind: 'steps' | 'writes') => void
 }
 
+/** Compose the request prompt and reject oversized payloads up front. */
+function composedSystemPrompt(profile: AgentProfile, skillsIndex: string): string {
+  const prompt = composeSystemPrompt({
+    systemPrompt: profile.systemPrompt,
+    rules: profile.rules,
+    skillsIndex,
+    injectSkills: profile.injectSkills,
+  })
+  if (new TextEncoder().encode(prompt).length > MAX_SYSTEM_PROMPT_BYTES) {
+    throw new Error('系统提示词超过 64KB，请精简 Rules 或关闭技能索引')
+  }
+  return prompt
+}
+
 /** 用历史消息创建 Agent；system prompt 与工具在这里一次性装配。 */
 export function createAgent(
   profile: AgentProfile,
@@ -231,7 +254,7 @@ export function createAgent(
 ): Agent {
   return new Agent({
     initialState: {
-      systemPrompt: buildSystemPrompt(skillsIndex),
+      systemPrompt: composedSystemPrompt(profile, skillsIndex),
       model: createAppModel(profile),
       thinkingLevel: profile.reasoning ? 'medium' : 'off',
       tools: createTools(skills, mcpTools),

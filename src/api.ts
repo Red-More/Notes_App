@@ -566,6 +566,9 @@ export const chatApi = {
   list: () => invoke<ChatConversation[]>('chat_list'),
   create: (params: { title?: string } = {}) => invoke<ChatConversation>('chat_create', params),
   rename: (params: { id: number; title: string }) => invoke<void>('chat_rename', params),
+  /** Rebind one conversation to another model entry. */
+  setConversationModel: (params: { conversationId: number; modelEntry: string }) =>
+    invoke<ChatConversation>('chat_set_model', params),
   remove: (id: number) => invoke<void>('chat_delete', { id }),
   messages: (conversationId: number) =>
     invoke<ChatMessageRecord[]>('chat_messages', { conversationId }),
@@ -604,6 +607,12 @@ export const chatApi = {
   runResume: (params: { conversationId: number; modelEntry: string }) =>
     invoke<AgentRunStart>('chat_run_resume', params),
   settings: () => invoke<AgentSettings>('agent_settings'),
+  /** Persist the exact prompt payload shown in settings. */
+  savePromptConfig: (input: {
+    systemPrompt: string
+    rules: string
+    injectSkills: boolean
+  }) => invoke<void>('agent_prompt_config_set', { input }),
   saveModel: (input: {
     id?: string
     label?: string

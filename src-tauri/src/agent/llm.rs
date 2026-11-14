@@ -28,6 +28,7 @@ use serde_json::{json, Map, Value};
 
 use super::cancel::CancellationToken;
 use super::model_store::{self, ApiFormat, ModelEntry};
+use super::normalize;
 use super::params::{CacheRetention, LlmParams, ThinkingMode};
 use super::{AgentState, TOOL_ALLOWLIST};
 use crate::assets;
@@ -1226,43 +1227,34 @@ async fn openai_stream(
         let Some(delta) = choice.get("delta") else {
             return;
         };
-        // Reasoning models on OpenAI-compatible gateways stream `reasoning_content`
-        // (DeepSeek) or `reasoning`; both precede the visible answer.
-        let reasoning = delta
-            .get("reasoning_content")
-            .or_else(|| delta.get("reasoning"))
-            .and_then(Value::as_str);
-        if let Some(reasoning) = reasoning {
-            if !reasoning.is_empty() {
-                let index = *thinking_index.get_or_insert_with(|| {
-                    let index = next_index;
-                    next_index += 1;
-                    emit(StreamEvent::ThinkingStart {
-                        content_index: index,
-                    });
-                    index
-                });
-                emit(StreamEvent::ThinkingDelta {
+        // Normalize reasoning aliases first; only `content` becomes visible text.
+        if let Some(reasoning) = normalize::reasoning_text(delta) {
+            let index = *thinking_index.get_or_insert_with(|| {
+                let index = next_index;
+                next_index += 1;
+                emit(StreamEvent::ThinkingStart {
                     content_index: index,
-                    delta: reasoning.to_string(),
                 });
-            }
+                index
+            });
+            emit(StreamEvent::ThinkingDelta {
+                content_index: index,
+                delta: reasoning,
+            });
         }
-        if let Some(text) = delta.get("content").and_then(Value::as_str) {
-            if !text.is_empty() {
-                let index = *text_index.get_or_insert_with(|| {
-                    let index = next_index;
-                    next_index += 1;
-                    emit(StreamEvent::TextStart {
-                        content_index: index,
-                    });
-                    index
-                });
-                emit(StreamEvent::TextDelta {
+        if let Some(text) = normalize::delta_text(delta) {
+            let index = *text_index.get_or_insert_with(|| {
+                let index = next_index;
+                next_index += 1;
+                emit(StreamEvent::TextStart {
                     content_index: index,
-                    delta: text.to_string(),
                 });
-            }
+                index
+            });
+            emit(StreamEvent::TextDelta {
+                content_index: index,
+                delta: text,
+            });
         }
         let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) else {
             return;
@@ -2386,16 +2378,12 @@ async fn openai_json(
         .and_then(|items| items.first());
     let mut index = 0usize;
     if let Some(message) = choice.and_then(|c| c.get("message")) {
-        if let Some(reasoning) = message
-            .get("reasoning_content")
-            .or_else(|| message.get("reasoning"))
-            .and_then(Value::as_str)
-        {
-            emit_thinking_block(emit, index, reasoning, None);
+        if let Some(reasoning) = normalize::reasoning_text(message) {
+            emit_thinking_block(emit, index, &reasoning, None);
             index += 1;
         }
-        if let Some(text) = message.get("content").and_then(Value::as_str) {
-            emit_text_block(emit, index, text);
+        if let Some(text) = normalize::message_text(message) {
+            emit_text_block(emit, index, &text);
             index += 1;
         }
         if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {

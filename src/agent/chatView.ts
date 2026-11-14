@@ -33,11 +33,15 @@ export interface ToolCard {
   id: string
   kind: 'tool'
   toolName: string
+  /** Provider tool-call id, kept for audit and history matching. */
+  callId?: string
   args: string
   status: 'running' | 'done' | 'error'
   text: string
   /** Wall-clock duration, only available for calls made in this session. */
   durationMs?: number
+  /** Hydrated invocation with no matching result row (interrupted run). */
+  unfinished?: boolean
 }
 
 export type Item = Bubble | ToolCard
@@ -169,6 +173,17 @@ export function documentPath(card: ToolCard): string | null {
   return match ? match[0] : null
 }
 
+/** Tool-card ids belonging to the turn that produced this assistant reply. */
+export function turnToolIds(items: Item[], assistantIndex: number): string[] {
+  const ids: string[] = []
+  for (let i = assistantIndex - 1; i >= 0; i -= 1) {
+    const item = items[i]
+    if (item.kind === 'user') break
+    if (item.kind === 'tool') ids.unshift(item.id)
+  }
+  return ids
+}
+
 /** Paths written by the tool turn that produced this assistant reply. */
 export function turnChanges(items: Item[], assistantIndex: number): string[] {
   const paths: string[] = []
@@ -187,11 +202,51 @@ export function turnChanges(items: Item[], assistantIndex: number): string[] {
 /** Insert or update a tool card without touching the rest of the transcript. */
 function upsertToolCard(items: Item[], id: string, toolName: string, args: string): Item[] {
   if (!items.some((item) => item.id === id && item.kind === 'tool')) {
-    return [...items, { id, kind: 'tool', toolName, args, status: 'running', text: '' }]
+    return [
+      { id, kind: 'tool', toolName, callId: id, args, status: 'running', text: '' },
+    ]
   }
   return items.map((item) =>
-    item.id === id && item.kind === 'tool' ? { ...item, toolName, args } : item,
+    item.id === id && item.kind === 'tool' ? { ...item, toolName, args, callId: id } : item,
   )
+}
+
+interface PersistedToolCall {
+  id?: string
+  name?: string
+  arguments?: unknown
+}
+
+/** Parse the JSON tool-call payload stored on an assistant row. */
+function persistedToolCalls(record: ChatMessageRecord): PersistedToolCall[] {
+  if (!record.toolCalls) return []
+  try {
+    const value = JSON.parse(record.toolCalls) as unknown
+    if (!Array.isArray(value)) return []
+    return value.filter((item): item is PersistedToolCall => {
+      if (item == null || typeof item !== 'object') return false
+      const candidate = item as { type?: string; name?: unknown }
+      return candidate.type === 'toolCall' || typeof candidate.name === 'string'
+    })
+  } catch {
+    // Corrupt history falls back to the result rows only.
+    return []
+  }
+}
+
+/** Hydrate one assistant invocation that never received a tool row. */
+function invocationCard(call: PersistedToolCall, fallbackId: string): ToolCard {
+  const callId = call.id?.trim() || fallbackId
+  return {
+    id: callId,
+    kind: 'tool',
+    toolName: call.name?.trim() || 'tool',
+    callId,
+    args: JSON.stringify(call.arguments ?? {}),
+    status: 'running',
+    text: '',
+    unfinished: true,
+  }
 }
 
 /** Persisted records → items. Runs once per conversation load. */
@@ -206,27 +261,52 @@ export function projectHistory(records: ChatMessageRecord[]): Item[] {
         imageAssetIds: record.imageAssetIds.length > 0 ? record.imageAssetIds : undefined,
       })
     } else if (record.role === 'assistant') {
-      if (record.content.trim() === '') continue
-      items.push({
-        id: `m-${record.id}`,
-        kind: 'assistant',
-        text: record.content,
-        isError: record.isError,
-        usage: record.usage,
-        thinking: record.thinking,
-        thinkingSignature: record.thinkingSignature,
-        cancelled: record.stopReason === 'aborted' || record.isPartial,
+      // Tool-call-only assistant turns still carry a payload worth rendering.
+      const hasBubble = record.content.trim() !== '' || (record.thinking ?? '').trim() !== ''
+      if (hasBubble) {
+        items.push({
+          id: `m-${record.id}`,
+          kind: 'assistant',
+          text: record.content,
+          isError: record.isError,
+          usage: record.usage,
+          thinking: record.thinking,
+          thinkingSignature: record.thinkingSignature,
+          cancelled: record.stopReason === 'aborted' || record.isPartial,
+        })
+      }
+      persistedToolCalls(record).forEach((call, index) => {
+        items.push(invocationCard(call, `m-${record.id}-${index}`))
       })
     } else {
-      items.push({
-        id: `m-${record.id}`,
-        kind: 'tool',
-        toolName: record.toolName ?? 'tool',
-        args: record.toolArgs ?? '',
-        status: record.isError ? 'error' : 'done',
-        text: record.content,
-        durationMs: record.toolDurationMs ?? undefined,
-      })
+      // A result row upgrades the hydrated invocation instead of duplicating it.
+      const target = record.toolCallId
+        ? items.findIndex(
+            (item) => item.kind === 'tool' && item.callId === record.toolCallId,
+          )
+        : -1
+      if (target >= 0) {
+        const card = items[target] as ToolCard
+        items[target] = {
+          ...card,
+          status: record.isError ? 'error' : 'done',
+          text: record.content,
+          args: record.toolArgs ?? card.args,
+          durationMs: record.toolDurationMs ?? undefined,
+          unfinished: false,
+        }
+      } else {
+        items.push({
+          id: `m-${record.id}`,
+          kind: 'tool',
+          toolName: record.toolName ?? 'tool',
+          callId: record.toolCallId ?? undefined,
+          args: record.toolArgs ?? '',
+          status: record.isError ? 'error' : 'done',
+          text: record.content,
+          durationMs: record.toolDurationMs ?? undefined,
+        })
+      }
     }
   }
   // Cache touched paths once per load; streaming renders only read them.
