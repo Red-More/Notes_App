@@ -264,6 +264,9 @@ export function turnFileChanges(items: Item[], userIndex: number): TurnFileChang
     }
     existing.calls += 1
     if (!existing.tools.includes(item.toolName)) existing.tools.push(item.toolName)
+    // `fs_write` is create-only: a successful write anywhere in the turn means
+    // the document is new, even when an edit card happens to be seen first.
+    if (item.toolName === 'fs_write') existing.created = true
     // A known revision always wins over an unknown one.
     if (existing.rev !== null && rev !== null) existing.rev = Math.min(existing.rev, rev)
   }

@@ -258,6 +258,18 @@ describe('turn file changes', () => {
       { path: '/life/c.md', rev: 1, created: true, calls: 1, tools: ['fs_write'] },
     ])
   })
+
+  it('flags a document as created when any write in the turn created it', () => {
+    const items: Item[] = [
+      { id: 'u1', kind: 'user', text: '本轮新建后编辑' },
+      // Card order can surface the edit first; the creation still belongs here.
+      writeCard('t1', '/life/a.md', 2, 'fs_edit'),
+      writeCard('t2', '/life/a.md', 1, 'fs_write'),
+    ]
+    expect(turnFileChanges(items, 0)).toEqual([
+      { path: '/life/a.md', rev: 1, created: true, calls: 2, tools: ['fs_edit', 'fs_write'] },
+    ])
+  })
 })
 
 describe('reasoning timing', () => {
