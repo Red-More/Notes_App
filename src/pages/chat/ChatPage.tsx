@@ -561,7 +561,12 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     },
     [railSeek],
   )
-  const onRailPointerEnd = useCallback(() => {
+  const onRailPointerEnd = useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
+    // The browser releases capture implicitly on pointerup, but a cancelled or
+    // interrupted gesture should still hand the pointer back deterministically.
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
     railPress.current.active = false
   }, [])
   const onRailClick = useCallback(() => {
@@ -962,14 +967,16 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
   }, [modelMenuOpen])
 
   // Escape dismisses the conversation popover; the backdrop handles taps.
+  // The popover only renders when both flags are truthy, so the listener must
+  // follow the same condition and be torn down the moment either one clears.
   useEffect(() => {
-    if (!drawerOpen) return
+    if (!drawerOpen || !convAnchor) return
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') setDrawerOpen(false)
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [drawerOpen])
+  }, [drawerOpen, convAnchor])
 
   /** Arrow keys walk the model list; Enter keeps the button's default action. */
   const moveModelFocus = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
