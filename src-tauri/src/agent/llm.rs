@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Cursor;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -57,12 +57,23 @@ const ANTHROPIC_REQUIRED_MAX_TOKENS: u32 = 4096;
 
 /// Some providers omit tool-call ids. Synthesized ids must stay unique across
 /// turns, otherwise persisted calls and their results collide on reload.
+/// A monotonic counter is used instead of a clock reading, which can repeat
+/// on coarse timers, go backwards, or fail before the Unix epoch.
+static TOOL_CALL_SEQ: AtomicU64 = AtomicU64::new(0);
+
 fn synthetic_tool_call_id(index: usize) -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or_default();
-    format!("call_{nanos}_{index}")
+    let seq = TOOL_CALL_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("call_{seq}_{index}")
+}
+
+/// Providers may omit the id or send a blank one. Both must synthesize so the
+/// persisted invocation and its result row share the same id after a reload.
+fn provider_tool_call_id(raw: Option<&Value>, index: usize) -> String {
+    raw.and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| synthetic_tool_call_id(index))
 }
 
 // ---------------------------------------------------------------------------
@@ -1280,11 +1291,7 @@ async fn openai_stream(
                 None => {
                     let block = next_index;
                     next_index += 1;
-                    let id = call
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| synthetic_tool_call_id(key_index));
+                    let id = provider_tool_call_id(call.get("id"), key_index);
                     let name = call
                         .get("function")
                         .and_then(|f| f.get("name"))
@@ -1577,12 +1584,8 @@ async fn responses_stream(
                 }
                 let block = next_index;
                 next_index += 1;
-                let call_id = item
-                    .get("call_id")
-                    .or_else(|| item.get("id"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| synthetic_tool_call_id(output_index));
+                let call_id =
+                    provider_tool_call_id(item.get("call_id").or_else(|| item.get("id")), output_index);
                 let name = item
                     .get("name")
                     .and_then(Value::as_str)
@@ -2399,11 +2402,7 @@ async fn openai_json(
         }
         if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
             for (offset, call) in calls.iter().enumerate() {
-                let id = call
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| synthetic_tool_call_id(offset));
+                let id = provider_tool_call_id(call.get("id"), offset);
                 let name = call
                     .get("function")
                     .and_then(|f| f.get("name"))

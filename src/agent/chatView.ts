@@ -200,12 +200,14 @@ function upsertToolCard(items: Item[], id: string, toolName: string, args: strin
 }
 
 /**
- * Newest card for one call id. Some providers synthesize ids like `call_0` per
- * response, so the same id can legitimately repeat across turns.
+ * Newest card for one call id inside the current assistant round. Provider ids
+ * may repeat across turns or responses, so the scan stops at the assistant
+ * bubble that opened this round and never rewrites an older turn's card.
  */
 function findToolCardIndex(items: Item[], toolCallId: string): number {
   for (let i = items.length - 1; i >= 0; i -= 1) {
     const item = items[i]
+    if (item.kind === 'assistant') return -1
     if (item.kind === 'tool' && item.callId === toolCallId) return i
   }
   return -1
@@ -543,8 +545,16 @@ export function reduceEvent(
       const usage = failed ? null : usageFromMessage(message)
       const authoritative = text.trim() !== '' ? text : (current?.text ?? '')
       const shown = failed ? (authoritative.trim() !== '' ? authoritative : errorText(info!)) : text
+      // Reasoning is renderable on its own; only drop a truly empty reply, or
+      // the live view loses the thinking block that history would show again.
+      const settledThinking = thinking ?? current?.thinking ?? null
 
-      if (!failed && shown.trim() === '' && toolCalls === null) {
+      if (
+        !failed &&
+        shown.trim() === '' &&
+        toolCalls === null &&
+        (settledThinking ?? '').trim() === ''
+      ) {
         return {
           view: {
             ...flushed,
@@ -570,7 +580,7 @@ export function reduceEvent(
             cancelled: message.stopReason === 'aborted',
             errorCode: info?.code,
             usage,
-            thinking: thinking ?? current?.thinking ?? null,
+            thinking: settledThinking,
             thinkingSignature: failed ? null : thinkingSignature,
           }
           items = items.map((item, i) => (i === index ? settled : item))

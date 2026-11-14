@@ -167,6 +167,54 @@ describe('tool cards', () => {
     expect(card?.kind === 'tool' && card.text).toBe('已写入')
     expect(card?.kind === 'tool' && card.unfinished).toBeUndefined()
   })
+
+  it('keeps a repeated provider call id in its own assistant round', () => {
+    // Some providers synthesize `call_0` per response; the second round must
+    // append a card instead of rewriting the first round's card in place.
+    const { view } = fold([
+      { type: 'message_start', message: user('问') },
+      { type: 'message_start', message: assistant('', 'stop') },
+      { type: 'tool_execution_start', toolCallId: 'call_0', toolName: 'fs_read', args: {} },
+      {
+        type: 'tool_execution_end',
+        toolCallId: 'call_0',
+        toolName: 'fs_read',
+        result: { content: [{ type: 'text', text: '第一次' }], details: {} },
+        isError: false,
+      },
+      { type: 'message_start', message: assistant('', 'stop') },
+      { type: 'tool_execution_start', toolCallId: 'call_0', toolName: 'fs_read', args: {} },
+      {
+        type: 'tool_execution_end',
+        toolCallId: 'call_0',
+        toolName: 'fs_read',
+        result: { content: [{ type: 'text', text: '第二次' }], details: {} },
+        isError: false,
+      },
+    ])
+
+    const cards = view.items.filter((item) => item.kind === 'tool')
+    expect(cards).toHaveLength(2)
+    expect(cards[0].kind === 'tool' && cards[0].text).toBe('第一次')
+    expect(cards[1].kind === 'tool' && cards[1].text).toBe('第二次')
+    expect(cards.every((card) => card.kind === 'tool' && card.status === 'done')).toBe(true)
+  })
+
+  it('keeps a reasoning-only reply instead of deleting the bubble', () => {
+    const reply = assistant('', 'stop')
+    reply.content = [{ type: 'thinking', thinking: '只思考' }]
+
+    const { view } = fold([
+      { type: 'message_start', message: user('问') },
+      { type: 'message_start', message: reply },
+      { type: 'message_end', message: reply },
+    ])
+
+    const replies = view.items.filter((item): item is Bubble => item.kind === 'assistant')
+    expect(replies).toHaveLength(1)
+    expect(replies[0].thinking).toBe('只思考')
+    expect(replies[0].streaming).toBe(false)
+  })
 })
 
 describe('history projection', () => {
