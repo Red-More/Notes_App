@@ -5,6 +5,8 @@ export interface PageHeaderAction {
   icon: ReactNode
   label: string
   onClick: () => void
+  /** Anchor for popovers that must point at this action button. */
+  ref?: Ref<HTMLButtonElement>
 }
 
 interface PageHeaderProps {
@@ -73,6 +75,7 @@ export default function PageHeader({
                 {headerActions.map((a) => (
                   <button
                     key={a.label}
+                    ref={a.ref}
                     type="button"
                     className="icon-btn"
                     onClick={a.onClick}

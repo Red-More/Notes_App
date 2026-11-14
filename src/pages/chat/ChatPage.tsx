@@ -1,7 +1,7 @@
 //! 对话页：pi-agent 事件的流式渲染 + 工具卡片 + 会话管理。
 //!
-//! 渲染策略（D9）：流式阶段纯文本；`message_end` 后也只展示纯文本，
-//! 不使用 `dangerouslySetInnerHTML`，模型输出不经过任何 HTML 解析。
+//! 渲染策略：按 part.type 分流——正文 text 走共享 Markdown 渲染器（原始 HTML
+//! 关闭，模型输出不会成为可执行标记），工具调用/结果走 ToolCardView。
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api, assetApi, chatApi } from '../../api'
@@ -29,7 +29,7 @@ import type {
 } from '../../types'
 import { friendlyError, bytesToBase64 } from '../../utils'
 import { toast } from '../../toast'
-import { ActionSheet, Modal } from '../../components/ui'
+import { ActionSheet, Modal, OverlayPortal } from '../../components/ui'
 import PageHeader from '../../components/PageHeader'
 import EmptyState from '../../components/EmptyState'
 import {
@@ -54,6 +54,8 @@ import {
 } from '../../components/Icons'
 import MessageActions from './MessageActions'
 import QueueStatusBar from './QueueStatusBar'
+import ChatMarkdown from './ChatMarkdown'
+import { usePhysicalBack } from '../../system/backButton'
 
 interface Props {
   isActive: boolean
@@ -66,7 +68,7 @@ interface DocPreview {
   html: string
 }
 
-/** One user turn listed in the index popover. */
+/** One user turn listed in the rail's index popover. */
 interface TurnPoint {
   id: string
   label: string
@@ -75,11 +77,12 @@ interface TurnPoint {
 /**
  * Minimap geometry: dots keep a constant gap and the rail length is derived
  * from the dot count (pad * 2 + (n - 1) * gap) instead of being stretched.
+ * A wider gap keeps the dots apart so each anchor is easier to target.
  */
-const RAIL_DOT_GAP = 9
+const RAIL_DOT_GAP = 13
 const RAIL_PAD = 10
 const RAIL_MIN_DOTS = 4
-const RAIL_MAX_DOTS = 24
+const RAIL_MAX_DOTS = 16
 /** A turn becomes current once its bubble reaches this line below the top. */
 const RAIL_ACTIVE_OFFSET = 28
 /** Space kept above a bubble when the index list jumps to it. */
@@ -353,6 +356,8 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
   const [drawerOpen, setDrawerOpen] = useState(false)
   // Top-bar model popover and its in-flight switch guard.
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
+  // Conversation list popover anchored to the header's list action.
+  const [convAnchor, setConvAnchor] = useState<{ top: number; left: number } | null>(null)
   const [switchingModel, setSwitchingModel] = useState(false)
   const [renameId, setRenameId] = useState<number | null>(null)
   const [renameText, setRenameText] = useState('')
@@ -392,9 +397,13 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
   const railRef = useRef<HTMLButtonElement>(null)
   const railPopoverRef = useRef<HTMLDivElement>(null)
   const railListRef = useRef<HTMLDivElement>(null)
+  // Conversation popover: scroll container + edge-fade visibility.
+  const convScrollRef = useRef<HTMLDivElement>(null)
+  const [convEdges, setConvEdges] = useState({ top: false, bottom: false })
   // Model popover focus targets for keyboard navigation.
   const modelTriggerRef = useRef<HTMLButtonElement>(null)
   const modelPopoverRef = useRef<HTMLDivElement>(null)
+  const convTriggerRef = useRef<HTMLButtonElement>(null)
 
   // The runtime owns the Agent, the run status, the queue and write ordering.
   const runtime = useMemo(() => new AgentRuntime({ deps: createRuntimeDeps() }), [])
@@ -447,7 +456,7 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     syncActiveTurn()
   }, [syncActiveTurn])
 
-  // One entry per user turn; the label feeds the index popover.
+  // One entry per user turn; the label feeds the rail's index popover.
   const userMessages = useMemo(
     () =>
       items.flatMap((item) =>
@@ -502,17 +511,67 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     return current
   }, [activeTurn, railDots])
 
-  /** Smoothly scroll the chosen turn's bubble to the top of the viewport. */
+  /** Visual position of the active dot inside the sampled rail. */
+  const activeDotIndex = useMemo(
+    () => railDots.indexOf(activeDotTurn),
+    [railDots, activeDotTurn],
+  )
+
+  /** Scroll the chosen turn's bubble to the top of the viewport. */
   const jumpToTurn = useCallback(
-    (turnIndex: number) => {
+    (turnIndex: number, behavior: ScrollBehavior = 'smooth') => {
       const el = scrollRef.current
       const turn = turns[turnIndex]
       const bubble = turn ? bubbleRefs.current.get(turn.id) : undefined
       if (!el || !bubble) return
-      el.scrollTo({ top: Math.max(0, bubble.offsetTop - NAV_JUMP_OFFSET), behavior: 'smooth' })
+      el.scrollTo({ top: Math.max(0, bubble.offsetTop - NAV_JUMP_OFFSET), behavior })
     },
     [turns],
   )
+
+  /** Map a pointer position on the rail lane to the nearest sampled turn. */
+  const railSeek = useCallback(
+    (clientY: number, behavior: ScrollBehavior) => {
+      const rail = railRef.current
+      if (!rail || railDots.length === 0) return
+      const offset = clientY - rail.getBoundingClientRect().top - RAIL_PAD
+      const dot = Math.max(0, Math.min(railDots.length - 1, Math.round(offset / RAIL_DOT_GAP)))
+      jumpToTurn(railDots[dot], behavior)
+    },
+    [jumpToTurn, railDots],
+  )
+
+  // Tap opens the index list (original behaviour); a vertical drag scrubs the
+  // transcript. The 6px slop keeps a slightly shaky tap from becoming a seek.
+  const railPress = useRef({ active: false, startY: 0, moved: false })
+  const onRailPointerDown = useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return
+    // Keep move/up on the rail for the whole drag gesture.
+    event.currentTarget.setPointerCapture?.(event.pointerId)
+    railPress.current = { active: true, startY: event.clientY, moved: false }
+  }, [])
+  const onRailPointerMove = useCallback(
+    (event: React.PointerEvent<HTMLButtonElement>) => {
+      const press = railPress.current
+      if (!press.active) return
+      if (Math.abs(event.clientY - press.startY) <= 6) return
+      press.moved = true
+      // Dragging follows the finger instantly; scroll events keep the thumb in sync.
+      railSeek(event.clientY, 'auto')
+    },
+    [railSeek],
+  )
+  const onRailPointerEnd = useCallback(() => {
+    railPress.current.active = false
+  }, [])
+  const onRailClick = useCallback(() => {
+    // The click synthesized after a drag must not toggle the list.
+    if (railPress.current.moved) {
+      railPress.current.moved = false
+      return
+    }
+    setRailOpen((open) => !open)
+  }, [])
 
   // Close the index on an outside press or Escape, without blocking scrolling.
   useEffect(() => {
@@ -533,6 +592,15 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     }
   }, [railOpen])
 
+  // Open the list around the current turn instead of its top edge.
+  useLayoutEffect(() => {
+    if (!railOpen) return
+    const list = railListRef.current
+    const active = list?.querySelector<HTMLElement>('.chat-index-item.active')
+    if (!list || !active) return
+    list.scrollTop = Math.max(0, active.offsetTop - list.clientHeight / 2 + active.offsetHeight / 2)
+  }, [railOpen])
+
   // Close the token-usage popover on any press outside its ring.
   useEffect(() => {
     if (!contextOpenId) return
@@ -543,15 +611,6 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     document.addEventListener('pointerdown', onPointerDown)
     return () => document.removeEventListener('pointerdown', onPointerDown)
   }, [contextOpenId])
-
-  // Open the list around the current turn instead of its top edge.
-  useLayoutEffect(() => {
-    if (!railOpen) return
-    const list = railListRef.current
-    const active = list?.querySelector<HTMLElement>('.chat-index-item.active')
-    if (!list || !active) return
-    list.scrollTop = Math.max(0, active.offsetTop - list.clientHeight / 2 + active.offsetHeight / 2)
-  }, [railOpen])
 
   const setAttachmentList = useCallback((next: Attachment[]) => {
     attachmentRef.current = next
@@ -901,6 +960,16 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
   }, [modelMenuOpen])
+
+  // Escape dismisses the conversation popover; the backdrop handles taps.
+  useEffect(() => {
+    if (!drawerOpen) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setDrawerOpen(false)
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [drawerOpen])
 
   /** Arrow keys walk the model list; Enter keeps the button's default action. */
   const moveModelFocus = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
@@ -1308,6 +1377,70 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     }
   }, [renameId, renameText])
 
+  /** Open the conversation list as a popover anchored to its header button. */
+  const computeConvAnchor = useCallback((): { top: number; left: number } | null => {
+    const trigger = convTriggerRef.current
+    if (!trigger) return null
+    const rect = trigger.getBoundingClientRect()
+    const viewport = window.innerWidth
+    const width = Math.min(340, viewport - 24)
+    // The popover opens down-right from the button. Clamp the left edge so the
+    // panel can never run off either side of the viewport (the old
+    // right-anchored placement pushed the list past the left edge on phones).
+    const left = Math.max(12, Math.min(rect.left, viewport - width - 12))
+    return { top: rect.bottom + 8, left }
+  }, [])
+
+  const openConversationList = useCallback(() => {
+    const anchor = computeConvAnchor()
+    if (anchor) setConvAnchor(anchor)
+    setDrawerOpen(true)
+  }, [computeConvAnchor])
+
+  // Keep the popover under its trigger when the viewport or keyboard changes.
+  useEffect(() => {
+    if (!drawerOpen) return
+    const update = () => {
+      const anchor = computeConvAnchor()
+      if (anchor) setConvAnchor(anchor)
+    }
+    const vv = window.visualViewport
+    window.addEventListener('resize', update)
+    vv?.addEventListener('resize', update)
+    return () => {
+      window.removeEventListener('resize', update)
+      vv?.removeEventListener('resize', update)
+    }
+  }, [drawerOpen, computeConvAnchor])
+
+  // Hardware back dismisses the popover instead of leaving the page.
+  usePhysicalBack(() => setDrawerOpen(false), drawerOpen)
+
+  /** Fade only the edges that still hide content. */
+  const syncConvEdges = useCallback(() => {
+    const el = convScrollRef.current
+    if (!el) {
+      setConvEdges({ top: false, bottom: false })
+      return
+    }
+    const top = el.scrollTop > 2
+    const bottom = el.scrollTop + el.clientHeight < el.scrollHeight - 2
+    setConvEdges((prev) => (prev.top === top && prev.bottom === bottom ? prev : { top, bottom }))
+  }, [])
+
+  // Re-measure the popover's scroll edges on open and whenever its content or
+  // viewport changes (new rows, keyboard, rotation).
+  useEffect(() => {
+    if (!drawerOpen) return
+    syncConvEdges()
+    const el = convScrollRef.current
+    if (!el) return
+    const observer = new ResizeObserver(syncConvEdges)
+    observer.observe(el)
+    if (el.firstElementChild) observer.observe(el.firstElementChild)
+    return () => observer.disconnect()
+  }, [drawerOpen, conversations.length, syncConvEdges])
+
   // Single source of truth: the conversation binding wins, active model is the
   // fallback. Never render two independent indicators for the same state.
   const modelEntries = settings?.models ?? []
@@ -1343,7 +1476,12 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
       <PageHeader
         title="对话"
         actions={[
-          { icon: <IconChat size={22} />, label: '会话列表', onClick: () => setDrawerOpen(true) },
+          {
+            icon: <IconChat size={22} />,
+            label: '会话列表',
+            ref: convTriggerRef,
+            onClick: openConversationList,
+          },
           {
             icon: <IconPlus size={22} />,
             label: '新建对话',
@@ -1510,8 +1648,14 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
                           </div>
                         )}
                         {item.kind === 'assistant' && item.text !== '' && (
-                          <div className={`chat-bubble assistant ${item.isError ? 'error' : ''}`}>
-                            {item.text}
+                          // 分流点：Bubble.text 是 text part，走 Markdown；工具
+                          // 调用/结果在上面的 ToolCardView 分支，二者不混染。
+                          <div
+                            className={`chat-bubble assistant ${item.isError ? 'error' : ''} ${
+                              item.isError ? '' : 'markdown'
+                            }`}
+                          >
+                            {item.isError ? item.text : <ChatMarkdown text={item.text} />}
                           </div>
                         )}
                         {item.kind === 'user' && (
@@ -1685,22 +1829,37 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
         </div>
 
         {turns.length > 0 && (
+          // Tap opens the turn index; drag scrubs. The 44px lane is the touch
+          // target, with the visible pill centered inside it.
           <button
             ref={railRef}
             type="button"
             className="chat-minimap"
             style={{ height: railHeight }}
             aria-label="消息索引"
+            aria-haspopup="dialog"
             aria-expanded={railOpen}
-            onClick={() => setRailOpen((open) => !open)}
+            onClick={onRailClick}
+            onPointerDown={onRailPointerDown}
+            onPointerMove={onRailPointerMove}
+            onPointerUp={onRailPointerEnd}
+            onPointerCancel={onRailPointerEnd}
           >
-            {railDots.map((turnIndex, dotIndex) => (
-              <span
-                key={turns[turnIndex].id}
-                className={`chat-minimap-dot ${turnIndex === activeDotTurn ? 'active' : ''}`}
-                style={{ top: RAIL_PAD + dotIndex * RAIL_DOT_GAP }}
-              />
-            ))}
+            <div className="chat-minimap-track">
+              {railDots.map((turnIndex, dotIndex) => (
+                <span
+                  key={turns[turnIndex].id}
+                  className="chat-minimap-dot"
+                  style={{ top: RAIL_PAD + dotIndex * RAIL_DOT_GAP }}
+                />
+              ))}
+              {activeDotIndex >= 0 && (
+                <span
+                  className="chat-minimap-thumb"
+                  style={{ top: RAIL_PAD + activeDotIndex * RAIL_DOT_GAP }}
+                />
+              )}
+            </div>
           </button>
         )}
 
@@ -1988,77 +2147,95 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
         </Modal>
       )}
 
-      {drawerOpen && (
-        <Modal
-          title="会话"
-          onClose={() => setDrawerOpen(false)}
-          footer={
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={() => void newConversation()}
-            >
-              新建对话
-            </button>
-          }
-        >
-          <div className="chat-conv-list">
-            {conversations.length === 0 && <p className="settings-note">还没有会话</p>}
-            {conversations.map((conv) => (
+      {drawerOpen && convAnchor && (
+        // Portaled: the pager track is a transformed stacking context, so an
+        // in-page popover would paint beneath the tabbar. Viewport coordinates
+        // from the header button anchor it under that trigger.
+        <OverlayPortal>
+          <div className="popover-backdrop" onClick={() => setDrawerOpen(false)} />
+          <div
+            className="chat-conv-popover"
+            role="dialog"
+            aria-label="会话列表"
+            style={
+              {
+                top: convAnchor.top,
+                left: convAnchor.left,
+                // The CSS max-height subtracts this anchor offset so the
+                // popover always fits between the header and the safe area.
+                '--conv-top': `${convAnchor.top}px`,
+              } as React.CSSProperties
+            }
+          >
+            <div className="chat-conv-popover-head">会话列表</div>
+            <div className="chat-conv-body">
               <div
-                key={conv.id}
-                className={`chat-conv-row ${conversation?.id === conv.id ? 'active' : ''}`}
+                className="chat-conv-scroll"
+                ref={convScrollRef}
+                onScroll={syncConvEdges}
               >
-                {renameId === conv.id ? (
-                  <input
-                    className="form-input"
-                    value={renameText}
-                    autoFocus
-                    onChange={(e) => setRenameText(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') void saveRename()
-                      if (e.key === 'Escape') setRenameId(null)
-                    }}
-                    onBlur={() => void saveRename()}
-                  />
-                ) : (
-                  <button
-                    type="button"
-                    className="chat-conv-main"
-                    onClick={() => {
-                      setDrawerOpen(false)
-                      void openConversation(conv)
-                    }}
+              <div className="chat-conv-list">
+                {conversations.length === 0 && <p className="settings-note">还没有会话</p>}
+                {conversations.map((conv) => (
+                  <div
+                    key={conv.id}
+                    className={`chat-conv-row ${conversation?.id === conv.id ? 'active' : ''}`}
                   >
-                    <span className="chat-conv-title">{conv.title}</span>
-                    <span className="chat-conv-meta">
-                      {conv.messageCount} 条 · {conv.model}
-                    </span>
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="icon-btn"
-                  aria-label="重命名"
-                  onClick={() => {
-                    setRenameId(conv.id)
-                    setRenameText(conv.title)
-                  }}
-                >
-                  <IconEdit size={17} />
-                </button>
-                <button
-                  type="button"
-                  className="icon-btn"
-                  aria-label="删除会话"
-                  onClick={() => void removeConversation(conv.id)}
-                >
-                  <IconTrash size={17} />
-                </button>
+                    {renameId === conv.id ? (
+                      <input
+                        className="form-input"
+                        value={renameText}
+                        autoFocus
+                        onChange={(e) => setRenameText(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') void saveRename()
+                          if (e.key === 'Escape') setRenameId(null)
+                        }}
+                        onBlur={() => void saveRename()}
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        className="chat-conv-main"
+                        onClick={() => {
+                          setDrawerOpen(false)
+                          void openConversation(conv)
+                        }}
+                      >
+                        <span className="chat-conv-title">{conv.title}</span>
+                        <span className="chat-conv-meta">
+                          {conv.messageCount} 条 · {conv.model}
+                        </span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      aria-label="重命名"
+                      onClick={() => {
+                        setRenameId(conv.id)
+                        setRenameText(conv.title)
+                      }}
+                    >
+                      <IconEdit size={17} />
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      aria-label="删除会话"
+                      onClick={() => void removeConversation(conv.id)}
+                    >
+                      <IconTrash size={17} />
+                    </button>
+                  </div>
+                ))}
               </div>
-            ))}
+            </div>
+            {convEdges.top && <span className="chat-conv-fade top" aria-hidden="true" />}
+            {convEdges.bottom && <span className="chat-conv-fade bottom" aria-hidden="true" />}
           </div>
-        </Modal>
+        </div>
+        </OverlayPortal>
       )}
     </div>
   )

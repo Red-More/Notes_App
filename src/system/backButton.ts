@@ -9,13 +9,14 @@
 
 import { useEffect, useRef } from 'react'
 
-export function usePhysicalBack(handler: () => void): void {
+export function usePhysicalBack(handler: () => void, enabled = true): void {
   const latest = useRef(handler)
   useEffect(() => {
     latest.current = handler
   }, [handler])
 
   useEffect(() => {
+    if (!enabled) return
     let unlisten: (() => void) | undefined
     let disposed = false
     void (async () => {
@@ -32,5 +33,5 @@ export function usePhysicalBack(handler: () => void): void {
       disposed = true
       unlisten?.()
     }
-  }, [])
+  }, [enabled])
 }
