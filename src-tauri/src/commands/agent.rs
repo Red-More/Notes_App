@@ -96,6 +96,17 @@ pub fn chat_truncate(
     conversations::truncate_after(&vfs, conversation_id, message_id)
 }
 
+/// Drop `message_id` and everything newer; editing rewrites that user turn.
+#[tauri::command]
+pub fn chat_truncate_from(
+    state: State<'_, VfsState>,
+    conversation_id: i64,
+    message_id: i64,
+) -> Result<usize, ToolError> {
+    let vfs = crate::lock(&state.0);
+    conversations::truncate_from(&vfs, conversation_id, message_id)
+}
+
 /// Start a run and persist its user message in one transaction.
 ///
 /// `conversation_id` is absent for the first message of a draft chat: the

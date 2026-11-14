@@ -118,6 +118,16 @@ describe('cancelled close-out', () => {
 })
 
 describe('tool cards', () => {
+  it('appends a new card without dropping earlier items', () => {
+    const { view } = fold([
+      { type: 'message_start', message: user('问') },
+      { type: 'message_start', message: assistant('', 'stop') },
+      { type: 'tool_execution_start', toolCallId: 'c1', toolName: 'fs_read', args: {} },
+    ])
+
+    expect(view.items.map((item) => item.kind)).toEqual(['user', 'assistant', 'tool'])
+  })
+
   it('marks a failed tool and exposes the final text', () => {
     const { view, effects } = fold([
       { type: 'tool_execution_start', toolCallId: 'c1', toolName: 'fs_read', args: { path: '/life/a.md' } },
@@ -139,6 +149,23 @@ describe('tool cards', () => {
     const persisted = effects.filter((effect) => effect.kind === 'persist-tool')
     expect(persisted).toHaveLength(1)
     expect(persisted[0].kind === 'persist-tool' && persisted[0].isError).toBe(true)
+  })
+
+  it('shows a completed card even when the start event was missed', () => {
+    const { view } = fold([
+      {
+        type: 'tool_execution_end',
+        toolCallId: 'c9',
+        toolName: 'fs_write',
+        result: { content: [{ type: 'text', text: '已写入' }], details: {} },
+        isError: false,
+      },
+    ])
+
+    const card = view.items.find((item) => item.kind === 'tool')
+    expect(card?.kind === 'tool' && card.status).toBe('done')
+    expect(card?.kind === 'tool' && card.text).toBe('已写入')
+    expect(card?.kind === 'tool' && card.unfinished).toBeUndefined()
   })
 })
 
@@ -234,5 +261,114 @@ describe('history projection', () => {
     const card = items.find((item) => item.kind === 'tool')
     expect(card?.kind === 'tool' && card.args).toBe('{"path":"/life/a.md"}')
     expect(card?.kind === 'tool' && card.durationMs).toBe(1200)
+  })
+
+  it('pairs repeated provider call ids with their own result rows', () => {
+    // Providers that omit ids get synthesized `call_0`-style ids, so the same
+    // call id can appear in several turns; results must pair newest-first.
+    const records: ChatMessageRecord[] = [
+      record({ id: 1, role: 'user', content: '第一轮' }),
+      record({
+        id: 2,
+        role: 'assistant',
+        content: '',
+        toolCalls: JSON.stringify([
+          { type: 'toolCall', id: 'call_0', name: 'fs_write', arguments: { path: '/life/a.md' } },
+        ]),
+      }),
+      record({
+        id: 3,
+        role: 'tool',
+        content: '第一次完成',
+        toolCallId: 'call_0',
+        toolName: 'fs_write',
+      }),
+      record({ id: 4, role: 'assistant', content: '第一轮完成' }),
+      record({ id: 5, role: 'user', content: '第二轮' }),
+      record({
+        id: 6,
+        role: 'assistant',
+        content: '',
+        toolCalls: JSON.stringify([
+          { type: 'toolCall', id: 'call_0', name: 'fs_write', arguments: { path: '/life/b.md' } },
+        ]),
+      }),
+      record({
+        id: 7,
+        role: 'tool',
+        content: '第二次完成',
+        toolCallId: 'call_0',
+        toolName: 'fs_write',
+      }),
+      record({ id: 8, role: 'assistant', content: '第二轮完成' }),
+    ]
+
+    const items = project({ records, events: [] })
+    const cards = items.filter((item) => item.kind === 'tool')
+    expect(cards).toHaveLength(2)
+    expect(cards.every((card) => card.kind === 'tool' && card.status === 'done')).toBe(true)
+    expect(cards.every((card) => card.kind === 'tool' && card.unfinished === false)).toBe(true)
+    // Item ids stay unique even though the provider call id repeats.
+    expect(new Set(items.map((item) => item.id)).size).toBe(items.length)
+    expect(cards.map((card) => (card.kind === 'tool' ? card.text : ''))).toEqual([
+      '第一次完成',
+      '第二次完成',
+    ])
+  })
+
+  it('pairs a result row persisted before its invocation', () => {
+    const records: ChatMessageRecord[] = [
+      record({ id: 1, role: 'user', content: '写文件' }),
+      record({ id: 2, role: 'tool', content: '已写入', toolCallId: 'call_7', toolName: 'fs_write' }),
+      record({
+        id: 3,
+        role: 'assistant',
+        content: '',
+        toolCalls: JSON.stringify([
+          { type: 'toolCall', id: 'call_7', name: 'fs_write', arguments: { path: '/life/a.md' } },
+        ]),
+      }),
+      record({ id: 4, role: 'assistant', content: '完成' }),
+    ]
+
+    const items = project({ records, events: [] })
+    const cards = items.filter((item) => item.kind === 'tool')
+    expect(cards).toHaveLength(1)
+    expect(cards[0].kind === 'tool' && cards[0].status).toBe('done')
+    expect(cards[0].kind === 'tool' && cards[0].unfinished).toBe(false)
+    expect(cards[0].kind === 'tool' && cards[0].text).toBe('已写入')
+  })
+})
+
+describe('tool duration', () => {
+  it('reports whole milliseconds so the result row can be persisted', () => {
+    let clock = 10.25
+    const now = () => clock
+    let view = createView([])
+    view = reduceEvent(
+      view,
+      {
+        type: 'tool_execution_start',
+        toolCallId: 'c1',
+        toolName: 'fs_read',
+        args: { path: '/life/a.md' },
+      },
+      now,
+    ).view
+    clock = 10.9
+    view = reduceEvent(
+      view,
+      {
+        type: 'tool_execution_end',
+        toolCallId: 'c1',
+        toolName: 'fs_read',
+        result: { content: [{ type: 'text', text: '读取完成' }], details: {} },
+        isError: false,
+      },
+      now,
+    ).view
+
+    const card = view.items.find((item) => item.kind === 'tool')
+    expect(card?.kind === 'tool' && card.durationMs).toBe(1)
   })
 })

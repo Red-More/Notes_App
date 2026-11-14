@@ -15,6 +15,7 @@ import {
   documentPath,
   partialLength,
   turnToolIds,
+  type Bubble,
   type Item,
   type ToolCard,
 } from '../../agent/chatView'
@@ -31,8 +32,10 @@ import { ActionSheet, Modal } from '../../components/ui'
 import PageHeader from '../../components/PageHeader'
 import EmptyState from '../../components/EmptyState'
 import {
+  IconBranch,
   IconChat,
   IconCollapse,
+  IconCopy,
   IconEdit,
   IconExpand,
   IconEye,
@@ -40,13 +43,15 @@ import {
   IconNote,
   IconPaperclip,
   IconPlus,
+  IconRefresh,
   IconSearch,
   IconSend,
   IconSettings,
   IconStop,
+  IconTrace,
   IconTrash,
 } from '../../components/Icons'
-import DiffViewerModal from '../../components/DiffViewerModal'
+import MessageActions from './MessageActions'
 
 interface Props {
   isActive: boolean
@@ -57,6 +62,42 @@ interface Props {
 interface DocPreview {
   path: string
   html: string
+}
+
+/** One user turn listed in the index popover. */
+interface TurnPoint {
+  id: string
+  label: string
+}
+
+/**
+ * Minimap geometry: dots keep a constant gap and the rail length is derived
+ * from the dot count (pad * 2 + (n - 1) * gap) instead of being stretched.
+ */
+const RAIL_DOT_GAP = 9
+const RAIL_PAD = 10
+const RAIL_MIN_DOTS = 4
+const RAIL_MAX_DOTS = 24
+/** A turn becomes current once its bubble reaches this line below the top. */
+const RAIL_ACTIVE_OFFSET = 28
+/** Space kept above a bubble when the index list jumps to it. */
+const NAV_JUMP_OFFSET = 12
+
+/** Dot count follows the turns, clamped to [MIN, MAX] but never above turns. */
+function navDotCount(total: number): number {
+  if (total === 0) return 0
+  return Math.min(total, Math.max(RAIL_MIN_DOTS, Math.min(RAIL_MAX_DOTS, total)))
+}
+
+/** Even thinning above MAX; the first and last turn are always kept. */
+function sampleTurnIndices(total: number): number[] {
+  const count = navDotCount(total)
+  if (count >= total) return Array.from({ length: total }, (_, index) => index)
+  const indices = new Set<number>([0, total - 1])
+  for (let dot = 1; dot < count - 1; dot += 1) {
+    indices.add(Math.round((dot * (total - 1)) / (count - 1)))
+  }
+  return [...indices].sort((a, b) => a - b)
 }
 
 /** Composer attachment: asset id, preview URL and byte size for the total check. */
@@ -161,13 +202,24 @@ function ToolCardView({ card, step, expanded, onToggle, onOpen, onUndo }: ToolCa
   const canUndo =
     card.status === 'done' && path !== null && ['fs_write', 'fs_edit'].includes(card.toolName)
   const collapsible = card.args.length > 120 || card.text.length > 200
-  const state = card.unfinished
+  // A finished result always wins over a stale orphan flag from old history.
+  const finished = card.status === 'done' || card.status === 'error'
+  const waiting = Boolean(card.unfinished) && !finished
+  const state = waiting
     ? '未完成'
     : card.status === 'running'
       ? '执行中…'
       : card.status === 'error'
         ? '失败'
-        : '完成'
+        : '已完成'
+  // Waiting (orphaned call), running, done and failed get their own dot color.
+  const tone = waiting
+    ? 'waiting'
+    : card.status === 'running'
+      ? 'running'
+      : card.status === 'error'
+        ? 'error'
+        : 'done'
   return (
     <div className={`chat-trace-node ${meta.tone} ${card.status}`}>
       <div className={`chat-trace-icon ${meta.tone}`}>
@@ -180,7 +232,10 @@ function ToolCardView({ card, step, expanded, onToggle, onOpen, onUndo }: ToolCa
           {card.durationMs !== undefined && (
             <span className="chat-trace-duration">{formatDuration(card.durationMs)}</span>
           )}
-          <span className="chat-trace-state">{state}</span>
+          <span className={`chat-trace-state ${tone}`}>
+            <span className={`chat-trace-status ${tone}`} />
+            {state}
+          </span>
           {collapsible && (
             <button
               type="button"
@@ -192,7 +247,7 @@ function ToolCardView({ card, step, expanded, onToggle, onOpen, onUndo }: ToolCa
             </button>
           )}
         </div>
-        {(path || card.text || card.unfinished) && (
+        {(path || card.text || waiting) && (
           <div className="chat-trace-summary">
             {path ? (
               <button type="button" className="chat-file-link" onClick={() => onOpen(path)}>
@@ -285,9 +340,22 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
   const [networkIssue, setNetworkIssue] = useState(false)
   const [contextWindow, setContextWindow] = useState(0)
   const [scrollBottomVisible, setScrollBottomVisible] = useState(false)
-  const [diffView, setDiffView] = useState<{ paths: string[]; title: string } | null>(null)
-  // Maps an item id to its row so a timeline dot can scroll it into view.
-  const rowRefs = useRef(new Map<string, HTMLDivElement>())
+  // Minimap rail + index popover: dots are sampled turns, never scroll-scaled.
+  const [turns, setTurns] = useState<TurnPoint[]>([])
+  const [activeTurn, setActiveTurn] = useState(0)
+  const [railOpen, setRailOpen] = useState(false)
+  // Inline editing of one user turn; the row is replaced by a textarea.
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editText, setEditText] = useState('')
+  const [editBusy, setEditBusy] = useState(false)
+  // Expanded token-usage popover, keyed by the assistant item that owns the ring.
+  const [contextOpenId, setContextOpenId] = useState<string | null>(null)
+  // User bubbles keyed by item id, measured for jumps and the active turn.
+  const bubbleRefs = useRef(new Map<string, HTMLDivElement>())
+  const turnOffsets = useRef<number[]>([])
+  const railRef = useRef<HTMLButtonElement>(null)
+  const railPopoverRef = useRef<HTMLDivElement>(null)
+  const railListRef = useRef<HTMLDivElement>(null)
   // Model popover focus targets for keyboard navigation.
   const modelTriggerRef = useRef<HTMLButtonElement>(null)
   const modelPopoverRef = useRef<HTMLDivElement>(null)
@@ -298,18 +366,150 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
   // Mirror of `online` for the snapshot listener (avoids re-subscribing).
   const onlineRef = useRef(navigator.onLine)
   const scrollRef = useRef<HTMLDivElement>(null)
+  // Auto-follow only while the reader stays at the bottom; scrolling up must
+  // detach immediately, otherwise the next streamed frame snaps back down.
+  const stickToBottom = useRef(true)
+  const touchStartY = useRef(0)
   const bootRef = useRef(false)
 
-  const scrollToBottom = useCallback(() => {
+  const scrollToBottom = useCallback((force = false) => {
     const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
+    if (!el) return
+    if (!force && !stickToBottom.current) return
+    el.scrollTop = el.scrollHeight
+  }, [])
+
+  /** The current turn is the last one whose bubble passed the top line. */
+  const syncActiveTurn = useCallback(() => {
+    const el = scrollRef.current
+    const offsets = turnOffsets.current
+    if (!el || offsets.length === 0) return
+    const line = el.scrollTop + RAIL_ACTIVE_OFFSET
+    let active = 0
+    for (let index = 0; index < offsets.length; index += 1) {
+      if (offsets[index] > line) break
+      active = index
+    }
+    setActiveTurn(active)
   }, [])
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
-    setScrollBottomVisible(el.scrollHeight - el.scrollTop - el.clientHeight > 90)
-  }, [])
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight
+    setScrollBottomVisible(distance > 90)
+    // Hysteresis: only re-attach at the very bottom, detach on any real move.
+    if (distance <= 2) stickToBottom.current = true
+    else if (distance > 4) stickToBottom.current = false
+    // Scrolling only moves the highlight; dot coordinates stay fixed.
+    syncActiveTurn()
+  }, [syncActiveTurn])
+
+  // One entry per user turn; the label feeds the index popover.
+  const userMessages = useMemo(
+    () =>
+      items.flatMap((item) =>
+        item.kind === 'user'
+          ? [{ id: item.id, label: item.text.trim().replace(/\s+/g, ' ') || '图片消息' }]
+          : [],
+      ),
+    [items],
+  )
+
+  /**
+   * Cache each turn's content offset and refresh the index. Runs only on
+   * message and size changes, never on scroll, so the rail never drifts.
+   */
+  const measureRail = useCallback(() => {
+    turnOffsets.current = userMessages.map(
+      (message) => bubbleRefs.current.get(message.id)?.offsetTop ?? 0,
+    )
+    setTurns((prev) =>
+      prev.length === userMessages.length &&
+      prev.every((turn, index) => turn.id === userMessages[index].id)
+        ? prev
+        : userMessages,
+    )
+    if (userMessages.length === 0) setActiveTurn(0)
+    syncActiveTurn()
+  }, [syncActiveTurn, userMessages])
+
+  // Remeasure on message changes, viewport resizes and row height changes
+  // (late-loading images, expanded tool cards, streaming text).
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    measureRail()
+    const observer = new ResizeObserver(() => measureRail())
+    observer.observe(el)
+    el.querySelectorAll('.chat-row').forEach((row) => observer.observe(row))
+    return () => observer.disconnect()
+  }, [measureRail])
+
+  /** Sampled turn indices; their constant spacing drives the rail length. */
+  const railDots = useMemo(() => sampleTurnIndices(turns.length), [turns.length])
+  const railHeight = RAIL_PAD * 2 + Math.max(0, railDots.length - 1) * RAIL_DOT_GAP
+
+  /** The dot at or before the current turn stays highlighted. */
+  const activeDotTurn = useMemo(() => {
+    let current = -1
+    for (const turnIndex of railDots) {
+      if (turnIndex > activeTurn) break
+      current = turnIndex
+    }
+    return current
+  }, [activeTurn, railDots])
+
+  /** Smoothly scroll the chosen turn's bubble to the top of the viewport. */
+  const jumpToTurn = useCallback(
+    (turnIndex: number) => {
+      const el = scrollRef.current
+      const turn = turns[turnIndex]
+      const bubble = turn ? bubbleRefs.current.get(turn.id) : undefined
+      if (!el || !bubble) return
+      el.scrollTo({ top: Math.max(0, bubble.offsetTop - NAV_JUMP_OFFSET), behavior: 'smooth' })
+    },
+    [turns],
+  )
+
+  // Close the index on an outside press or Escape, without blocking scrolling.
+  useEffect(() => {
+    if (!railOpen) return
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node
+      if (railRef.current?.contains(target) || railPopoverRef.current?.contains(target)) return
+      setRailOpen(false)
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setRailOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [railOpen])
+
+  // Close the token-usage popover on any press outside its ring.
+  useEffect(() => {
+    if (!contextOpenId) return
+    const onPointerDown = (event: PointerEvent) => {
+      if ((event.target as HTMLElement).closest('.chat-context')) return
+      setContextOpenId(null)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => document.removeEventListener('pointerdown', onPointerDown)
+  }, [contextOpenId])
+
+  // Open the list around the current turn instead of its top edge.
+  useLayoutEffect(() => {
+    if (!railOpen) return
+    const list = railListRef.current
+    const active = list?.querySelector<HTMLElement>('.chat-index-item.active')
+    if (!list || !active) return
+    list.scrollTop = Math.max(0, active.offsetTop - list.clientHeight / 2 + active.offsetHeight / 2)
+  }, [railOpen])
 
   const setAttachmentList = useCallback((next: Attachment[]) => {
     attachmentRef.current = next
@@ -449,16 +649,26 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
               snapshot.error.code === 'rate_limited',
           )
         }
-        scrollToBottom()
       }),
-    [runtime, scrollToBottom],
+    [runtime],
   )
+
+  // Follow the answer only after the DOM committed and only while the reader
+  // is still near the bottom. Scrolling up detaches; returning re-attaches.
+  useLayoutEffect(() => {
+    if (!stickToBottom.current) return
+    const el = scrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [items])
 
   const openConversation = useCallback(
     async (conv: ChatConversation): Promise<boolean> => {
       conversationRef.current = conv
       setConversation(conv)
       setExpanded(false)
+      setRailOpen(false)
+      setEditingId(null)
+      setContextOpenId(null)
       restoreDraft(String(conv.id))
       setLoading(true)
       try {
@@ -479,7 +689,8 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
         return false
       } finally {
         setLoading(false)
-        scrollToBottom()
+        stickToBottom.current = true
+        scrollToBottom(true)
         setScrollBottomVisible(false)
       }
     },
@@ -492,6 +703,9 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     setConversation(null)
     setItems([])
     setExpanded(false)
+    setRailOpen(false)
+    setEditingId(null)
+    setContextOpenId(null)
     restoreDraft('new')
     setLoading(true)
     try {
@@ -721,6 +935,8 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
       const key = conversationRef.current ? String(conversationRef.current.id) : 'new'
       setInput('')
       setAttachmentList([])
+      // A new turn always follows the answer down.
+      stickToBottom.current = true
       if (conversationRef.current) void ensureTitle(text || '附件')
       try {
         // The runtime persists the user turn, runs the loop and writes results.
@@ -747,6 +963,7 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
   const queueMessage = useCallback(() => {
     const text = input.trim()
     if (!streaming || text === '') return
+    stickToBottom.current = true
     if (queueMode === 'steer') runtime.steer(text)
     else void runtime.followUp(text)
     setInput('')
@@ -762,6 +979,7 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     async (messageId: string) => {
       if (!conversationRef.current || streaming) return
       try {
+        stickToBottom.current = true
         await runtime.retry(messageId)
         setItems(runtime.snapshot().items)
       } catch (e) {
@@ -827,7 +1045,7 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     }
   }, [])
 
-  const copyReply = useCallback(async (text: string) => {
+  const copyText = useCallback(async (text: string) => {
     try {
       await navigator.clipboard.writeText(text)
       toast('已复制')
@@ -836,21 +1054,48 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     }
   }, [])
 
-  const jumpToItem = useCallback((id: string) => {
-    rowRefs.current.get(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  const startEdit = useCallback((item: Bubble) => {
+    setEditingId(item.id)
+    setEditText(item.text)
   }, [])
+
+  const cancelEdit = useCallback(() => {
+    setEditingId(null)
+    setEditText('')
+  }, [])
+
+  /** Rewrite this turn: later messages are dropped before the new run starts. */
+  const submitEdit = useCallback(
+    async (item: Bubble) => {
+      const text = editText.trim()
+      if (!text || editBusy || streaming || loading) return
+      setEditBusy(true)
+      try {
+        stickToBottom.current = true
+        await runtime.editMessage(item.id, text, item.imageAssetIds ?? [])
+        setEditingId(null)
+        setEditText('')
+      } catch (error) {
+        toast(friendlyError(error))
+      } finally {
+        setEditBusy(false)
+      }
+    },
+    [editBusy, editText, loading, runtime, streaming],
+  )
 
   /** Continue an interrupted run: starts a `resume` ledger row, then asks. */
   const resumeRun = useCallback(() => {
     if (streaming) return
+    stickToBottom.current = true
     void runtime.resume().catch((error) => toast(friendlyError(error)))
   }, [runtime, streaming])
 
-  /** Fork the conversation up to the user turn that produced this reply. */
+  /** Fork the transcript at this message into a new conversation. */
   const forkConversation = useCallback(
-    async (assistantText: string) => {
+    async (messageKey: string, text: string) => {
       try {
-        const created = await runtime.fork(assistantText)
+        const created = await runtime.fork(messageKey, text)
         setConversations((prev) => [created, ...prev])
         await openConversation(created)
         toast('已创建对话分支')
@@ -930,19 +1175,16 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     modelEntries.find((item) => item.id === settings?.activeId) ??
     null
   const modelLabel = activeModel
-    ? `${activeModel.label} · ${activeModel.modelId}`
+    ? activeModel.label === activeModel.modelId
+      ? activeModel.label
+      : `${activeModel.label} · ${activeModel.modelId}`
     : '未添加模型'
   const hasModel = settings?.activeId != null
-
-  // Rough token estimate (CJK ~1 char/token, ASCII ~3 chars/token).
-  const contextChars = items.reduce(
-    (sum, item) => sum + item.text.length + (item.kind === 'tool' ? item.args.length : 0),
-    0,
-  )
-  const contextPercent =
-    contextWindow > 0
-      ? Math.min(100, Math.round(((contextChars / 3) * 100) / contextWindow))
-      : 0
+  // Anthropic reports cache tokens separately; OpenAI prompt tokens already
+  // include the cached part, so summing them would double count.
+  const usageIncludesCache = activeModel?.format === 'anthropic-messages'
+  // Inline edit and branch mutations need a settled, fully loaded transcript.
+  const chatBusy = streaming || loading || editBusy
 
   // Stable 1-based numbering for the visible tool-call chain (trace audit).
   const toolSteps = new Map<string, number>()
@@ -1021,10 +1263,12 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
                     onClick={() => void switchModel(entry)}
                   >
                     <span className="chat-model-option-name">{entry.label}</span>
-                    <span className="chat-model-option-meta">
-                      {entry.modelId}
-                      {!entry.configured ? ' · 未配置 Key' : ''}
-                    </span>
+                    {(entry.modelId !== entry.label || !entry.configured) && (
+                      <span className="chat-model-option-meta">
+                        {entry.modelId !== entry.label ? entry.modelId : ''}
+                        {!entry.configured ? ' · 未配置 Key' : ''}
+                      </span>
+                    )}
                     {current && <span className="chat-model-option-check">✓</span>}
                   </button>
                 )
@@ -1034,154 +1278,309 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
         )}
       </div>
 
-      <div className="page-scroll chat-scroll" ref={scrollRef} onScroll={handleScroll}>
-        {loading ? (
-          <div className="list-loading">加载中…</div>
-        ) : items.length === 0 ? (
-          <EmptyState
-            icon={<IconChat size={44} />}
-            text={
-              hasModel
-                ? '说一句话就能记事：试试“记下今天吃了拉面”'
-                : '请先在设置 → AI 助理中添加并启用一个模型'
+      {/* Navigator and transcript share one box: the rail is a sibling of the
+          scroll container, so its dots never scroll with the messages. */}
+      <div className="chat-viewport">
+        <div
+          className="page-scroll chat-scroll"
+          ref={scrollRef}
+          onScroll={handleScroll}
+          onWheel={(event) => {
+            // Wheel-up is explicit reading intent: detach before the next frame.
+            if (event.deltaY < 0) stickToBottom.current = false
+          }}
+          onTouchStart={(event) => {
+            touchStartY.current = event.touches[0]?.clientY ?? 0
+          }}
+          onTouchMove={(event) => {
+            const y = event.touches[0]?.clientY
+            // Finger moving down scrolls the transcript back (reading up).
+            if (y !== undefined && y > touchStartY.current + 4) {
+              stickToBottom.current = false
             }
-          />
-        ) : (
-          items.map((item, index) => {
-            // Settled replies carry their touched paths computed at settle time.
-            const changes = item.kind === 'assistant' && !item.streaming ? item.changes ?? [] : []
-            const usage = item.kind === 'assistant' ? item.usage : null
-            const cost = usage ? usageCost(usage, activeModel) : null
-            const traceIds =
-              item.kind === 'assistant' && !item.streaming ? turnToolIds(items, index) : []
-            return (
-              <div
-                key={item.id}
-                className={`chat-row ${item.kind}`}
-                ref={(node) => {
-                  if (node) rowRefs.current.set(item.id, node)
-                  else rowRefs.current.delete(item.id)
-                }}
-              >
-                <div className="chat-rail">
-                  {item.kind === 'user' && (
-                    <button
-                      type="button"
-                      className="chat-anchor"
-                      aria-label="定位到这条消息"
-                      onClick={() => jumpToItem(item.id)}
-                    />
-                  )}
-                </div>
-                <div className="chat-row-body">
-                  {item.kind === 'tool' ? (
-                    <ToolCardView
-                      card={item}
-                      step={toolSteps.get(item.id) ?? 1}
-                      expanded={expandedTools.has(item.id)}
-                      onToggle={toggleTool}
-                      onOpen={(path) => void openDocPreview(path)}
-                      onUndo={(path) => void undoWrite(path)}
-                    />
-                  ) : (
-                    <>
-                      {item.kind === 'assistant' && item.thinking && (
-                        <div className="chat-thinking">
-                          <button
-                            type="button"
-                            className="chat-thinking-toggle"
-                            aria-expanded={expandedThinking.has(item.id)}
-                            onClick={() => toggleThinking(item.id)}
-                          >
-                            {expandedThinking.has(item.id) ? '收起思考' : '思考'}
-                          </button>
-                          {expandedThinking.has(item.id) && (
-                            <div className="chat-thinking-body">{item.thinking}</div>
-                          )}
-                        </div>
-                      )}
-                      {item.kind === 'assistant' && item.text !== '' && (
-                        <div className={`chat-bubble assistant ${item.isError ? 'error' : ''}`}>
-                          {item.text}
-                        </div>
-                      )}
-                      {item.kind === 'user' && (
-                        <div className={`chat-bubble ${item.kind} ${item.isError ? 'error' : ''}`}>
-                          {item.imageAssetIds && <BubbleImages ids={item.imageAssetIds} />}
-                          {item.text}
-                        </div>
-                      )}
-                      {item.kind === 'assistant' && !item.streaming && (
-                        <div className="chat-actions">
-                          <button
-                            type="button"
-                            className="chat-action"
-                            onClick={() => void copyReply(item.text)}
-                          >
-                            复制
-                          </button>
-                          <button
-                            type="button"
-                            className="chat-action"
-                            onClick={() => void retry(item.id)}
-                          >
-                            重试
-                          </button>
-                          <button
-                            type="button"
-                            className="chat-action"
-                            onClick={() => void forkConversation(item.text)}
-                          >
-                            分支
-                          </button>
-                          <button
-                            type="button"
-                            className="chat-action"
-                            disabled={changes.length === 0}
-                            onClick={() =>
-                              setDiffView({
-                                paths: changes,
-                                title: item.text.slice(0, 40) || '本次变更',
-                              })
-                            }
-                          >
-                            变更{changes.length > 0 ? ` ${changes.length}` : ''}
-                          </button>
-                          {traceIds.length > 0 && (
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'PageUp' || event.key === 'ArrowUp' || event.key === 'Home') {
+              stickToBottom.current = false
+            }
+          }}
+        >
+          {loading ? (
+            <div className="list-loading">加载中…</div>
+          ) : items.length === 0 ? (
+            <EmptyState
+              icon={<IconChat size={44} />}
+              text={
+                hasModel
+                  ? '说一句话就能记事：试试“记下今天吃了拉面”'
+                  : '请先在设置 → AI 助理中添加并启用一个模型'
+              }
+            />
+          ) : (
+            items.map((item, index) => {
+              // Settled replies carry their usage and trace summary.
+              const usage = item.kind === 'assistant' ? item.usage : null
+              const cost = usage ? usageCost(usage, activeModel) : null
+              // Real prompt size of this reply, not a whole-transcript estimate.
+              const usedTokens = usage
+                ? usageIncludesCache
+                  ? usage.input + usage.cacheRead + usage.cacheWrite
+                  : usage.input
+                : 0
+              const contextPercent =
+                usage && contextWindow > 0
+                  ? Math.min(100, Math.round((usedTokens * 100) / contextWindow))
+                  : 0
+              const contextColor =
+                contextPercent > 80 ? 'var(--danger)' : 'var(--accent)'
+              const traceIds =
+                item.kind === 'assistant' && !item.streaming ? turnToolIds(items, index) : []
+              const traceExpanded =
+                traceIds.length > 0 && traceIds.every((id) => expandedTools.has(id))
+              return (
+                <div key={item.id} className={`chat-row ${item.kind}`}>
+                  <div className="chat-row-body">
+                    {item.kind === 'tool' ? (
+                      <ToolCardView
+                        card={item}
+                        step={toolSteps.get(item.id) ?? 1}
+                        expanded={expandedTools.has(item.id)}
+                        onToggle={toggleTool}
+                        onOpen={(path) => void openDocPreview(path)}
+                        onUndo={(path) => void undoWrite(path)}
+                      />
+                    ) : (
+                      <>
+                        {item.kind === 'assistant' && item.thinking && (
+                          <div className="chat-thinking">
                             <button
                               type="button"
-                              className="chat-action"
-                              onClick={() => toggleTrace(traceIds)}
+                              className="chat-thinking-toggle"
+                              aria-expanded={expandedThinking.has(item.id)}
+                              onClick={() => toggleThinking(item.id)}
                             >
-                              轨迹 {traceIds.length}
+                              {expandedThinking.has(item.id) ? '收起思考' : '思考'}
                             </button>
-                          )}
-                          {usage && (
-                            <span
-                              className="chat-usage"
-                              title={`输入 ${usage.input} · 输出 ${usage.output} · 缓存读 ${usage.cacheRead}`}
-                            >
-                              {formatTokens(usage.input)}↑ {formatTokens(usage.output)}↓
-                              {cost !== null && ` · $${cost.toFixed(4)}`}
-                            </span>
-                          )}
-                          <span
-                            className="chat-context-ring"
-                            style={{
-                              background: `conic-gradient(var(--accent) ${contextPercent}%, var(--border) 0)`,
-                            }}
-                            title={`上下文占用约 ${contextPercent}%`}
-                          >
-                            <span>{contextPercent}%</span>
-                          </span>
-                        </div>
-                      )}
-                    </>
-                  )}
+                            {expandedThinking.has(item.id) && (
+                              <div className="chat-thinking-body">{item.thinking}</div>
+                            )}
+                          </div>
+                        )}
+                        {item.kind === 'assistant' && item.text !== '' && (
+                          <div className={`chat-bubble assistant ${item.isError ? 'error' : ''}`}>
+                            {item.text}
+                          </div>
+                        )}
+                        {item.kind === 'user' && (
+                          <>
+                            {editingId === item.id ? (
+                              <div
+                                className="chat-edit"
+                                ref={(node) => {
+                                  if (node) bubbleRefs.current.set(item.id, node)
+                                  else bubbleRefs.current.delete(item.id)
+                                }}
+                              >
+                                <textarea
+                                  className="chat-edit-input"
+                                  value={editText}
+                                  rows={3}
+                                  autoFocus
+                                  onChange={(event) => setEditText(event.target.value)}
+                                  onKeyDown={(event) => {
+                                    if (event.key === 'Escape') cancelEdit()
+                                    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                                      event.preventDefault()
+                                      void submitEdit(item)
+                                    }
+                                  }}
+                                />
+                                <div className="chat-edit-actions">
+                                  <button
+                                    type="button"
+                                    className="chat-edit-btn"
+                                    disabled={editBusy}
+                                    onClick={cancelEdit}
+                                  >
+                                    取消
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="chat-edit-btn primary"
+                                    disabled={editBusy || editText.trim() === ''}
+                                    onClick={() => void submitEdit(item)}
+                                  >
+                                    {editBusy ? '发送中…' : '重新发送'}
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <div
+                                className={`chat-bubble ${item.kind} ${item.isError ? 'error' : ''}`}
+                                ref={(node) => {
+                                  if (node) bubbleRefs.current.set(item.id, node)
+                                  else bubbleRefs.current.delete(item.id)
+                                }}
+                              >
+                                {item.imageAssetIds && <BubbleImages ids={item.imageAssetIds} />}
+                                {item.text}
+                              </div>
+                            )}
+                            {editingId !== item.id && (
+                              <MessageActions
+                                role="user"
+                                actions={[
+                                  {
+                                    key: 'copy',
+                                    label: '复制',
+                                    icon: <IconCopy size={15} />,
+                                    onClick: () => void copyText(item.text),
+                                  },
+                                  {
+                                    key: 'edit',
+                                    label: '编辑',
+                                    icon: <IconEdit size={15} />,
+                                    // Only rows already persisted can be rewritten.
+                                    disabled: chatBusy || !/^m-\d+$/.test(item.id),
+                                    onClick: () => startEdit(item),
+                                  },
+                                  {
+                                    key: 'branch',
+                                    label: '分支',
+                                    icon: <IconBranch size={15} />,
+                                    disabled: chatBusy,
+                                    onClick: () => void forkConversation(item.id, item.text),
+                                  },
+                                ]}
+                              />
+                            )}
+                          </>
+                        )}
+                        {item.kind === 'assistant' && !item.streaming && item.text !== '' && (
+                          <MessageActions
+                            role="assistant"
+                            actions={[
+                              {
+                                key: 'copy',
+                                label: '复制',
+                                icon: <IconCopy size={15} />,
+                                onClick: () => void copyText(item.text),
+                              },
+                              {
+                                key: 'retry',
+                                label: '重试',
+                                icon: <IconRefresh size={15} />,
+                                onClick: () => void retry(item.id),
+                              },
+                              {
+                                key: 'branch',
+                                label: '分支',
+                                icon: <IconBranch size={15} />,
+                                onClick: () => void forkConversation(item.id, item.text),
+                              },
+                              ...(traceIds.length > 0
+                                ? [
+                                    {
+                                      key: 'trace',
+                                      label: traceExpanded
+                                        ? `收起本轮工具调用轨迹（${traceIds.length} 步）`
+                                        : `展开本轮工具调用轨迹（${traceIds.length} 步）`,
+                                      icon: <IconTrace size={15} />,
+                                      onClick: () => toggleTrace(traceIds),
+                                    },
+                                  ]
+                                : []),
+                            ]}
+                            trailing={
+                              <>
+                                {usage && (
+                                  <span
+                                    className="chat-usage"
+                                    title={`输入 ${usage.input} · 输出 ${usage.output} · 缓存读 ${usage.cacheRead}`}
+                                  >
+                                    {formatTokens(usage.input)}↑ {formatTokens(usage.output)}↓
+                                    {cost !== null && ` · $${cost.toFixed(4)}`}
+                                  </span>
+                                )}
+                                {usage && contextWindow > 0 && (
+                                  <span className="chat-context">
+                                    <button
+                                      type="button"
+                                      className="chat-context-ring"
+                                      aria-label="上下文用量"
+                                      aria-expanded={contextOpenId === item.id}
+                                      style={{
+                                        background: `conic-gradient(${contextColor} ${contextPercent}%, var(--border) 0)`,
+                                      }}
+                                      onClick={() =>
+                                        setContextOpenId((open) =>
+                                          open === item.id ? null : item.id,
+                                        )
+                                      }
+                                    >
+                                      <span>{contextPercent}%</span>
+                                    </button>
+                                    {contextOpenId === item.id && (
+                                      <span className="chat-context-popover" role="status">
+                                        当前已使用 {usedTokens.toLocaleString()} tokens，上限{' '}
+                                        {contextWindow.toLocaleString()}
+                                      </span>
+                                    )}
+                                  </span>
+                                )}
+                              </>
+                            }
+                          />
+                        )}
+                      </>
+                    )}
+                  </div>
                 </div>
-              </div>
-            )
-          })
+              )
+            })
+          )}
+        </div>
+
+        {turns.length > 0 && (
+          <button
+            ref={railRef}
+            type="button"
+            className="chat-minimap"
+            style={{ height: railHeight }}
+            aria-label="消息索引"
+            aria-expanded={railOpen}
+            onClick={() => setRailOpen((open) => !open)}
+          >
+            {railDots.map((turnIndex, dotIndex) => (
+              <span
+                key={turns[turnIndex].id}
+                className={`chat-minimap-dot ${turnIndex === activeDotTurn ? 'active' : ''}`}
+                style={{ top: RAIL_PAD + dotIndex * RAIL_DOT_GAP }}
+              />
+            ))}
+          </button>
+        )}
+
+        {railOpen && turns.length > 0 && (
+          <div ref={railPopoverRef} className="chat-index" role="dialog" aria-label="消息索引">
+            <div className="chat-index-head">消息索引</div>
+            <div ref={railListRef} className="chat-index-list">
+              {turns.map((turn, index) => (
+                <button
+                  key={turn.id}
+                  type="button"
+                  className={`chat-index-item ${index === activeTurn ? 'active' : ''}`}
+                  onClick={() => {
+                    jumpToTurn(index)
+                    setRailOpen(false)
+                  }}
+                >
+                  <span className="chat-index-no">{index + 1}</span>
+                  <span className="chat-index-text">{turn.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
         )}
       </div>
 
@@ -1190,7 +1589,7 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
           type="button"
           className="chat-scroll-bottom"
           aria-label="回到底部"
-          onClick={scrollToBottom}
+          onClick={() => scrollToBottom(true)}
         >
           ↓
         </button>
@@ -1398,14 +1797,6 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
             <p className="settings-note">加载中…</p>
           )}
         </Modal>
-      )}
-
-      {diffView && (
-        <DiffViewerModal
-          paths={diffView.paths}
-          title={diffView.title}
-          onClose={() => setDiffView(null)}
-        />
       )}
 
       {drawerOpen && (

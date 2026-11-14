@@ -23,8 +23,6 @@ export interface Bubble {
   /** Reasoning text streamed before the visible answer. */
   thinking?: string | null
   thinkingSignature?: string | null
-  /** Paths touched by this reply, cached when the reply settles. */
-  changes?: string[]
   /** Image assets the user attached to this message. */
   imageAssetIds?: number[]
 }
@@ -184,31 +182,33 @@ export function turnToolIds(items: Item[], assistantIndex: number): string[] {
   return ids
 }
 
-/** Paths written by the tool turn that produced this assistant reply. */
-export function turnChanges(items: Item[], assistantIndex: number): string[] {
-  const paths: string[] = []
-  for (let i = assistantIndex - 1; i >= 0; i -= 1) {
-    const item = items[i]
-    if (item.kind === 'user') break
-    if (item.kind !== 'tool') continue
-    if (item.status !== 'done') continue
-    if (!['fs_write', 'fs_edit'].includes(item.toolName)) continue
-    const path = documentPath(item)
-    if (path && !paths.includes(path)) paths.unshift(path)
-  }
-  return paths
-}
-
 /** Insert or update a tool card without touching the rest of the transcript. */
 function upsertToolCard(items: Item[], id: string, toolName: string, args: string): Item[] {
-  if (!items.some((item) => item.id === id && item.kind === 'tool')) {
+  const index = findToolCardIndex(items, id)
+  if (index < 0) {
     return [
+      ...items,
       { id, kind: 'tool', toolName, callId: id, args, status: 'running', text: '' },
     ]
   }
-  return items.map((item) =>
-    item.id === id && item.kind === 'tool' ? { ...item, toolName, args, callId: id } : item,
+  // A live invocation always means the card is no longer an orphan.
+  return items.map((item, i) =>
+    i === index && item.kind === 'tool'
+      ? { ...item, toolName, args, callId: id, status: 'running', unfinished: false }
+      : item,
   )
+}
+
+/**
+ * Newest card for one call id. Some providers synthesize ids like `call_0` per
+ * response, so the same id can legitimately repeat across turns.
+ */
+function findToolCardIndex(items: Item[], toolCallId: string): number {
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    const item = items[i]
+    if (item.kind === 'tool' && item.callId === toolCallId) return i
+  }
+  return -1
 }
 
 interface PersistedToolCall {
@@ -238,7 +238,9 @@ function persistedToolCalls(record: ChatMessageRecord): PersistedToolCall[] {
 function invocationCard(call: PersistedToolCall, fallbackId: string): ToolCard {
   const callId = call.id?.trim() || fallbackId
   return {
-    id: callId,
+    // The item id stays unique per transcript row; callId is only used to pair
+    // the invocation with its result, and provider ids may repeat across turns.
+    id: fallbackId,
     kind: 'tool',
     toolName: call.name?.trim() || 'tool',
     callId,
@@ -251,7 +253,33 @@ function invocationCard(call: PersistedToolCall, fallbackId: string): ToolCard {
 
 /** Persisted records → items. Runs once per conversation load. */
 export function projectHistory(records: ChatMessageRecord[]): Item[] {
+  // Pre-scan every result row so pairing does not depend on row order and
+  // repeated provider call ids still bind to their own turn.
+  const resultsByCall = new Map<string, ChatMessageRecord[]>()
+  for (const record of records) {
+    if (record.role !== 'tool' || !record.toolCallId) continue
+    const list = resultsByCall.get(record.toolCallId)
+    if (list) list.push(record)
+    else resultsByCall.set(record.toolCallId, [record])
+  }
+  const cardCounts = new Map<string, number>()
+  for (const record of records) {
+    if (record.role !== 'assistant') continue
+    persistedToolCalls(record).forEach((call, index) => {
+      const key = call.id?.trim() || `m-${record.id}-${index}`
+      cardCounts.set(key, (cardCounts.get(key) ?? 0) + 1)
+    })
+  }
+  // Results claimed by an invocation card; extra rows stay standalone.
+  // Align from the newest end so a completed latest turn never stays orphaned.
+  const reserved = new Set<number>()
+  for (const [callId, list] of resultsByCall) {
+    const cards = cardCounts.get(callId) ?? 0
+    list.slice(Math.max(0, list.length - cards)).forEach((row) => reserved.add(row.id))
+  }
+
   const items: Item[] = []
+  const ordinals = new Map<string, number>()
   for (const record of records) {
     if (record.role === 'user') {
       items.push({
@@ -276,45 +304,43 @@ export function projectHistory(records: ChatMessageRecord[]): Item[] {
         })
       }
       persistedToolCalls(record).forEach((call, index) => {
-        items.push(invocationCard(call, `m-${record.id}-${index}`))
+        const card = invocationCard(call, `m-${record.id}-${index}`)
+        const key = card.callId ?? card.id
+        const ordinal = ordinals.get(key) ?? 0
+        ordinals.set(key, ordinal + 1)
+        const total = cardCounts.get(key) ?? 0
+        const results = resultsByCall.get(key)
+        // Cards and results are both chronological; align their newest ends.
+        const result = results?.[results.length - total + ordinal]
+        items.push(result ? withToolResult(card, result) : card)
       })
-    } else {
-      // A result row upgrades the hydrated invocation instead of duplicating it.
-      const target = record.toolCallId
-        ? items.findIndex(
-            (item) => item.kind === 'tool' && item.callId === record.toolCallId,
-          )
-        : -1
-      if (target >= 0) {
-        const card = items[target] as ToolCard
-        items[target] = {
-          ...card,
-          status: record.isError ? 'error' : 'done',
-          text: record.content,
-          args: record.toolArgs ?? card.args,
-          durationMs: record.toolDurationMs ?? undefined,
-          unfinished: false,
-        }
-      } else {
-        items.push({
-          id: `m-${record.id}`,
-          kind: 'tool',
-          toolName: record.toolName ?? 'tool',
-          callId: record.toolCallId ?? undefined,
-          args: record.toolArgs ?? '',
-          status: record.isError ? 'error' : 'done',
-          text: record.content,
-          durationMs: record.toolDurationMs ?? undefined,
-        })
-      }
+    } else if (!record.toolCallId || !reserved.has(record.id)) {
+      // A result without any invocation row (legacy or over-counted rows).
+      items.push({
+        id: `m-${record.id}`,
+        kind: 'tool',
+        toolName: record.toolName ?? 'tool',
+        callId: record.toolCallId ?? undefined,
+        args: record.toolArgs ?? '',
+        status: record.isError ? 'error' : 'done',
+        text: record.content,
+        durationMs: record.toolDurationMs ?? undefined,
+      })
     }
   }
-  // Cache touched paths once per load; streaming renders only read them.
-  for (let index = 0; index < items.length; index += 1) {
-    const item = items[index]
-    if (item.kind === 'assistant') item.changes = turnChanges(items, index)
-  }
   return items
+}
+
+/** Attach a persisted result row to its hydrated invocation card. */
+function withToolResult(card: ToolCard, record: ChatMessageRecord): ToolCard {
+  return {
+    ...card,
+    status: record.isError ? 'error' : 'done',
+    text: record.content,
+    args: record.toolArgs ?? card.args,
+    durationMs: record.toolDurationMs ?? undefined,
+    unfinished: false,
+  }
 }
 
 /** Character count of a run's JSON partial snapshot (`{text}`). */
@@ -536,7 +562,6 @@ export function reduceEvent(
       if (id) {
         const index = items.findIndex((item) => item.id === id && item.kind === 'assistant')
         if (index >= 0) {
-          const changes = turnChanges(items, index)
           const settled: Bubble = {
             ...(items[index] as Bubble),
             text: shown,
@@ -547,7 +572,6 @@ export function reduceEvent(
             usage,
             thinking: thinking ?? current?.thinking ?? null,
             thinkingSignature: failed ? null : thinkingSignature,
-            changes,
           }
           items = items.map((item, i) => (i === index ? settled : item))
         }
@@ -585,9 +609,7 @@ export function reduceEvent(
         view: {
           ...view,
           toolStartedAt: startedAt,
-          items: upsertToolCard(view.items, event.toolCallId, event.toolName, args).map((item) =>
-            item.id === event.toolCallId && item.kind === 'tool' ? { ...item, status: 'running' } : item,
-          ),
+          items: upsertToolCard(view.items, event.toolCallId, event.toolName, args),
         },
         effects,
       }
@@ -595,13 +617,14 @@ export function reduceEvent(
 
     case 'tool_execution_end': {
       const text = toolResultText(event.result)
-      const card = view.items.find(
-        (item): item is ToolCard => item.id === event.toolCallId && item.kind === 'tool',
-      )
+      const cardIndex = findToolCardIndex(view.items, event.toolCallId)
+      const card = cardIndex >= 0 ? (view.items[cardIndex] as ToolCard) : undefined
       const started = view.toolStartedAt.get(event.toolCallId)
       const startedAt = new Map(view.toolStartedAt)
       startedAt.delete(event.toolCallId)
-      const durationMs = started === undefined ? undefined : now() - started
+      // Whole milliseconds: the persisted column is an integer, and a float
+      // would make the whole tool-result write fail on the backend.
+      const durationMs = started === undefined ? undefined : Math.max(0, Math.round(now() - started))
       effects.push({
         kind: 'persist-tool',
         toolCallId: event.toolCallId,
@@ -611,16 +634,35 @@ export function reduceEvent(
         args: card?.args ?? '',
         durationMs,
       })
+      const status: ToolCard['status'] = event.isError ? 'error' : 'done'
+      const items =
+        cardIndex >= 0
+          ? view.items.map((item, index) =>
+              index === cardIndex && item.kind === 'tool'
+                ? {
+                    ...item,
+                    status,
+                    text,
+                    durationMs,
+                    unfinished: false,
+                  }
+                : item,
+            )
+          : [
+              ...view.items,
+              {
+                id: event.toolCallId,
+                kind: 'tool' as const,
+                toolName: event.toolName,
+                callId: event.toolCallId,
+                args: '',
+                status,
+                text,
+                durationMs,
+              },
+            ]
       return {
-        view: {
-          ...view,
-          toolStartedAt: startedAt,
-          items: view.items.map((item) =>
-            item.id === event.toolCallId && item.kind === 'tool'
-              ? { ...item, status: event.isError ? 'error' : 'done', text, durationMs }
-              : item,
-          ),
-        },
+        view: { ...view, toolStartedAt: startedAt, items },
         effects,
       }
     }

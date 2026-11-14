@@ -147,6 +147,7 @@ pub fn run() {
             commands::agent::chat_messages,
             commands::agent::chat_append,
             commands::agent::chat_truncate,
+            commands::agent::chat_truncate_from,
             commands::agent::chat_run_start,
             commands::agent::chat_run_transition,
             commands::agent::chat_run_finish,

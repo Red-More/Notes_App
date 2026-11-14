@@ -474,14 +474,39 @@ pub fn truncate_after(
     conversation_id: i64,
     message_id: i64,
 ) -> Result<usize, ToolError> {
+    delete_messages(vfs, conversation_id, message_id, false)
+}
+
+/// Delete `message_id` itself and every newer message; edit rewrites that turn.
+pub fn truncate_from(
+    vfs: &VirtualFs,
+    conversation_id: i64,
+    message_id: i64,
+) -> Result<usize, ToolError> {
+    delete_messages(vfs, conversation_id, message_id, true)
+}
+
+fn delete_messages(
+    vfs: &VirtualFs,
+    conversation_id: i64,
+    message_id: i64,
+    inclusive: bool,
+) -> Result<usize, ToolError> {
     let conn = vfs.conn();
     ensure_exists(conn, conversation_id)?;
     let at = now(conn)?;
     let tx = conn.unchecked_transaction()?;
-    let removed = tx.execute(
-        "DELETE FROM messages WHERE conversation_id = ?1 AND id > ?2",
-        params![conversation_id, message_id],
-    )?;
+    let removed = if inclusive {
+        tx.execute(
+            "DELETE FROM messages WHERE conversation_id = ?1 AND id >= ?2",
+            params![conversation_id, message_id],
+        )?
+    } else {
+        tx.execute(
+            "DELETE FROM messages WHERE conversation_id = ?1 AND id > ?2",
+            params![conversation_id, message_id],
+        )?
+    };
     tx.execute(
         "UPDATE conversations
          SET updated_at = ?1,

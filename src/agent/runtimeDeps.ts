@@ -13,6 +13,9 @@ export function createRuntimeDeps(): AgentRuntimeDeps {
     truncate: async (conversationId, messageId) => {
       await chatApi.truncate({ conversationId, messageId })
     },
+    truncateFrom: async (conversationId, messageId) => {
+      await chatApi.truncateFrom({ conversationId, messageId })
+    },
     loadSkills: () => skillApi.list(),
     loadMcpTools: () => mcpApi.tools(),
     loadAsset: (id) => assetApi.data(id),

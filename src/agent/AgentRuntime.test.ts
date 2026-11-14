@@ -142,6 +142,14 @@ function memoryDeps(conversation: ChatConversation) {
       const index = list.findIndex((record) => record.id === messageId)
       if (index >= 0) rows.set(conversationId, list.slice(0, index + 1))
     },
+    truncateFrom: async (conversationId, messageId) => {
+      truncates.push({ conversationId, messageId })
+      const list = rows.get(conversationId) ?? []
+      rows.set(
+        conversationId,
+        list.filter((record) => record.id < messageId),
+      )
+    },
     loadSkills: async () => [],
     loadMcpTools: async () => [],
     loadAsset: async () => ({ data: '', mime: 'image/png' }),
@@ -285,6 +293,46 @@ function instantStream(reply: () => string): StreamFn {
     const text = reply()
     stream.push({ type: 'start', partial })
     const final = { ...partial, content: [{ type: 'text', text }] } as AssistantMessage
+    stream.push({ type: 'done', reason: 'stop', message: final })
+    stream.end(final)
+    return stream
+  }
+}
+
+/**
+ * First stream call reasons then requests an unknown tool (fails immediately,
+ * but emits the real start/end events); the second call answers with `reply`.
+ */
+function toolCallStream(reply: string): StreamFn {
+  let turn = 0
+  return () => {
+    const stream = createAssistantMessageEventStream()
+    const partial = assistantMessage()
+    if (turn++ === 0) {
+      const call = {
+        type: 'toolCall' as const,
+        id: 'call_1',
+        name: 'missing_tool',
+        arguments: { query: 'x' },
+      }
+      const thinking = { type: 'thinking' as const, thinking: '先查一下' }
+      stream.push({ type: 'start', partial })
+      partial.content = [thinking]
+      stream.push({ type: 'thinking_start', contentIndex: 0, partial })
+      stream.push({ type: 'thinking_delta', contentIndex: 0, delta: '先查一下', partial })
+      stream.push({ type: 'thinking_end', contentIndex: 0, content: '先查一下', partial })
+      partial.content = [thinking, call]
+      stream.push({ type: 'toolcall_start', contentIndex: 1, partial })
+      stream.push({ type: 'toolcall_delta', contentIndex: 1, delta: '{"query":"x"}', partial })
+      stream.push({ type: 'toolcall_end', contentIndex: 1, toolCall: call, partial })
+      const final = { ...partial, stopReason: 'toolUse' } as AssistantMessage
+      stream.push({ type: 'done', reason: 'toolUse', message: final })
+      stream.end(final)
+      return stream
+    }
+    stream.push({ type: 'start', partial })
+    partial.content = [{ type: 'text', text: reply }]
+    const final = { ...partial, stopReason: 'stop' } as AssistantMessage
     stream.push({ type: 'done', reason: 'stop', message: final })
     stream.end(final)
     return stream
@@ -497,6 +545,59 @@ describe('AgentRuntime', () => {
     await resumed
     expect(store.finishes.some((call) => call.runId === resumeRun?.runId && call.status === 'succeeded'))
       .toBe(true)
+  })
+
+  it('edits an earlier user turn and drops everything after it', async () => {
+    const replies = ['第一答', '第二答', '改后答']
+    let call = 0
+    const { runtime, store } = runtimeWith(instantStream(() => replies[call++] ?? '空'))
+    await runtime.open(conversation(), profile)
+    await runtime.prompt({ text: '第一问' })
+    await runtime.prompt({ text: '第二问' })
+
+    const firstUser = (store.rows.get(1) ?? []).find((row) => row.role === 'user')
+    expect(firstUser).toBeDefined()
+    await runtime.editMessage(`m-${firstUser!.id}`, '改后的问题')
+
+    const rows = store.rows.get(1) ?? []
+    expect(rows.filter((row) => row.role === 'user').map((row) => row.content)).toEqual([
+      '改后的问题',
+    ])
+    expect(rows.some((row) => row.content === '第一答' || row.content === '第二答')).toBe(false)
+    expect(
+      runtime.snapshot().items.some((item) => item.kind === 'assistant' && item.text === '改后答'),
+    ).toBe(true)
+    expect(runtime.snapshot().status).toBe('idle')
+  })
+
+  it('keeps the transcript when a tool call starts mid-stream', async () => {
+    const { runtime } = runtimeWith(toolCallStream('查完了'))
+    await runtime.open(conversation(), profile)
+    await runtime.prompt({ text: '帮我查一下' })
+
+    const items = runtime.snapshot().items
+    expect(items.map((item) => item.kind)).toEqual(['user', 'assistant', 'tool', 'assistant'])
+    expect(items[0].kind === 'user' && items[0].text).toBe('帮我查一下')
+    expect(items[1].kind === 'assistant' && items[1].thinking).toBe('先查一下')
+    expect(items[2].kind === 'tool' && items[2].status).not.toBe('running')
+    expect(items[3].kind === 'assistant' && items[3].text).toBe('查完了')
+  })
+
+  it('rehydrates a completed tool card as completed', async () => {
+    const { runtime, store } = runtimeWith(toolCallStream('查完了'))
+    await runtime.open(conversation(), profile)
+    await runtime.prompt({ text: '帮我查一下' })
+
+    // The backend rejects a fractional duration, which would drop this row.
+    const resultRow = (store.rows.get(1) ?? []).find((row) => row.role === 'tool')
+    expect(resultRow?.toolCallId).toBe('call_1')
+    expect(Number.isInteger(resultRow?.toolDurationMs)).toBe(true)
+
+    const reopened = new AgentRuntime({ deps: store.deps, streamFn: toolCallStream('查完了') })
+    await reopened.open(conversation(), profile)
+    const card = reopened.snapshot().items.find((item) => item.kind === 'tool')
+    expect(card?.kind === 'tool' && card.status).not.toBe('running')
+    expect(card?.kind === 'tool' && card.unfinished).toBe(false)
   })
 
   it('persists the fixture answer and settles the run', async () => {

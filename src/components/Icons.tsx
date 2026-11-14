@@ -219,6 +219,36 @@ export const IconEdit = (p: IconProps) => (
   </svg>
 )
 
+export const IconCopy = (p: IconProps) => (
+  <svg {...base(p)}>
+    <rect x="9" y="9" width="11" height="11" rx="2" />
+    <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+  </svg>
+)
+
+export const IconBranch = (p: IconProps) => (
+  <svg {...base(p)}>
+    <circle cx="6" cy="6" r="2.5" />
+    <circle cx="6" cy="18" r="2.5" />
+    <circle cx="18" cy="6" r="2.5" />
+    <path d="M6 8.5v7M18 8.5c0 4-4 4.5-8 4.5" />
+  </svg>
+)
+
+export const IconRefresh = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+    <path d="M21 3v6h-6" />
+  </svg>
+)
+
+/** Tool-call trace: a pulse line, explained by the button's tooltip. */
+export const IconTrace = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M3 12h4l2-6 4 12 2-6h6" />
+  </svg>
+)
+
 export const IconSave = (p: IconProps) => (
   <svg {...base(p)}>
     <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />

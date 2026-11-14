@@ -17,6 +17,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Cursor;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -53,6 +54,16 @@ const MAX_MODEL_CHARS: usize = 100;
 /// left both `max_tokens` and the output context window empty. This is a
 /// protocol-required fallback, not a model default for other protocols.
 const ANTHROPIC_REQUIRED_MAX_TOKENS: u32 = 4096;
+
+/// Some providers omit tool-call ids. Synthesized ids must stay unique across
+/// turns, otherwise persisted calls and their results collide on reload.
+fn synthetic_tool_call_id(index: usize) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    format!("call_{nanos}_{index}")
+}
 
 // ---------------------------------------------------------------------------
 // 请求：pi 的 { model, context, options }
@@ -1273,7 +1284,7 @@ async fn openai_stream(
                         .get("id")
                         .and_then(Value::as_str)
                         .map(|s| s.to_string())
-                        .unwrap_or_else(|| format!("call_{key_index}"));
+                        .unwrap_or_else(|| synthetic_tool_call_id(key_index));
                     let name = call
                         .get("function")
                         .and_then(|f| f.get("name"))
@@ -1571,7 +1582,7 @@ async fn responses_stream(
                     .or_else(|| item.get("id"))
                     .and_then(Value::as_str)
                     .map(str::to_string)
-                    .unwrap_or_else(|| format!("call_{output_index}"));
+                    .unwrap_or_else(|| synthetic_tool_call_id(output_index));
                 let name = item
                     .get("name")
                     .and_then(Value::as_str)
@@ -2392,7 +2403,7 @@ async fn openai_json(
                     .get("id")
                     .and_then(Value::as_str)
                     .map(str::to_string)
-                    .unwrap_or_else(|| format!("call_{offset}"));
+                    .unwrap_or_else(|| synthetic_tool_call_id(offset));
                 let name = call
                     .get("function")
                     .and_then(|f| f.get("name"))

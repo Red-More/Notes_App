@@ -48,6 +48,8 @@ export interface AgentRuntimeDeps {
   loadMessages(conversationId: number): Promise<ChatMessageRecord[]>
   append(conversationId: number, messages: NewChatMessage[]): Promise<unknown>
   truncate(conversationId: number, messageId: number): Promise<void>
+  /** Delete `messageId` itself and everything newer (edit rewrites that turn). */
+  truncateFrom(conversationId: number, messageId: number): Promise<void>
   loadSkills(): Promise<SkillSummary[]>
   loadMcpTools(): Promise<McpToolInfo[]>
   /** Bytes of one image asset, for replaying and sending user attachments. */
@@ -509,6 +511,42 @@ export class AgentRuntime {
   }
 
   /**
+   * Rewrite one user turn: drop it and every later message, rebuild the Agent
+   * on the kept history, then run the edited prompt as a fresh turn.
+   */
+  async editMessage(
+    messageKey: string,
+    text: string,
+    imageAssetIds: number[] = [],
+  ): Promise<void> {
+    const conversation = this.conversation
+    const profile = this.profile
+    const content = text.trim()
+    if (!conversation || !profile || this.status !== 'idle') throw new Error('会话尚未就绪')
+    if (content === '' && imageAssetIds.length === 0) return
+    // Flush message writes before truncating so no late row lands after the edit.
+    await this.drain()
+    await this.drainRunWrites()
+
+    const records = await this.deps.loadMessages(conversation.id)
+    const match = /^m-(\d+)$/.exec(messageKey)
+    const target = match
+      ? records.findIndex((record) => record.id === Number(match[1]) && record.role === 'user')
+      : -1
+    if (target < 0) throw new Error('找不到要编辑的消息')
+
+    await this.deps.truncateFrom(conversation.id, records[target].id)
+    const kept = records.slice(0, target)
+
+    await this.dispose()
+    this.view = createView(projectHistory(kept))
+    this.emit()
+    await this.attachAgent(profile, kept)
+    // prompt() creates the new run row and appends the edited user turn.
+    await this.prompt({ text: content, imageAssetIds })
+  }
+
+  /**
    * Start a `resume` run after an interruption. The partial answer is dropped
    * and the model continues from the user turn; nothing auto-sends on startup.
    */
@@ -562,23 +600,37 @@ export class AgentRuntime {
     }
   }
 
-  /** Copy the transcript up to the user turn that produced `assistantText`. */
-  async fork(assistantText: string): Promise<ChatConversation> {
+  /**
+   * Copy the transcript up to `messageKey` into a new conversation. A user turn
+   * forks right after itself; an assistant reply forks after its user turn.
+   * `fallbackText` covers live items whose id is not a persisted row id yet.
+   */
+  async fork(messageKey: string, fallbackText = ''): Promise<ChatConversation> {
     const conversation = this.conversation
     if (!conversation) throw new Error('会话尚未就绪')
     const records = await this.deps.loadMessages(conversation.id)
-    let index = -1
-    for (let i = records.length - 1; i >= 0; i -= 1) {
-      if (records[i].role === 'assistant' && records[i].content === assistantText) {
-        index = i
-        break
+    const match = /^m-(\d+)$/.exec(messageKey)
+    let target = match ? records.findIndex((record) => record.id === Number(match[1])) : -1
+    if (target < 0 && fallbackText.trim() !== '') {
+      for (let i = records.length - 1; i >= 0; i -= 1) {
+        if (records[i].content === fallbackText) {
+          target = i
+          break
+        }
       }
     }
     let cutoff = records.length
-    if (index >= 0) {
-      let userIndex = index - 1
-      while (userIndex >= 0 && records[userIndex].role !== 'user') userIndex -= 1
-      cutoff = userIndex >= 0 ? userIndex + 1 : index + 1
+    if (target >= 0) {
+      const record = records[target]
+      if (record.role === 'user') {
+        cutoff = target + 1
+      } else if (record.role === 'assistant') {
+        let userIndex = target - 1
+        while (userIndex >= 0 && records[userIndex].role !== 'user') userIndex -= 1
+        cutoff = userIndex >= 0 ? userIndex + 1 : target + 1
+      } else {
+        cutoff = target + 1
+      }
     }
     const created = await this.deps.createConversation(`${conversation.title} · 分支`.slice(0, 80))
     if (cutoff > 0) {

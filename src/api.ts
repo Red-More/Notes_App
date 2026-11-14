@@ -577,6 +577,9 @@ export const chatApi = {
   /** Remove messages newer than `messageId`; retry continues from the kept user turn. */
   truncate: (params: { conversationId: number; messageId: number }) =>
     invoke<number>('chat_truncate', params),
+  /** Remove `messageId` and everything newer; editing rewrites that user turn. */
+  truncateFrom: (params: { conversationId: number; messageId: number }) =>
+    invoke<number>('chat_truncate_from', params),
   /** Write the run row and its user message in one transaction. */
   runStart: (params: {
     conversationId: number | null
