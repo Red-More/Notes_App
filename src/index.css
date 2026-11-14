@@ -4065,6 +4065,8 @@ body.split-resizing {
   /* Layering: screen edge -> inset -> rail -> gutter -> bubble column. The
      left padding reserves the rail's gutter so dots never overlap messages. */
   padding: 6px 14px 10px calc(var(--rail-inset) + var(--rail-size) + var(--rail-gutter));
+  /* Wrapping inside the unified column must never add a horizontal scrollbar. */
+  overflow-x: hidden;
 }
 
 /* ---- Fixed minimap rail ----
@@ -4273,6 +4275,9 @@ body.split-resizing {
 }
 
 .chat-bubble.assistant {
+  /* Assistant replies share the full column with the trace card above. */
+  width: 100%;
+  max-width: 100%;
   margin-right: auto;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -4303,6 +4308,12 @@ body.split-resizing {
 
 .chat-bubble .chat-markdown > :last-child {
   margin-bottom: 0;
+}
+
+/* Long links wrap inside the unified width; code blocks scroll internally. */
+.chat-bubble .chat-markdown a {
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 /* Retry row for failed or cancelled assistant turns. */
@@ -4612,11 +4623,15 @@ body.split-resizing {
   background: rgba(180, 35, 143, 0.12);
 }
 
+/* Fills the fixed step column; the reasoning spacer inherits the same width. */
 .chat-trace-step {
-  flex: none;
+  display: block;
+  overflow: hidden;
   color: var(--text-3);
+  font-family: var(--font-mono, ui-monospace, 'SFMono-Regular', Consolas, monospace);
   font-size: 10.5px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .chat-trace-label {
@@ -4670,9 +4685,14 @@ body.split-resizing {
   transform: rotate(90deg);
 }
 
+/* Same 26px slot as the chevron button so badges share one right edge. */
 .chat-trace-open-hint {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
   flex: none;
-  margin-left: 2px;
   color: var(--text-3);
   font-size: 16px;
   line-height: 1;
@@ -4728,12 +4748,10 @@ body.split-resizing {
   align-items: center;
   gap: 8px;
   width: 100%;
+  /* One row height for both reasoning and tool cards. */
+  min-height: 40px;
   padding: 7px 9px;
   text-align: left;
-}
-
-.chat-trace-card-toggle .chat-trace-chevron {
-  margin-left: auto;
 }
 
 /* The detail area hugs short content; past the safe viewport it scrolls
@@ -4779,11 +4797,19 @@ body.split-resizing {
   background: var(--surface-2);
 }
 
-/* Inline meta row: one line, shared baseline, the name shrinks first. */
+/* Inline meta row: shared columns so both rows line up vertically. Only the
+   name track is flexible, so it absorbs every leftover pixel instead of
+   sharing space equally with the chips; the chip tracks scale with the
+   viewport but never compete with the name for free space. */
 .chat-tool-call-meta {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
+  display: grid;
+  grid-template-columns:
+    clamp(24px, 6.5vw, 28px)
+    minmax(0, 1fr)
+    clamp(38px, 9.5vw, 42px)
+    clamp(48px, 12.5vw, 54px);
+  align-items: center;
+  column-gap: clamp(4px, 1.2vw, 6px);
   flex: 1;
   min-width: 0;
   white-space: nowrap;
@@ -4793,28 +4819,35 @@ body.split-resizing {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chat-tool-call-duration {
-  flex: none;
-  padding: 1px 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: 1px 0;
   border-radius: 999px;
   background: var(--surface-2);
   color: var(--text-3);
   font-size: 10.5px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .chat-tool-call-badge {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 4px;
-  flex: none;
-  padding: 1px 7px;
+  overflow: hidden;
+  padding: 1px 0;
   border-radius: 999px;
   background: var(--surface-2);
   color: var(--text-3);
   font-size: 10.5px;
+  white-space: nowrap;
 }
 
 .chat-tool-call-badge.running {

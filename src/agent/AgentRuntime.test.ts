@@ -83,6 +83,7 @@ function memoryDeps(conversation: ChatConversation) {
       runId: message.runId ?? null,
       toolArgs: message.toolArgs ?? null,
       toolDurationMs: message.toolDurationMs ?? null,
+      thinkingDurationMs: message.thinkingDurationMs ?? null,
       isPartial: message.isPartial ?? false,
       stopReason: message.stopReason ?? null,
       steerOfRun: message.steerOfRun ?? null,
@@ -715,11 +716,23 @@ describe('AgentRuntime', () => {
     expect(resultRow?.toolCallId).toBe('call_1')
     expect(Number.isInteger(resultRow?.toolDurationMs)).toBe(true)
 
+    // Reasoning time rides on the assistant row, so it survives a reload.
+    const thinkingRow = (store.rows.get(1) ?? []).find(
+      (row) => row.role === 'assistant' && row.thinking === '先查一下',
+    )
+    expect(Number.isInteger(thinkingRow?.thinkingDurationMs)).toBe(true)
+
     const reopened = new AgentRuntime({ deps: store.deps, streamFn: toolCallStream('查完了') })
     await reopened.open(conversation(), profile)
     const card = reopened.snapshot().items.find((item) => item.kind === 'tool')
     expect(card?.kind === 'tool' && card.status).not.toBe('running')
     expect(card?.kind === 'tool' && card.unfinished).toBe(false)
+    const reopenedThinking = reopened
+      .snapshot()
+      .items.find((item) => item.kind === 'assistant' && item.thinking === '先查一下')
+    expect(reopenedThinking?.kind === 'assistant' && reopenedThinking.thinkingMs).toBe(
+      thinkingRow?.thinkingDurationMs,
+    )
   })
 
   it('persists the fixture answer and settles the run', async () => {

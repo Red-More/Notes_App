@@ -73,6 +73,7 @@ function record(partial: Partial<ChatMessageRecord> & { id: number }): ChatMessa
     runId: null,
     toolArgs: null,
     toolDurationMs: null,
+    thinkingDurationMs: null,
     isPartial: false,
     stopReason: null,
     steerOfRun: null,
@@ -276,8 +277,11 @@ describe('reasoning timing', () => {
   it('measures how long the thinking block streamed', () => {
     let clock = 100
     let view = beginPrompt(createView([]))
+    const effects: ViewEffect[] = []
     const apply = (event: AgentEvent) => {
-      view = reduceEvent(view, event, () => clock).view
+      const result = reduceEvent(view, event, () => clock)
+      view = result.view
+      effects.push(...result.effects)
     }
     const think = (text: string): AssistantMessage =>
       ({
@@ -309,6 +313,12 @@ describe('reasoning timing', () => {
     const bubble = view.items.find((item): item is Bubble => item.kind === 'assistant')
     expect(bubble?.thinkingMs).toBe(1500)
     expect(bubble?.thinking).toBe('想')
+
+    // The settled reply persists the measurement so a reload can restore it.
+    clock = 2000
+    apply({ type: 'message_end', message: think('想完了') })
+    const persisted = effects.find((effect) => effect.kind === 'persist-assistant')
+    expect(persisted?.kind === 'persist-assistant' && persisted.thinkingMs).toBe(1500)
   })
 })
 
@@ -357,6 +367,23 @@ describe('history projection', () => {
     expect(items[0].kind === 'user' && items[0].text).toBe('看图')
     expect(items[1].kind === 'assistant' && items[1].text).toBe('这是图')
     expect(items[2].kind === 'tool' && items[2].status).toBe('done')
+  })
+
+  it('restores the persisted reasoning duration', () => {
+    const records: ChatMessageRecord[] = [
+      record({
+        id: 1,
+        role: 'assistant',
+        content: '完成',
+        thinking: '先想一下',
+        thinkingDurationMs: 1500,
+      }),
+    ]
+
+    const items = project({ records, events: [] })
+    const bubble = items.find((item): item is Bubble => item.kind === 'assistant')
+
+    expect(bubble?.thinkingMs).toBe(1500)
   })
 
   it('hydrates the assistant tool-call payload and merges its result row', () => {

@@ -78,6 +78,8 @@ export type ViewEffect =
       usage: MessageUsage | null
       thinking: string | null
       thinkingSignature: string | null
+      /** Wall-clock reasoning time, so the settled row keeps its measurement. */
+      thinkingMs?: number
       /** stop | aborted | error; persisted for the cancelled banner. */
       stopReason: string | null
       isPartial: boolean
@@ -393,6 +395,7 @@ export function projectHistory(records: ChatMessageRecord[]): Item[] {
           usage: record.usage,
           thinking: record.thinking,
           thinkingSignature: record.thinkingSignature,
+          thinkingMs: record.thinkingDurationMs ?? undefined,
           cancelled: record.stopReason === 'aborted' || record.isPartial,
         })
       }
@@ -646,6 +649,8 @@ export function reduceEvent(
       const current = id
         ? flushed.items.find((item): item is Bubble => item.id === id && item.kind === 'assistant')
         : undefined
+      // The value measured by `thinking_end` wins over the message-end fallback.
+      const settledThinkingMs = current?.thinkingMs ?? pendingThinkingMs
       const { text, toolCalls, thinking, thinkingSignature } = extractAssistant(message)
       const failed = message.stopReason === 'error' || message.stopReason === 'aborted'
       const info = failed ? classifyFailure(message) : null
@@ -690,7 +695,7 @@ export function reduceEvent(
             usage,
             thinking: settledThinking,
             thinkingSignature: failed ? null : thinkingSignature,
-            thinkingMs: (items[index] as Bubble).thinkingMs ?? pendingThinkingMs,
+            thinkingMs: settledThinkingMs,
           }
           items = items.map((item, i) => (i === index ? settled : item))
         }
@@ -704,6 +709,7 @@ export function reduceEvent(
         usage,
         thinking: thinking ?? null,
         thinkingSignature: failed ? null : thinkingSignature,
+        thinkingMs: settledThinkingMs,
         stopReason: message.stopReason ?? null,
         isPartial: message.stopReason === 'aborted',
       })

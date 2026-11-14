@@ -199,6 +199,7 @@ CREATE TABLE messages (
     run_id             INTEGER,               -- agent run that produced/owns this row
     tool_args          TEXT,                  -- JSON arguments for tool rows
     tool_duration_ms   INTEGER,               -- wall-clock tool duration
+    thinking_duration_ms INTEGER,             -- wall-clock reasoning duration
     is_partial         INTEGER,              -- 1 when the answer was cut short
     stop_reason        TEXT,                  -- stop | aborted | error
     steer_of_run       INTEGER,               -- non-null marks a steering message
@@ -355,6 +356,19 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
          ON conversations(last_message_at)",
         [],
     )?;
+    // Reasoning duration joined the message row later; old databases keep
+    // their data and gain the column in place.
+    let has_thinking_duration: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'thinking_duration_ms'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_thinking_duration == 0 {
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN thinking_duration_ms INTEGER",
+            [],
+        )?;
+    }
     Ok(())
 }
 

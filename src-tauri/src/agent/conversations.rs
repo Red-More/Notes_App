@@ -62,6 +62,8 @@ pub struct ChatMessage {
     /// JSON arguments of a tool call, kept so history can restore the card.
     pub tool_args: Option<String>,
     pub tool_duration_ms: Option<i64>,
+    /// Wall-clock reasoning duration, measured when the thinking block ended.
+    pub thinking_duration_ms: Option<i64>,
     /// True when the reply was cut short by a cancel/interruption.
     pub is_partial: bool,
     /// stop | aborted | error, when recorded.
@@ -100,6 +102,8 @@ pub struct NewMessage {
     pub tool_args: Option<String>,
     #[serde(default)]
     pub tool_duration_ms: Option<i64>,
+    #[serde(default)]
+    pub thinking_duration_ms: Option<i64>,
     #[serde(default)]
     pub is_partial: bool,
     #[serde(default)]
@@ -298,7 +302,7 @@ pub fn delete(vfs: &VirtualFs, id: i64) -> Result<(), ToolError> {
 /// Columns selected for every `ChatMessage` read; keep in sync with `row_to_message`.
 const MESSAGE_COLUMNS: &str = "id, role, content, tool_calls, tool_call_id, tool_name, is_error,
     created_at, usage_input, usage_output, usage_total, usage_cache_read, usage_cache_write,
-    thinking, thinking_signature, run_id, tool_args, tool_duration_ms,
+    thinking, thinking_signature, run_id, tool_args, tool_duration_ms, thinking_duration_ms,
     is_partial, stop_reason, steer_of_run, image_asset_ids";
 
 /// 读取一条会话的消息，按 id 升序。
@@ -401,10 +405,10 @@ pub fn insert_message(
              (conversation_id, role, content, tool_calls, tool_call_id, tool_name, is_error,
               usage_input, usage_output, usage_total, usage_cache_read, usage_cache_write,
               thinking, thinking_signature, run_id, tool_args,
-              tool_duration_ms, is_partial, stop_reason, steer_of_run, image_asset_ids,
-              created_at)
+              tool_duration_ms, thinking_duration_ms, is_partial, stop_reason, steer_of_run,
+              image_asset_ids, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                 ?17, ?18, ?19, ?20, ?21, ?22)",
+                 ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
         params![
             conversation_id,
             item.role,
@@ -423,6 +427,7 @@ pub fn insert_message(
             item.run_id,
             item.tool_args,
             item.tool_duration_ms,
+            item.thinking_duration_ms,
             if item.is_partial { 1 } else { 0 },
             item.stop_reason,
             item.steer_of_run,
@@ -444,6 +449,7 @@ pub fn insert_message(
         run_id: item.run_id,
         tool_args: item.tool_args,
         tool_duration_ms: item.tool_duration_ms,
+        thinking_duration_ms: item.thinking_duration_ms,
         is_partial: item.is_partial,
         stop_reason: item.stop_reason,
         steer_of_run: item.steer_of_run,
@@ -572,11 +578,12 @@ fn row_to_message(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
         run_id: r.get(15)?,
         tool_args: r.get(16)?,
         tool_duration_ms: r.get(17)?,
-        is_partial: r.get::<_, Option<i64>>(18)?.unwrap_or(0) != 0,
-        stop_reason: r.get(19)?,
-        steer_of_run: r.get(20)?,
+        thinking_duration_ms: r.get(18)?,
+        is_partial: r.get::<_, Option<i64>>(19)?.unwrap_or(0) != 0,
+        stop_reason: r.get(20)?,
+        steer_of_run: r.get(21)?,
         image_asset_ids: r
-            .get::<_, Option<String>>(21)?
+            .get::<_, Option<String>>(22)?
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default(),
         created_at: r.get(7)?,

@@ -189,6 +189,32 @@ function formatDuration(ms: number): string {
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`
 }
 
+/**
+ * Duration chip shared by reasoning and tool rows. The fixed width keeps the
+ * status badge in the same column; history without a measurement shows `--`
+ * so the row never reflows.
+ */
+function TraceDuration({ ms }: { ms?: number }) {
+  return (
+    <time
+      className="chat-tool-call-duration"
+      dateTime={ms === undefined ? undefined : `PT${(ms / 1000).toFixed(3)}S`}
+    >
+      {ms === undefined ? '--' : formatDuration(ms)}
+    </time>
+  )
+}
+
+/** Fixed-width status pill; both trace rows share the same column. */
+function TraceStatusBadge({ tone, label }: { tone: string; label: string }) {
+  return (
+    <span className={`chat-tool-call-badge ${tone}`} role="status">
+      <span className={`chat-trace-status ${tone}`} />
+      {label}
+    </span>
+  )
+}
+
 function formatTokens(tokens: number): string {
   return tokens < 1000 ? String(tokens) : `${(tokens / 1000).toFixed(1)}k`
 }
@@ -379,25 +405,37 @@ function ThinkingTraceItem({
   const running = live && durationMs === undefined
   return (
     <div className="chat-trace-card thinking">
-      <button
-        type="button"
-        className="chat-trace-card-head chat-trace-card-toggle"
-        aria-expanded={expanded}
-        onClick={() => onToggle(id)}
-      >
-        <span className="chat-trace-icon skill">
-          <IconInfo size={14} />
-        </span>
-        <span className="chat-trace-label">思考</span>
-        {durationMs !== undefined && (
-          <span className="chat-tool-call-duration">{formatDuration(durationMs)}</span>
-        )}
-        <span className={`chat-tool-call-badge ${running ? 'running' : 'done'}`}>
-          <span className={`chat-trace-status ${running ? 'running' : 'done'}`} />
-          {running ? '生成中' : '已完成'}
-        </span>
-        <span className={`chat-trace-chevron ${expanded ? 'open' : ''}`}>▸</span>
-      </button>
+      <div className="chat-trace-card-head">
+        <button
+          type="button"
+          className="chat-trace-card-main"
+          aria-expanded={expanded}
+          onClick={() => onToggle(id)}
+        >
+          <span className="chat-trace-icon skill">
+            <IconInfo size={14} />
+          </span>
+          <span className="chat-tool-call-meta">
+            {/* Reasoning has no step number; the spacer keeps the column. */}
+            <span className="chat-trace-step placeholder" aria-hidden="true" />
+            <span className="chat-trace-label">思考</span>
+            <TraceDuration ms={durationMs} />
+            <TraceStatusBadge
+              tone={running ? 'running' : 'done'}
+              label={running ? '生成中' : '已完成'}
+            />
+          </span>
+        </button>
+        <button
+          type="button"
+          className="chat-trace-chevron-btn"
+          aria-expanded={expanded}
+          aria-label={expanded ? '收起思考内容' : '展开思考内容'}
+          onClick={() => onToggle(id)}
+        >
+          <span className={`chat-trace-chevron ${expanded ? 'open' : ''}`}>▸</span>
+        </button>
+      </div>
       {expanded && (
         <div
           className="chat-trace-card-body thinking"
@@ -445,7 +483,7 @@ function ToolTraceItem({ card, step, onOpen }: ToolTraceItemProps) {
   const state = waiting
     ? '未完成'
     : card.status === 'running'
-      ? '执行中…'
+      ? '执行中'
       : card.status === 'error'
         ? '失败'
         : '已完成'
@@ -472,15 +510,10 @@ function ToolTraceItem({ card, step, onOpen }: ToolTraceItemProps) {
             <Icon size={14} />
           </span>
           <span className="chat-tool-call-meta">
-            <span className="chat-trace-step">#{step}</span>
+            <code className="chat-trace-step">#{step}</code>
             <span className="chat-trace-label">{meta.label}</span>
-            {card.durationMs !== undefined && (
-              <span className="chat-tool-call-duration">{formatDuration(card.durationMs)}</span>
-            )}
-            <span className={`chat-tool-call-badge ${tone}`}>
-              <span className={`chat-trace-status ${tone}`} />
-              {state}
-            </span>
+            <TraceDuration ms={card.durationMs} />
+            <TraceStatusBadge tone={tone} label={state} />
           </span>
         </button>
         {hasPayload ? (

@@ -1411,6 +1411,7 @@ fn conversation_lifecycle_persists_messages() {
                 }),
                 thinking: Some("先确认日期再写入".into()),
                 thinking_signature: Some("sig-1".into()),
+                thinking_duration_ms: Some(1500),
                 ..Default::default()
             },
         ],
@@ -1430,6 +1431,7 @@ fn conversation_lifecycle_persists_messages() {
     assert_eq!(usage.total_tokens, 165);
     assert_eq!(messages[1].thinking.as_deref(), Some("先确认日期再写入"));
     assert_eq!(messages[1].thinking_signature.as_deref(), Some("sig-1"));
+    assert_eq!(messages[1].thinking_duration_ms, Some(1500));
 
     let list = conversations::list(&vfs).unwrap();
     assert_eq!(list.len(), 1);

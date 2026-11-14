@@ -331,6 +331,8 @@ export interface ChatMessageRecord {
   /** JSON arguments of a tool call, kept so history can restore the card. */
   toolArgs: string | null
   toolDurationMs: number | null
+  /** Wall-clock reasoning time, persisted when the thinking block ended. */
+  thinkingDurationMs: number | null
   /** True when the answer was cut short by a cancel/interruption. */
   isPartial: boolean
   /** stop | aborted | error, when recorded. */
@@ -356,6 +358,7 @@ export interface NewChatMessage {
   runId?: number | null
   toolArgs?: string | null
   toolDurationMs?: number | null
+  thinkingDurationMs?: number | null
   isPartial?: boolean
   stopReason?: string | null
   steerOfRun?: number | null
