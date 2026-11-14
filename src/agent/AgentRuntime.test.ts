@@ -407,6 +407,28 @@ describe('AgentRuntime', () => {
     ])
   })
 
+  it('rewinds a turn and everything after it without starting a run', async () => {
+    const replies = ['第一答', '第二答']
+    let call = 0
+    const { runtime, store } = runtimeWith(instantStream(() => replies[call++] ?? '空'))
+
+    await runtime.open(conversation(), profile)
+    await runtime.prompt({ text: '第一问' })
+    await runtime.prompt({ text: '第二问' })
+    const turnsBefore = store.runs.length
+
+    const first = runtime.snapshot().items[0]
+    expect(first.kind).toBe('user')
+    if (first.kind !== 'user') return
+    await runtime.rewindTo(first.id)
+
+    expect(runtime.snapshot().items).toEqual([])
+    expect(runtime.snapshot().status).toBe('idle')
+    expect(store.rows.get(1)).toEqual([])
+    // Rollback must not create another run.
+    expect(store.runs).toHaveLength(turnsBefore)
+  })
+
   it('closes a cancelled run as one assistant row that keeps the partial text', async () => {
     const { streamFn, runs } = controlledStreamFn()
     const { runtime, store } = runtimeWith(streamFn)

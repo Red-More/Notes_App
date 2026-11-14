@@ -6,10 +6,15 @@ import type { AssistantMessage } from '@earendil-works/pi-ai'
 import {
   beginPrompt,
   createView,
+  documentPaths,
+  documentRev,
   project,
   reduceEvent,
+  turnFileChanges,
   type ChatView,
   type Bubble,
+  type Item,
+  type ToolCard,
   type ViewEffect,
 } from './chatView'
 import type { ChatMessageRecord } from '../types'
@@ -214,6 +219,114 @@ describe('tool cards', () => {
     expect(replies).toHaveLength(1)
     expect(replies[0].thinking).toBe('只思考')
     expect(replies[0].streaming).toBe(false)
+  })
+})
+
+/** Minimal write/edit card carrying the same result text the tool persists. */
+function writeCard(id: string, path: string, rev: number, toolName = 'fs_edit'): ToolCard {
+  return {
+    id,
+    kind: 'tool',
+    toolName,
+    args: JSON.stringify({ path }),
+    status: 'done',
+    text: `已更新 ${path}（rev=${rev}）`,
+  }
+}
+
+describe('turn file changes', () => {
+  it('parses the revision from a persisted result', () => {
+    expect(documentRev(writeCard('t1', '/life/a.md', 4))).toBe(4)
+    expect(documentRev({ ...writeCard('t2', '/life/a.md', 4), text: '读取完成' })).toBeNull()
+  })
+
+  it('keeps the earliest revision per path and stops at the next turn', () => {
+    const items: Item[] = [
+      { id: 'u1', kind: 'user', text: '第一轮' },
+      writeCard('t1', '/life/a.md', 5),
+      writeCard('t2', '/life/b.md', 2),
+      writeCard('t3', '/life/a.md', 6),
+      { id: 'u2', kind: 'user', text: '第二轮' },
+      writeCard('t4', '/life/c.md', 1, 'fs_write'),
+    ]
+
+    expect(turnFileChanges(items, 0)).toEqual([
+      { path: '/life/a.md', rev: 5, created: false, calls: 2, tools: ['fs_edit'] },
+      { path: '/life/b.md', rev: 2, created: false, calls: 1, tools: ['fs_edit'] },
+    ])
+    expect(turnFileChanges(items, 4)).toEqual([
+      { path: '/life/c.md', rev: 1, created: true, calls: 1, tools: ['fs_write'] },
+    ])
+  })
+})
+
+describe('reasoning timing', () => {
+  it('measures how long the thinking block streamed', () => {
+    let clock = 100
+    let view = beginPrompt(createView([]))
+    const apply = (event: AgentEvent) => {
+      view = reduceEvent(view, event, () => clock).view
+    }
+    const think = (text: string): AssistantMessage =>
+      ({
+        ...assistant('', 'stop'),
+        content: [{ type: 'thinking', thinking: text }],
+      }) as AssistantMessage
+    apply({ type: 'message_start', message: think('') })
+    apply({
+      type: 'message_update',
+      message: think('想'),
+      assistantMessageEvent: {
+        type: 'thinking_delta',
+        contentIndex: 0,
+        delta: '想',
+        partial: think('想'),
+      },
+    })
+    clock = 1600
+    apply({
+      type: 'message_update',
+      message: think('想完了'),
+      assistantMessageEvent: {
+        type: 'thinking_end',
+        contentIndex: 0,
+        content: '想',
+        partial: think('想完了'),
+      },
+    })
+    const bubble = view.items.find((item): item is Bubble => item.kind === 'assistant')
+    expect(bubble?.thinkingMs).toBe(1500)
+    expect(bubble?.thinking).toBe('想')
+  })
+})
+
+describe('tool payload paths', () => {
+  it('collects multi-file arguments without duplicates or content noise', () => {
+    const card: ToolCard = {
+      id: 't1',
+      kind: 'tool',
+      toolName: 'fs_edit',
+      args: JSON.stringify({ paths: ['/life/a.md', '/life/b.md'] }),
+      status: 'done',
+      text: '已更新 /life/a.md，另见 /life/c.md',
+    }
+    expect(documentPaths(card)).toEqual(['/life/a.md', '/life/b.md'])
+  })
+
+  it('falls back to result text for searches and unparsable arguments', () => {
+    const search: ToolCard = {
+      id: 't2',
+      kind: 'tool',
+      toolName: 'fs_grep',
+      args: '{}',
+      status: 'done',
+      text: '/life/a.md: 命中\n/life/b.md: 命中',
+    }
+    expect(documentPaths(search)).toEqual(['/life/a.md', '/life/b.md'])
+    expect(documentPaths({ ...search, id: 't3', toolName: 'fs_read', args: 'not json' })).toEqual([
+      '/life/a.md',
+      '/life/b.md',
+    ])
   })
 })
 

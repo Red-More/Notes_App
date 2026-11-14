@@ -1,7 +1,7 @@
 //! 对话页：pi-agent 事件的流式渲染 + 工具卡片 + 会话管理。
 //!
 //! 渲染策略：按 part.type 分流——正文 text 走共享 Markdown 渲染器（原始 HTML
-//! 关闭，模型输出不会成为可执行标记），工具调用/结果走 ToolCardView。
+//! 关闭，模型输出不会成为可执行标记），工具调用/结果走摘要行，详情另开面板。
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api, assetApi, chatApi } from '../../api'
@@ -13,12 +13,13 @@ import { AgentRuntime } from '../../agent/AgentRuntime'
 import type { QueueEntry, QueueEntryMode } from '../../agent/AgentRuntime'
 import { createRuntimeDeps } from '../../agent/runtimeDeps'
 import {
-  documentPath,
+  documentPaths,
   partialLength,
-  turnToolIds,
+  turnFileChanges,
   type Bubble,
   type Item,
   type ToolCard,
+  type TurnFileChange,
 } from '../../agent/chatView'
 import type {
   AgentModelInfo,
@@ -29,7 +30,7 @@ import type {
 } from '../../types'
 import { friendlyError, bytesToBase64 } from '../../utils'
 import { toast } from '../../toast'
-import { ActionSheet, Modal, OverlayPortal } from '../../components/ui'
+import { ActionSheet, ConfirmDialog, Modal, OverlayPortal } from '../../components/ui'
 import PageHeader from '../../components/PageHeader'
 import EmptyState from '../../components/EmptyState'
 import {
@@ -45,16 +46,17 @@ import {
   IconPaperclip,
   IconPlus,
   IconRefresh,
+  IconRewind,
   IconSearch,
   IconSend,
   IconSettings,
   IconStop,
-  IconTrace,
   IconTrash,
 } from '../../components/Icons'
 import MessageActions from './MessageActions'
 import QueueStatusBar from './QueueStatusBar'
 import ChatMarkdown from './ChatMarkdown'
+import ToolDetailModal from './ToolDetailModal'
 import { usePhysicalBack } from '../../system/backButton'
 
 interface Props {
@@ -62,11 +64,6 @@ interface Props {
   onOpenSettings: () => void
 }
 
-
-interface DocPreview {
-  path: string
-  html: string
-}
 
 /** One user turn listed in the rail's index popover. */
 interface TurnPoint {
@@ -175,16 +172,6 @@ function BubbleImages({ ids }: { ids: number[] }) {
   )
 }
 
-/** Remove the YAML frontmatter so previews match what the editor renders. */
-function stripFrontmatter(text: string): string {
-  const normalized = text.replace(/\r\n/g, '\n')
-  if (!normalized.startsWith('---\n')) return text
-  const close = normalized.indexOf('\n---', 4)
-  if (close < 0) return text
-  const start = normalized.indexOf('\n', close + 4)
-  return start < 0 ? '' : normalized.slice(start + 1)
-}
-
 /** Tone/icon hints only; the descriptor itself stays the English identifier. */
 const TOOL_META: Record<
   string,
@@ -213,28 +200,245 @@ function usageCost(usage: MessageUsage, model: { inputPrice?: number; outputPric
   return (billedInput * model.inputPrice + usage.output * model.outputPrice) / 1_000_000
 }
 
-interface ToolCardViewProps {
+/** One collapsible process entry: reasoning or a tool invocation. */
+type TraceEntry =
+  | { kind: 'thinking'; id: string; text: string; durationMs?: number }
+  | { kind: 'tool'; card: ToolCard }
+
+interface UserBlock {
+  kind: 'user'
+  item: Bubble
+  /** Files written by the Agent during this turn; drives the rollback action. */
+  changes: TurnFileChange[]
+}
+
+interface AssistantBlock {
+  kind: 'assistant'
+  /** Null when a turn ends on a trace without a visible reply. */
+  item: Bubble | null
+  trace: TraceEntry[]
+}
+
+type ChatBlock = UserBlock | AssistantBlock
+
+/**
+ * Group reasoning and tool cards under the assistant reply they feed. The
+ * grouping is presentation-only; items keep their original relative order.
+ */
+function buildChatBlocks(items: Item[]): ChatBlock[] {
+  const blocks: ChatBlock[] = []
+  let trace: TraceEntry[] = []
+  const flush = () => {
+    if (trace.length === 0) return
+    blocks.push({ kind: 'assistant', item: null, trace })
+    trace = []
+  }
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index]
+    if (item.kind === 'user') {
+      flush()
+      blocks.push({ kind: 'user', item, changes: turnFileChanges(items, index) })
+      continue
+    }
+    if (item.kind === 'tool') {
+      trace.push({ kind: 'tool', card: item })
+      continue
+    }
+    if ((item.thinking ?? '').trim() !== '') {
+      trace.push({
+        kind: 'thinking',
+        id: item.id,
+        text: item.thinking ?? '',
+        durationMs: item.thinkingMs,
+      })
+    }
+    if (item.text !== '' || item.isError) {
+      blocks.push({ kind: 'assistant', item, trace })
+      trace = []
+    }
+  }
+  flush()
+  return blocks
+}
+
+/** Directory stays muted and truncates; the filename keeps its full emphasis. */
+function PathLabel({ path }: { path: string }) {
+  const cut = path.lastIndexOf('/')
+  const dir = cut >= 0 ? path.slice(0, cut + 1) : ''
+  const name = cut >= 0 ? path.slice(cut + 1) : path
+  return (
+    <>
+      {dir && <span className="chat-file-dir">{dir}</span>}
+      <span className="chat-file-name">{name}</span>
+    </>
+  )
+}
+
+/** Impact preview shown before a turn rollback is confirmed. */
+function UndoImpact({ changes }: { changes: TurnFileChange[] }) {
+  const modified = changes.filter((change) => !change.created)
+  const created = changes.filter((change) => change.created)
+  const calls = changes.reduce((sum, change) => sum + change.calls, 0)
+  return (
+    <div className="undo-impact">
+      <p className="undo-impact-summary">
+        本轮共 {calls} 次写入工具调用，涉及 {changes.length} 个文件。
+      </p>
+      <UndoImpactFiles title={`修改 · ${modified.length}`} changes={modified} />
+      <UndoImpactFiles title={`新建 · ${created.length}`} changes={created} />
+      <p className="undo-impact-warning">
+        确认后会同时清空这条消息及其之后的对话记录，并把原始输入回填到输入框。
+      </p>
+    </div>
+  )
+}
+
+function UndoImpactFiles({
+  title,
+  changes,
+}: {
+  title: string
+  changes: TurnFileChange[]
+}) {
+  return (
+    <section className="undo-impact-group">
+      <span className="undo-impact-title">{title}</span>
+      {changes.length === 0 ? (
+        <span className="undo-impact-empty">无</span>
+      ) : (
+        <ul>
+          {changes.map((change) => (
+            <li key={change.path}>
+              <span className="undo-impact-path">{change.path}</span>
+              <span className="undo-impact-tools">
+                {change.tools.join(' · ')} ×{change.calls}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+function UndoImpactGroup({
+  title,
+  paths,
+  empty = '无',
+}: {
+  title: string
+  paths: string[]
+  empty?: string
+}) {
+  return (
+    <section className="undo-impact-group">
+      <span className="undo-impact-title">{title}</span>
+      {paths.length === 0 ? (
+        <span className="undo-impact-empty">{empty}</span>
+      ) : (
+        <ul>
+          {paths.map((path) => (
+            <li key={path}>{path}</li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+interface ThinkingTraceItemProps {
+  id: string
+  text: string
+  /** Wall-clock reasoning time; absent for history loaded from disk. */
+  durationMs?: number
+  expanded: boolean
+  /** The owning reply is still streaming, so the body should follow its tail. */
+  live: boolean
+  onToggle: (id: string) => void
+}
+
+/** Level-2 reasoning row; it shares the tool-call card shell and disclosure. */
+function ThinkingTraceItem({
+  id,
+  text,
+  durationMs,
+  expanded,
+  live,
+  onToggle,
+}: ThinkingTraceItemProps) {
+  const bodyRef = useRef<HTMLDivElement>(null)
+  // Follow the streamed tail until the reader scrolls up; returning to the
+  // bottom resumes following. The body hugs its content until the max-height
+  // clamp, then scrolls internally.
+  const followRef = useRef(true)
+  useLayoutEffect(() => {
+    const el = bodyRef.current
+    if (el && live && followRef.current) el.scrollTop = el.scrollHeight
+  }, [text, live])
+  // A measure is recorded once reasoning ends, even while the answer streams.
+  const running = live && durationMs === undefined
+  return (
+    <div className="chat-trace-card thinking">
+      <button
+        type="button"
+        className="chat-trace-card-head chat-trace-card-toggle"
+        aria-expanded={expanded}
+        onClick={() => onToggle(id)}
+      >
+        <span className="chat-trace-icon skill">
+          <IconInfo size={14} />
+        </span>
+        <span className="chat-trace-label">思考</span>
+        {durationMs !== undefined && (
+          <span className="chat-tool-call-duration">{formatDuration(durationMs)}</span>
+        )}
+        <span className={`chat-tool-call-badge ${running ? 'running' : 'done'}`}>
+          <span className={`chat-trace-status ${running ? 'running' : 'done'}`} />
+          {running ? '生成中' : '已完成'}
+        </span>
+        <span className={`chat-trace-chevron ${expanded ? 'open' : ''}`}>▸</span>
+      </button>
+      {expanded && (
+        <div
+          className="chat-trace-card-body thinking"
+          ref={bodyRef}
+          onScroll={(event) => {
+            const el = event.currentTarget
+            followRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 16
+          }}
+        >
+          {text}
+        </div>
+      )}
+    </div>
+  )
+}
+
+interface ToolTraceItemProps {
   card: ToolCard
   /** 1-based position in this transcript's invocation chain. */
   step: number
-  expanded: boolean
-  onToggle: (id: string) => void
-  onOpen: (path: string) => void
-  onUndo: (path: string) => void
+  onOpen: (card: ToolCard, path?: string) => void
 }
 
-/** One Agent trace node: semantic icon, summary header and auditable detail. */
-function ToolCardView({ card, step, expanded, onToggle, onOpen, onUndo }: ToolCardViewProps) {
-  const path = documentPath(card)
+/** Files beyond this count collapse into one summary row. */
+const TOOL_STACK_MAX_FILES = 6
+
+/**
+ * Level-2 tool row: a single-line meta header (name · duration · status) over
+ * a lazily mounted file stack. The chevron alone toggles the disclosure; the
+ * meta area still opens the detail inspector.
+ */
+function ToolTraceItem({ card, step, onOpen }: ToolTraceItemProps) {
+  // Collapsed by default: the changed-files list never renders until asked.
+  const [open, setOpen] = useState(false)
+  const files = documentPaths(card)
   const meta = TOOL_META[card.toolName] ?? {
     label: card.toolName,
     tone: 'other',
     Icon: IconInfo,
   }
   const Icon = meta.Icon
-  const canUndo =
-    card.status === 'done' && path !== null && ['fs_write', 'fs_edit'].includes(card.toolName)
-  const collapsible = card.args.length > 120 || card.text.length > 200
   // A finished result always wins over a stale orphan flag from old history.
   const finished = card.status === 'done' || card.status === 'error'
   const waiting = Boolean(card.unfinished) && !finished
@@ -245,7 +449,7 @@ function ToolCardView({ card, step, expanded, onToggle, onOpen, onUndo }: ToolCa
       : card.status === 'error'
         ? '失败'
         : '已完成'
-  // Waiting (orphaned call), running, done and failed get their own dot color.
+  // Waiting (orphaned call), running, done and failed get their own badge color.
   const tone = waiting
     ? 'waiting'
     : card.status === 'running'
@@ -253,66 +457,163 @@ function ToolCardView({ card, step, expanded, onToggle, onOpen, onUndo }: ToolCa
       : card.status === 'error'
         ? 'error'
         : 'done'
+  const preview = card.text.split('\n')[0]?.trim() ?? ''
+  const hasPayload = files.length > 0 || preview !== ''
   return (
-    <div className={`chat-trace-node ${meta.tone} ${card.status}`}>
-      <div className={`chat-trace-icon ${meta.tone}`}>
-        <Icon size={14} />
-      </div>
-      <div className="chat-trace-main">
-        <div className="chat-trace-head">
-          <span className="chat-trace-step">#{step}</span>
-          <span className="chat-trace-label">{meta.label}</span>
-          {card.durationMs !== undefined && (
-            <span className="chat-trace-duration">{formatDuration(card.durationMs)}</span>
-          )}
-          <span className={`chat-trace-state ${tone}`}>
-            <span className={`chat-trace-status ${tone}`} />
-            {state}
+    <div className="chat-trace-card">
+      <div className="chat-trace-card-head">
+        <button
+          type="button"
+          className="chat-trace-card-main"
+          title="查看详情"
+          onClick={() => onOpen(card)}
+        >
+          <span className={`chat-trace-icon ${meta.tone}`}>
+            <Icon size={14} />
           </span>
-          {collapsible && (
+          <span className="chat-tool-call-meta">
+            <span className="chat-trace-step">#{step}</span>
+            <span className="chat-trace-label">{meta.label}</span>
+            {card.durationMs !== undefined && (
+              <span className="chat-tool-call-duration">{formatDuration(card.durationMs)}</span>
+            )}
+            <span className={`chat-tool-call-badge ${tone}`}>
+              <span className={`chat-trace-status ${tone}`} />
+              {state}
+            </span>
+          </span>
+        </button>
+        {hasPayload ? (
+          <button
+            type="button"
+            className="chat-trace-chevron-btn"
+            aria-expanded={open}
+            aria-label={open ? '收起文件列表' : '展开文件列表'}
+            onClick={() => setOpen((value) => !value)}
+          >
+            <span className={`chat-trace-chevron ${open ? 'open' : ''}`}>▸</span>
+          </button>
+        ) : (
+          <span className="chat-trace-open-hint">›</span>
+        )}
+      </div>
+      {/* Lazy disclosure: the payload mounts only after the chevron opens it. */}
+      {open && hasPayload && (
+        <div className="chat-trace-card-body chat-tool-call-payload">
+          {files.slice(0, TOOL_STACK_MAX_FILES).map((path) => (
             <button
+              key={path}
               type="button"
-              className="chat-trace-toggle"
-              aria-expanded={expanded}
-              onClick={() => onToggle(card.id)}
+              className="chat-tool-call-file"
+              title={path}
+              onClick={() => onOpen(card, path)}
             >
-              {expanded ? '收起' : '展开'}
+              <span className="chat-tool-call-file-dot" />
+              <span className="chat-trace-path">
+                <PathLabel path={path} />
+              </span>
             </button>
+          ))}
+          {files.length > TOOL_STACK_MAX_FILES && (
+            <span className="chat-tool-call-more">
+              还有 {files.length - TOOL_STACK_MAX_FILES} 个文件，点开查看
+            </span>
+          )}
+          {files.length === 0 && preview !== '' && (
+            <span className="chat-trace-preview">{preview}</span>
           )}
         </div>
-        {(path || card.text || waiting) && (
-          <div className="chat-trace-summary">
-            {path ? (
-              <button type="button" className="chat-file-link" onClick={() => onOpen(path)}>
-                {path}
-              </button>
-            ) : card.text ? (
-              <span className="chat-trace-preview">{card.text.split('\n')[0]}</span>
-            ) : (
-              <span className="chat-trace-preview">调用已发出但未获得结果</span>
-            )}
-          </div>
-        )}
-        {expanded && (
-          <div className="chat-trace-detail">
-            <div className="chat-trace-audit">
-              <span>callId</span>
-              <code>{card.callId ?? card.id}</code>
-            </div>
-            <div className="chat-trace-section-title">arguments</div>
-            <div className="chat-tool-args">{card.args || '{}'}</div>
-            <div className="chat-trace-section-title">result</div>
-            <div className="chat-tool-result">{card.text || '（无返回）'}</div>
-          </div>
-        )}
-        {canUndo && path && (
-          <div className="chat-tool-actions">
-            <button type="button" className="chat-tool-action" onClick={() => onUndo(path)}>
-              撤销
-            </button>
-          </div>
+      )}
+    </div>
+  )
+}
+
+interface TraceGroupProps {
+  groupId: string
+  entries: TraceEntry[]
+  toolSteps: Map<string, number>
+  open: boolean
+  expandedThinking: Set<string>
+  /** Assistant item still streaming; its reasoning body follows the tail. */
+  liveTraceId: string | null
+  onToggleOpen: (id: string) => void
+  onToggleAll: (id: string, expand: boolean) => void
+  onToggleThinking: (id: string) => void
+  onOpenTool: (card: ToolCard, path?: string) => void
+}
+
+/** Level-1 container: its header expands one level, never the child details. */
+function TraceGroup({
+  groupId,
+  entries,
+  toolSteps,
+  open,
+  expandedThinking,
+  liveTraceId,
+  onToggleOpen,
+  onToggleAll,
+  onToggleThinking,
+  onOpenTool,
+}: TraceGroupProps) {
+  const thinkingCount = entries.filter((entry) => entry.kind === 'thinking').length
+  const tools = entries.filter(
+    (entry): entry is { kind: 'tool'; card: ToolCard } => entry.kind === 'tool',
+  )
+  const running = tools.some((entry) => entry.card.status === 'running')
+  const meta = [
+    thinkingCount > 0 ? '思考' : '',
+    tools.length > 0 ? `${tools.length} 个工具` : '',
+    running ? '执行中' : '',
+  ]
+    .filter(Boolean)
+    .join(' · ')
+  return (
+    <div className="chat-trace-group">
+      <div className="chat-trace-group-head">
+        <button
+          type="button"
+          className="chat-trace-group-toggle"
+          aria-expanded={open}
+          onClick={() => onToggleOpen(groupId)}
+        >
+          <span className={`chat-trace-chevron ${open ? 'open' : ''}`}>▸</span>
+          <span className="chat-trace-group-title">过程</span>
+          <span className="chat-trace-group-meta">{meta}</span>
+        </button>
+        {thinkingCount > 0 && (
+          <button
+            type="button"
+            className="chat-trace-group-all"
+            onClick={() => onToggleAll(groupId, !open)}
+          >
+            {open ? '全部收起' : '全部展开'}
+          </button>
         )}
       </div>
+      {open && (
+        <div className="chat-trace-group-body">
+          {entries.map((entry) =>
+            entry.kind === 'thinking' ? (
+              <ThinkingTraceItem
+                key={`think-${entry.id}`}
+                id={entry.id}
+                text={entry.text}
+                durationMs={entry.durationMs}
+                expanded={expandedThinking.has(entry.id)}
+                live={entry.id === liveTraceId}
+                onToggle={onToggleThinking}
+              />
+            ) : (
+              <ToolTraceItem
+                key={`tool-${entry.card.id}`}
+                card={entry.card}
+                step={toolSteps.get(entry.card.id) ?? 1}
+                onOpen={onOpenTool}
+              />
+            ),
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -362,8 +663,21 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
   const [renameId, setRenameId] = useState<number | null>(null)
   const [renameText, setRenameText] = useState('')
   const [loading, setLoading] = useState(true)
-  const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set())
   const [expandedThinking, setExpandedThinking] = useState<Set<string>>(new Set())
+  // Trace groups start collapsed; expansion is per level and per group.
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
+  // Heavy tool content opens in its own sheet; `path` selects the active file.
+  const [detail, setDetail] = useState<{ card: ToolCard; path?: string } | null>(null)
+  // Rollback is a two-step operation: preview impact, then execute.
+  const [undoTarget, setUndoTarget] = useState<{
+    item: Bubble
+    changes: TurnFileChange[]
+  } | null>(null)
+  const [undoReceipt, setUndoReceipt] = useState<{
+    restored: string[]
+    removed: string[]
+  } | null>(null)
+  const [undoing, setUndoing] = useState(false)
   // While a run is active, the composer injects (steer) or queues (followUp).
   const [queueMode, setQueueMode] = useState<QueueEntryMode>(readQueueMode)
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
@@ -375,7 +689,6 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
   const [stepCount, setStepCount] = useState(0)
   // Last interrupted run, restored from the ledger after a restart.
   const [interrupted, setInterrupted] = useState<AgentRun | null>(null)
-  const [docPreview, setDocPreview] = useState<DocPreview | null>(null)
   const [online, setOnline] = useState(() => navigator.onLine)
   // Set after a network-looking failure; WebView's online flag is unreliable.
   const [networkIssue, setNetworkIssue] = useState(false)
@@ -1208,28 +1521,6 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     [runtime, streaming],
   )
 
-  const toggleTool = useCallback((id: string) => {
-    setExpandedTools((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }, [])
-
-  /** Expand/collapse every trace node of one assistant turn at once. */
-  const toggleTrace = useCallback((ids: string[]) => {
-    setExpandedTools((prev) => {
-      const next = new Set(prev)
-      const allOpen = ids.every((id) => next.has(id))
-      for (const id of ids) {
-        if (allOpen) next.delete(id)
-        else next.add(id)
-      }
-      return next
-    })
-  }, [])
-
   const toggleThinking = useCallback((id: string) => {
     setExpandedThinking((prev) => {
       const next = new Set(prev)
@@ -1239,29 +1530,118 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     })
   }, [])
 
-  const openDocPreview = useCallback(async (path: string) => {
-    setDocPreview({ path, html: '' })
-    try {
-      const result = await api.userRead({ path, includeMeta: true })
-      if (result.kind !== 'file') throw new Error('该路径不是文件')
-      const { renderMarkdownPreview } = await import('../../editor/markdown')
-      setDocPreview({
-        path,
-        html: renderMarkdownPreview(stripFrontmatter(result.content)),
-      })
-    } catch (error) {
-      setDocPreview(null)
-      toast(friendlyError(error))
-    }
+  /** Heavy tool content lives in its own sheet, so rows only open details. */
+  const openToolDetail = useCallback((card: ToolCard, path?: string) => {
+    setDetail({ card, path })
   }, [])
 
-  const undoWrite = useCallback(async (path: string) => {
+  /** Level 1 only: open the group without touching any child detail. */
+  const toggleGroupOpen = useCallback((id: string) => {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
+
+  /**
+   * Bulk control: expanding opens only the group (level 1), leaving each
+   * reasoning body collapsed; collapsing also resets the reasoning bodies.
+   */
+  const toggleGroupAll = useCallback(
+    (groupId: string, entries: TraceEntry[], expand: boolean) => {
+      if (expand) {
+        setExpandedGroups((prev) => new Set(prev).add(groupId))
+        return
+      }
+      const thinkingIds = entries.flatMap((entry) => (entry.kind === 'thinking' ? [entry.id] : []))
+      setExpandedThinking((prev) => {
+        const next = new Set(prev)
+        for (const id of thinkingIds) next.delete(id)
+        return next
+      })
+      setExpandedGroups((prev) => {
+        const next = new Set(prev)
+        next.delete(groupId)
+        return next
+      })
+    },
+    [],
+  )
+
+  /** Step one: show the impact surface instead of rolling back immediately. */
+  const requestUndo = useCallback(
+    (item: Bubble, changes: TurnFileChange[]) => {
+      // The rewind needs a persisted message id; drafts have nothing to clear.
+      if (
+        changes.length === 0 ||
+        !/^m-\d+$/.test(item.id) ||
+        undoing ||
+        streaming ||
+        loading ||
+        editBusy
+      ) {
+        return
+      }
+      setUndoTarget({ item, changes })
+    },
+    [editBusy, loading, streaming, undoing],
+  )
+
+  /**
+   * Step two: restore every file, clear the turn and everything after it,
+   * then put the original user input back into the composer.
+   */
+  const confirmUndo = useCallback(async () => {
+    const target = undoTarget
+    if (!target || undoing) return
+    setUndoTarget(null)
+    setUndoing(true)
+    const restored: string[] = []
+    const removed: string[] = []
     try {
-      await api.restorePreviousDocRevision(path)
-      toast('已撤销上一次修改')
+      for (const change of target.changes) {
+        if (change.created) {
+          await api.trashDocByPath(change.path)
+          removed.push(change.path)
+        } else if (change.rev === null) {
+          await api.restorePreviousDocRevision(change.path)
+          restored.push(change.path)
+        } else {
+          await api.restoreDocRevision(change.path, change.rev)
+          restored.push(change.path)
+        }
+      }
+      await runtime.rewindTo(target.item.id)
+      setItems(runtime.snapshot().items)
+      setInput(target.item.text)
+      // Refresh the drawer counts without blocking the receipt on failure.
+      void chatApi.list().then(setConversations).catch(() => {})
+      // Restore attachments too; a failed asset read must not block the receipt.
+      const assetIds = target.item.imageAssetIds ?? []
+      setAttachmentList([])
+      if (assetIds.length > 0) {
+        const urls = await Promise.all(assetIds.map((id) => assetDataUrl(id).catch(() => '')))
+        setAttachmentList(
+          assetIds.flatMap((id, index) => {
+            const url = urls[index]
+            return url ? [{ id, url, size: 0 }] : []
+          }),
+        )
+      }
+      setUndoReceipt({ restored, removed })
     } catch (error) {
       toast(friendlyError(error))
+    } finally {
+      setUndoing(false)
     }
+  }, [runtime, setAttachmentList, undoing, undoTarget])
+
+  /** Closing the receipt returns focus to the recalled input. */
+  const closeUndoReceipt = useCallback(() => {
+    setUndoReceipt(null)
+    requestAnimationFrame(() => inputElRef.current?.focus())
   }, [])
 
   const copyText = useCallback(async (text: string) => {
@@ -1467,7 +1847,7 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
   // include the cached part, so summing them would double count.
   const usageIncludesCache = activeModel?.format === 'anthropic-messages'
   // Inline edit and branch mutations need a settled, fully loaded transcript.
-  const chatBusy = streaming || loading || editBusy
+  const chatBusy = streaming || loading || editBusy || undoing
 
   // Stable 1-based numbering for the visible tool-call chain (trace audit).
   const toolSteps = new Map<string, number>()
@@ -1477,6 +1857,12 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     toolStep += 1
     toolSteps.set(item.id, toolStep)
   }
+
+  // The reply still receiving deltas; its reasoning body follows the tail.
+  const liveTraceId =
+    items.find((item) => item.kind === 'assistant' && item.streaming)?.id ?? null
+
+  const blocks = useMemo(() => buildChatBlocks(items), [items])
 
   return (
     <div className={`page chat-page ${expanded ? 'expanded' : ''}`}>
@@ -1605,9 +1991,112 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
               }
             />
           ) : (
-            items.map((item, index) => {
+            blocks.map((block) => {
+              if (block.kind === 'user') {
+                const item = block.item
+                return (
+                  <div key={item.id} className="chat-row user">
+                    <div className="chat-row-body">
+                      {editingId === item.id ? (
+                        <div
+                          className="chat-edit"
+                          ref={(node) => {
+                            if (node) bubbleRefs.current.set(item.id, node)
+                            else bubbleRefs.current.delete(item.id)
+                          }}
+                        >
+                          <textarea
+                            className="chat-edit-input"
+                            value={editText}
+                            rows={3}
+                            autoFocus
+                            onChange={(event) => setEditText(event.target.value)}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Escape') cancelEdit()
+                              if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                                event.preventDefault()
+                                void submitEdit(item)
+                              }
+                            }}
+                          />
+                          <div className="chat-edit-actions">
+                            <button
+                              type="button"
+                              className="chat-edit-btn"
+                              disabled={editBusy}
+                              onClick={cancelEdit}
+                            >
+                              取消
+                            </button>
+                            <button
+                              type="button"
+                              className="chat-edit-btn primary"
+                              disabled={editBusy || editText.trim() === ''}
+                              onClick={() => void submitEdit(item)}
+                            >
+                              {editBusy ? '发送中…' : '重新发送'}
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div
+                          className={`chat-bubble ${item.kind} ${item.isError ? 'error' : ''}`}
+                          ref={(node) => {
+                            if (node) bubbleRefs.current.set(item.id, node)
+                            else bubbleRefs.current.delete(item.id)
+                          }}
+                        >
+                          {item.imageAssetIds && <BubbleImages ids={item.imageAssetIds} />}
+                          {item.text}
+                        </div>
+                      )}
+                      {editingId !== item.id && (
+                        <MessageActions
+                          role="user"
+                          actions={[
+                            {
+                              key: 'copy',
+                              label: '复制',
+                              icon: <IconCopy size={15} />,
+                              onClick: () => void copyText(item.text),
+                            },
+                            {
+                              key: 'edit',
+                              label: '编辑',
+                              icon: <IconEdit size={15} />,
+                              // Only rows already persisted can be rewritten.
+                              disabled: chatBusy || !/^m-\d+$/.test(item.id),
+                              onClick: () => startEdit(item),
+                            },
+                            {
+                              key: 'branch',
+                              label: '分支',
+                              icon: <IconBranch size={15} />,
+                              disabled: chatBusy,
+                              onClick: () => void forkConversation(item.id, item.text),
+                            },
+                            ...(block.changes.length > 0
+                              ? [
+                                  {
+                                    key: 'undo',
+                                    label: '撤回本轮改动',
+                                    icon: <IconRewind size={15} />,
+                                    disabled: chatBusy || !/^m-\d+$/.test(item.id),
+                                    onClick: () => requestUndo(item, block.changes),
+                                  },
+                                ]
+                              : []),
+                          ]}
+                        />
+                      )}
+                    </div>
+                  </div>
+                )
+              }
+
+              const item = block.item
               // Settled replies carry their usage and trace summary.
-              const usage = item.kind === 'assistant' ? item.usage : null
+              const usage = item?.usage ?? null
               const cost = usage ? usageCost(usage, activeModel) : null
               // Real prompt size of this reply, not a whole-transcript estimate.
               const usedTokens = usage
@@ -1621,212 +2110,110 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
                   : 0
               const contextColor =
                 contextPercent > 80 ? 'var(--danger)' : 'var(--accent)'
-              const traceIds =
-                item.kind === 'assistant' && !item.streaming ? turnToolIds(items, index) : []
-              const traceExpanded =
-                traceIds.length > 0 && traceIds.every((id) => expandedTools.has(id))
+              const firstTrace = block.trace[0]
+              const traceKey = firstTrace
+                ? firstTrace.kind === 'thinking'
+                  ? firstTrace.id
+                  : firstTrace.card.id
+                : 'end'
+              const groupId = item?.id ?? traceKey
+              const groupOpen = expandedGroups.has(groupId)
               return (
-                <div key={item.id} className={`chat-row ${item.kind}`}>
+                <div
+                  key={item?.id ?? `trace-${traceKey}`}
+                  className="chat-row assistant"
+                >
                   <div className="chat-row-body">
-                    {item.kind === 'tool' ? (
-                      <ToolCardView
-                        card={item}
-                        step={toolSteps.get(item.id) ?? 1}
-                        expanded={expandedTools.has(item.id)}
-                        onToggle={toggleTool}
-                        onOpen={(path) => void openDocPreview(path)}
-                        onUndo={(path) => void undoWrite(path)}
+                    {block.trace.length > 0 && (
+                      <TraceGroup
+                        groupId={groupId}
+                        entries={block.trace}
+                        toolSteps={toolSteps}
+                        open={groupOpen}
+                        expandedThinking={expandedThinking}
+                        liveTraceId={liveTraceId}
+                        onToggleOpen={toggleGroupOpen}
+                        onToggleAll={(id, expand) =>
+                          toggleGroupAll(id, block.trace, expand)
+                        }
+                        onToggleThinking={toggleThinking}
+                        onOpenTool={openToolDetail}
                       />
-                    ) : (
-                      <>
-                        {item.kind === 'assistant' && item.thinking && (
-                          <div className="chat-thinking">
-                            <button
-                              type="button"
-                              className="chat-thinking-toggle"
-                              aria-expanded={expandedThinking.has(item.id)}
-                              onClick={() => toggleThinking(item.id)}
-                            >
-                              {expandedThinking.has(item.id) ? '收起思考' : '思考'}
-                            </button>
-                            {expandedThinking.has(item.id) && (
-                              <div className="chat-thinking-body">{item.thinking}</div>
-                            )}
-                          </div>
-                        )}
-                        {item.kind === 'assistant' && item.text !== '' && (
-                          // 分流点：Bubble.text 是 text part，走 Markdown；工具
-                          // 调用/结果在上面的 ToolCardView 分支，二者不混染。
-                          <div
-                            className={`chat-bubble assistant ${item.isError ? 'error' : ''} ${
-                              item.isError ? '' : 'markdown'
-                            }`}
-                          >
-                            {item.isError ? item.text : <ChatMarkdown text={item.text} />}
-                          </div>
-                        )}
-                        {item.kind === 'user' && (
+                    )}
+                    {item && item.text !== '' && (
+                      // 分流点：Bubble.text 是 text part，走 Markdown；工具
+                      // 调用/结果在上面的 TraceGroup 分支，二者不混染。
+                      <div
+                        className={`chat-bubble assistant ${item.isError ? 'error' : ''} ${
+                          item.isError ? '' : 'markdown'
+                        }`}
+                      >
+                        {item.isError ? item.text : <ChatMarkdown text={item.text} />}
+                      </div>
+                    )}
+                    {item && !item.streaming && item.text !== '' && (
+                      <MessageActions
+                        role="assistant"
+                        actions={[
+                          {
+                            key: 'copy',
+                            label: '复制',
+                            icon: <IconCopy size={15} />,
+                            onClick: () => void copyText(item.text),
+                          },
+                          {
+                            key: 'retry',
+                            label: '重试',
+                            icon: <IconRefresh size={15} />,
+                            onClick: () => void retry(item.id),
+                          },
+                          {
+                            key: 'branch',
+                            label: '分支',
+                            icon: <IconBranch size={15} />,
+                            onClick: () => void forkConversation(item.id, item.text),
+                          },
+                        ]}
+                        trailing={
                           <>
-                            {editingId === item.id ? (
-                              <div
-                                className="chat-edit"
-                                ref={(node) => {
-                                  if (node) bubbleRefs.current.set(item.id, node)
-                                  else bubbleRefs.current.delete(item.id)
-                                }}
+                            {usage && (
+                              <span
+                                className="chat-usage"
+                                title={`输入 ${usage.input} · 输出 ${usage.output} · 缓存读 ${usage.cacheRead}`}
                               >
-                                <textarea
-                                  className="chat-edit-input"
-                                  value={editText}
-                                  rows={3}
-                                  autoFocus
-                                  onChange={(event) => setEditText(event.target.value)}
-                                  onKeyDown={(event) => {
-                                    if (event.key === 'Escape') cancelEdit()
-                                    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-                                      event.preventDefault()
-                                      void submitEdit(item)
-                                    }
-                                  }}
-                                />
-                                <div className="chat-edit-actions">
-                                  <button
-                                    type="button"
-                                    className="chat-edit-btn"
-                                    disabled={editBusy}
-                                    onClick={cancelEdit}
-                                  >
-                                    取消
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="chat-edit-btn primary"
-                                    disabled={editBusy || editText.trim() === ''}
-                                    onClick={() => void submitEdit(item)}
-                                  >
-                                    {editBusy ? '发送中…' : '重新发送'}
-                                  </button>
-                                </div>
-                              </div>
-                            ) : (
-                              <div
-                                className={`chat-bubble ${item.kind} ${item.isError ? 'error' : ''}`}
-                                ref={(node) => {
-                                  if (node) bubbleRefs.current.set(item.id, node)
-                                  else bubbleRefs.current.delete(item.id)
-                                }}
-                              >
-                                {item.imageAssetIds && <BubbleImages ids={item.imageAssetIds} />}
-                                {item.text}
-                              </div>
+                                {formatTokens(usage.input)}↑ {formatTokens(usage.output)}↓
+                                {cost !== null && ` · $${cost.toFixed(4)}`}
+                              </span>
                             )}
-                            {editingId !== item.id && (
-                              <MessageActions
-                                role="user"
-                                actions={[
-                                  {
-                                    key: 'copy',
-                                    label: '复制',
-                                    icon: <IconCopy size={15} />,
-                                    onClick: () => void copyText(item.text),
-                                  },
-                                  {
-                                    key: 'edit',
-                                    label: '编辑',
-                                    icon: <IconEdit size={15} />,
-                                    // Only rows already persisted can be rewritten.
-                                    disabled: chatBusy || !/^m-\d+$/.test(item.id),
-                                    onClick: () => startEdit(item),
-                                  },
-                                  {
-                                    key: 'branch',
-                                    label: '分支',
-                                    icon: <IconBranch size={15} />,
-                                    disabled: chatBusy,
-                                    onClick: () => void forkConversation(item.id, item.text),
-                                  },
-                                ]}
-                              />
+                            {usage && contextWindow > 0 && (
+                              <span className="chat-context">
+                                <button
+                                  type="button"
+                                  className="chat-context-ring"
+                                  aria-label="上下文用量"
+                                  aria-expanded={contextOpenId === item.id}
+                                  style={{
+                                    background: `conic-gradient(${contextColor} ${contextPercent}%, var(--border) 0)`,
+                                  }}
+                                  onClick={() =>
+                                    setContextOpenId((open) =>
+                                      open === item.id ? null : item.id,
+                                    )
+                                  }
+                                >
+                                  <span>{contextPercent}%</span>
+                                </button>
+                                {contextOpenId === item.id && (
+                                  <span className="chat-context-popover" role="status">
+                                    当前已使用 {usedTokens.toLocaleString()} tokens，上限{' '}
+                                    {contextWindow.toLocaleString()}
+                                  </span>
+                                )}
+                              </span>
                             )}
                           </>
-                        )}
-                        {item.kind === 'assistant' && !item.streaming && item.text !== '' && (
-                          <MessageActions
-                            role="assistant"
-                            actions={[
-                              {
-                                key: 'copy',
-                                label: '复制',
-                                icon: <IconCopy size={15} />,
-                                onClick: () => void copyText(item.text),
-                              },
-                              {
-                                key: 'retry',
-                                label: '重试',
-                                icon: <IconRefresh size={15} />,
-                                onClick: () => void retry(item.id),
-                              },
-                              {
-                                key: 'branch',
-                                label: '分支',
-                                icon: <IconBranch size={15} />,
-                                onClick: () => void forkConversation(item.id, item.text),
-                              },
-                              ...(traceIds.length > 0
-                                ? [
-                                    {
-                                      key: 'trace',
-                                      label: traceExpanded
-                                        ? `收起本轮工具调用轨迹（${traceIds.length} 步）`
-                                        : `展开本轮工具调用轨迹（${traceIds.length} 步）`,
-                                      icon: <IconTrace size={15} />,
-                                      onClick: () => toggleTrace(traceIds),
-                                    },
-                                  ]
-                                : []),
-                            ]}
-                            trailing={
-                              <>
-                                {usage && (
-                                  <span
-                                    className="chat-usage"
-                                    title={`输入 ${usage.input} · 输出 ${usage.output} · 缓存读 ${usage.cacheRead}`}
-                                  >
-                                    {formatTokens(usage.input)}↑ {formatTokens(usage.output)}↓
-                                    {cost !== null && ` · $${cost.toFixed(4)}`}
-                                  </span>
-                                )}
-                                {usage && contextWindow > 0 && (
-                                  <span className="chat-context">
-                                    <button
-                                      type="button"
-                                      className="chat-context-ring"
-                                      aria-label="上下文用量"
-                                      aria-expanded={contextOpenId === item.id}
-                                      style={{
-                                        background: `conic-gradient(${contextColor} ${contextPercent}%, var(--border) 0)`,
-                                      }}
-                                      onClick={() =>
-                                        setContextOpenId((open) =>
-                                          open === item.id ? null : item.id,
-                                        )
-                                      }
-                                    >
-                                      <span>{contextPercent}%</span>
-                                    </button>
-                                    {contextOpenId === item.id && (
-                                      <span className="chat-context-popover" role="status">
-                                        当前已使用 {usedTokens.toLocaleString()} tokens，上限{' '}
-                                        {contextWindow.toLocaleString()}
-                                      </span>
-                                    )}
-                                  </span>
-                                )}
-                              </>
-                            }
-                          />
-                        )}
-                      </>
+                        }
+                      />
                     )}
                   </div>
                 </div>
@@ -2132,28 +2519,6 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
         />
       )}
 
-      {docPreview && (
-        <Modal
-          title={docPreview.path}
-          onClose={() => setDocPreview(null)}
-          footer={
-            <button type="button" className="btn btn-primary" onClick={() => setDocPreview(null)}>
-              关闭
-            </button>
-          }
-        >
-          {docPreview.html ? (
-            <div
-              className="md-preview skill-preview-body"
-              // Local document rendered with the same sanitized renderer as notes.
-              dangerouslySetInnerHTML={{ __html: docPreview.html }}
-            />
-          ) : (
-            <p className="settings-note">加载中…</p>
-          )}
-        </Modal>
-      )}
-
       {drawerOpen && convAnchor && (
         // Portaled: the pager track is a transformed stacking context, so an
         // in-page popover would paint beneath the tabbar. Viewport coordinates
@@ -2243,6 +2608,56 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
           </div>
         </div>
         </OverlayPortal>
+      )}
+
+      {detail && (
+        <ToolDetailModal
+          key={`${detail.card.id}:${detail.path ?? ''}`}
+          card={detail.card}
+          activePath={detail.path}
+          onClose={() => setDetail(null)}
+        />
+      )}
+
+      {undoTarget && (
+        <ConfirmDialog
+          title="撤回本轮改动"
+          message="文件会回滚到本轮开始前，随后清空这段对话历史。"
+          confirmText="撤回并清空"
+          danger
+          icon={<IconRewind size={22} />}
+          detail={<UndoImpact changes={undoTarget.changes} />}
+          onConfirm={() => void confirmUndo()}
+          onCancel={() => setUndoTarget(null)}
+        />
+      )}
+
+      {undoReceipt && (
+        <Modal
+          title="撤回完成"
+          onClose={closeUndoReceipt}
+          footer={
+            <button type="button" className="btn btn-primary" onClick={closeUndoReceipt}>
+              好的
+            </button>
+          }
+        >
+          <div className="undo-receipt">
+            <p className="undo-receipt-lead">
+              本轮改动已回滚，对话历史已清空，原始输入已回填到输入框。
+            </p>
+            <UndoImpactGroup
+              title={`已还原 · ${undoReceipt.restored.length}`}
+              paths={undoReceipt.restored}
+              empty="没有需要还原的文件"
+            />
+            <UndoImpactGroup
+              title={`已移除新建 · ${undoReceipt.removed.length}`}
+              paths={undoReceipt.removed}
+              empty="没有新建文件"
+            />
+          </div>
+        </Modal>
       )}
     </div>
   )

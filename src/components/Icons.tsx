@@ -154,6 +154,14 @@ export const IconUndo = (p: IconProps) => (
   </svg>
 )
 
+/** Roll one whole turn back: a hooked arrow returning to the previous state. */
+export const IconRewind = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M7 19h7a5.5 5.5 0 0 0 0-11H4" />
+    <path d="M8 4 4 8l4 4" />
+  </svg>
+)
+
 export const IconRedo = (p: IconProps) => (
   <svg {...base(p)}>
     <path d="m15 14 5-5-5-5" />
@@ -235,10 +243,13 @@ export const IconBranch = (p: IconProps) => (
   </svg>
 )
 
+/** Retry: two arrows cycling in a circle. */
 export const IconRefresh = (p: IconProps) => (
   <svg {...base(p)}>
-    <path d="M21 12a9 9 0 1 1-2.64-6.36" />
-    <path d="M21 3v6h-6" />
+    <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+    <path d="M21 3v5h-5" />
+    <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+    <path d="M8 16H3v5" />
   </svg>
 )
 

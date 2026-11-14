@@ -1,5 +1,6 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
+import { diffLines, type DiffRow } from '../utils'
 import { IconClose } from './Icons'
 
 /**
@@ -39,10 +40,22 @@ interface ModalProps {
   footer?: ReactNode
   /** Optional element rendered in the header's right side, replacing the close button. */
   headerAction?: ReactNode
+  /** Wider sheet for reading-heavy content such as diffs and file bodies. */
+  wide?: boolean
+  /** Let the children own the scroll area instead of the sheet body. */
+  fill?: boolean
 }
 
 /** Bottom-sheet style modal dialog. */
-export function Modal({ title, onClose, children, footer, headerAction }: ModalProps) {
+export function Modal({
+  title,
+  onClose,
+  children,
+  footer,
+  headerAction,
+  wide = false,
+  fill = false,
+}: ModalProps) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
@@ -54,7 +67,7 @@ export function Modal({ title, onClose, children, footer, headerAction }: ModalP
   return (
     <OverlayPortal>
       <div className="modal-overlay" onClick={onClose}>
-        <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className={`modal ${wide ? 'modal-wide' : ''}`} onClick={(e) => e.stopPropagation()}>
           <div className="modal-header">
             <span className="modal-title">{title}</span>
             {headerAction ?? (
@@ -63,11 +76,53 @@ export function Modal({ title, onClose, children, footer, headerAction }: ModalP
               </button>
             )}
           </div>
-          <div className="modal-body">{children}</div>
+          <div className={`modal-body ${fill ? 'modal-body-fill' : ''}`}>{children}</div>
           {footer && <div className="modal-footer">{footer}</div>}
         </div>
       </div>
     </OverlayPortal>
+  )
+}
+
+interface DiffViewProps {
+  oldText: string
+  newText: string
+}
+
+/** Added/removed counters rendered above a diff body. */
+export function DiffStats({ rows }: { rows: DiffRow[] }) {
+  const added = rows.filter((row) => row.type === 'add').length
+  const removed = rows.filter((row) => row.type === 'del').length
+  return (
+    <div className="diff-stats">
+      <span className="add">+{added} 行新增</span>
+      <span className="del">-{removed} 行删除</span>
+    </div>
+  )
+}
+
+/** Diff rows only; the caller owns the surrounding scroll viewport. */
+export function DiffBody({ rows }: { rows: DiffRow[] }) {
+  return (
+    <div className="diff-body">
+      {rows.map((row, index) => (
+        <div key={index} className={`diff-row ${row.type}`}>
+          <span className="no">{row.type === 'add' ? row.newNo : (row.oldNo ?? '')}</span>
+          <span>{row.text || ' '}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/** Line diff shared by note version compare and chat file changes. */
+export function DiffView({ oldText, newText }: DiffViewProps) {
+  const rows = useMemo(() => diffLines(oldText, newText), [oldText, newText])
+  return (
+    <>
+      <DiffStats rows={rows} />
+      <DiffBody rows={rows} />
+    </>
   )
 }
 

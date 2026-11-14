@@ -849,6 +849,34 @@ export class AgentRuntime {
   }
 
   /**
+   * Drop one user turn and everything after it without starting a new run.
+   * Turn-level rollback restores files first, then calls this to clear history.
+   */
+  async rewindTo(messageKey: string): Promise<void> {
+    const conversation = this.conversation
+    const profile = this.profile
+    if (!conversation || !profile || this.status !== 'idle') throw new Error('会话尚未就绪')
+    await this.drain()
+    await this.drainRunWrites()
+
+    const records = await this.deps.loadMessages(conversation.id)
+    const match = /^m-(\d+)$/.exec(messageKey)
+    const target = match
+      ? records.findIndex((record) => record.id === Number(match[1]) && record.role === 'user')
+      : -1
+    if (target < 0) throw new Error('找不到要撤回的消息')
+
+    await this.deps.truncateFrom(conversation.id, records[target].id)
+    const kept = records.slice(0, target)
+    await this.dispose()
+    // The banner belongs to the rows we just removed.
+    this.interrupted = null
+    this.view = createView(projectHistory(kept))
+    this.emit()
+    await this.attachAgent(profile, kept)
+  }
+
+  /**
    * Start a `resume` run after an interruption. The partial answer is dropped
    * and the model continues from the user turn; nothing auto-sends on startup.
    */
@@ -1374,6 +1402,7 @@ export class AgentRuntime {
     this.view = {
       ...generated.view,
       streamingId: null,
+      thinkingStartedAt: null,
       settled: true,
       pendingInitialUser: false,
       closeOut: false,

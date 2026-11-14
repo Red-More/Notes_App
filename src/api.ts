@@ -212,6 +212,14 @@ async function restorePreviousRevision(docId: number) {
   return docApi.restoreVersion(previous.id)
 }
 
+/** Resolve one virtual path without loading its body. */
+async function docByPath(path: string) {
+  const docs = await docApi.list({ paths: [path], includeContent: false })
+  const doc = docs.find((item) => item.path === path)
+  if (!doc) throw new Error(`未找到文档：${path}`)
+  return doc
+}
+
 function docToContact(doc: Doc): Contact {
   return {
     id: doc.id,
@@ -388,10 +396,25 @@ export const api = {
    */
   restorePreviousDocRevision: async (path: string) => {
     // Only the id is needed here, so ask for the single path without a body.
-    const docs = await docApi.list({ paths: [path], includeContent: false })
-    const doc = docs.find((item) => item.path === path)
-    if (!doc) throw new Error(`未找到文档：${path}`)
+    const doc = await docByPath(path)
     return restorePreviousRevision(doc.id)
+  },
+
+  /** Restore the state just before `beforeRev`, used by turn-level rollback. */
+  restoreDocRevision: async (path: string, beforeRev: number) => {
+    const doc = await docByPath(path)
+    const versions = await docApi.listVersions(doc.id, true)
+    const target = versions
+      .filter((version) => version.versionNumber < beforeRev)
+      .sort((a, b) => b.versionNumber - a.versionNumber)[0]
+    if (!target) throw new Error('没有可恢复的历史版本')
+    return docApi.restoreVersion(target.id)
+  },
+
+  /** Move a document created by the turn into the recycle bin. */
+  trashDocByPath: async (path: string) => {
+    const doc = await docByPath(path)
+    return docApi.delete([doc.id])
   },
 
   // ---- Folders ----

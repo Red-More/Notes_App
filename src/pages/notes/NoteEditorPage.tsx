@@ -14,7 +14,6 @@ import { api, assetApi, docApi } from '../../api'
 import {
   bytesToBase64,
   computeKbInset,
-  diffLines,  
   formatAmPmDateTime,
   formatDateTime,
   fmtVersion,
@@ -23,7 +22,7 @@ import {
 } from '../../utils'
 import { hasAssetRefs } from '../../assets'
 import type { Doc, NoteVersion } from '../../types'
-import { ConfirmDialog, Modal } from '../../components/ui'
+import { ConfirmDialog, DiffView, Modal } from '../../components/ui'
 import { toast } from '../../toast'
 import { useEdgeBack } from '../../hooks'
 import { usePhysicalBack } from '../../system/backButton'
@@ -1115,9 +1114,6 @@ export default function NoteEditorPage({
   const wordCountLabel = wordCount.toLocaleString('zh-CN')
   // The status strip only carries the last update time and the live word count.
   const updatedAtLabel = updatedAt ? formatAmPmDateTime(updatedAt) : null
-  const diffRows = compareVersion ? diffLines(compareVersion.content, content) : []
-  const diffAdd = diffRows.filter((r) => r.type === 'add').length
-  const diffDel = diffRows.filter((r) => r.type === 'del').length
 
   const statusText =
     saveState === 'saving'
@@ -1535,18 +1531,7 @@ export default function NoteEditorPage({
           title={`版本对比 · ${fmtVersion(compareVersion.versionNumber)} → 当前`}
           onClose={() => setCompareVersion(null)}
         >
-          <div className="diff-stats">
-            <span className="add">+{diffAdd} 行新增</span>
-            <span className="del">-{diffDel} 行删除</span>
-          </div>
-          <div className="diff-body">
-            {diffRows.map((row, idx) => (
-              <div key={idx} className={`diff-row ${row.type}`}>
-                <span className="no">{row.type === 'add' ? row.newNo : (row.oldNo ?? '')}</span>
-                <span>{row.text || ' '}</span>
-              </div>
-            ))}
-          </div>
+          <DiffView oldText={compareVersion.content} newText={content} />
         </Modal>
       )}
 

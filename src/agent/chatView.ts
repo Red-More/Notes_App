@@ -23,6 +23,8 @@ export interface Bubble {
   /** Reasoning text streamed before the visible answer. */
   thinking?: string | null
   thinkingSignature?: string | null
+  /** Wall-clock reasoning time, measured when the thinking block ends. */
+  thinkingMs?: number
   /** Image assets the user attached to this message. */
   imageAssetIds?: number[]
 }
@@ -54,6 +56,8 @@ interface StreamBuffer {
 export interface ChatView {
   items: Item[]
   streamingId: string | null
+  /** Start of the reasoning stream; only one message streams at a time. */
+  thinkingStartedAt: number | null
   /** The prompt persisted by `prompt()` already has a bubble. */
   pendingInitialUser: boolean
   settled: boolean
@@ -171,6 +175,36 @@ export function documentPath(card: ToolCard): string | null {
   return match ? match[0] : null
 }
 
+/**
+ * Every note path a card references, deduplicated. Arguments are authoritative;
+ * result text is scanned only for searches or legacy cards without arguments,
+ * so a read note's content cannot leak unrelated links into the payload.
+ */
+export function documentPaths(card: ToolCard): string[] {
+  const paths = new Set<string>()
+  const remember = (value: unknown) => {
+    if (typeof value === 'string' && value.startsWith('/life/') && value.endsWith('.md')) {
+      paths.add(value)
+    }
+  }
+  try {
+    const args = JSON.parse(card.args || '{}') as Record<string, unknown>
+    for (const value of Object.values(args)) {
+      if (Array.isArray(value)) value.forEach(remember)
+      else remember(value)
+    }
+  } catch {
+    // Persisted cards can lack parseable args; the result text still applies.
+  }
+  const search = card.toolName === 'fs_glob' || card.toolName === 'fs_grep'
+  if (search || paths.size === 0) {
+    for (const match of card.text.matchAll(/\/life\/[^\s，。；、"'<>（(）)]+\.md/g)) {
+      paths.add(match[0])
+    }
+  }
+  return [...paths]
+}
+
 /** Tool-card ids belonging to the turn that produced this assistant reply. */
 export function turnToolIds(items: Item[], assistantIndex: number): string[] {
   const ids: string[] = []
@@ -180,6 +214,60 @@ export function turnToolIds(items: Item[], assistantIndex: number): string[] {
     if (item.kind === 'tool') ids.unshift(item.id)
   }
   return ids
+}
+
+/** Revision written by a write/edit card, parsed from its persisted result. */
+export function documentRev(card: ToolCard): number | null {
+  const match = card.text.match(/\brev=(\d+)/)
+  if (!match) return null
+  const rev = Number(match[1])
+  return Number.isFinite(rev) ? rev : null
+}
+
+/** One file touched by a turn and how the turn touched it. */
+export interface TurnFileChange {
+  path: string
+  /** Unknown rows fall back to "step back one revision" on rollback. */
+  rev: number | null
+  /** True when the first write of the turn created the document. */
+  created: boolean
+  /** Number of write/edit calls against this path in the turn. */
+  calls: number
+  /** Distinct write tools used against this path, in first-use order. */
+  tools: string[]
+}
+
+/**
+ * File changes made by the turn that starts at `userIndex`. Repeating a path
+ * keeps the earliest revision so a rollback returns to the pre-turn state.
+ */
+export function turnFileChanges(items: Item[], userIndex: number): TurnFileChange[] {
+  const changes = new Map<string, TurnFileChange>()
+  for (let index = userIndex + 1; index < items.length; index += 1) {
+    const item = items[index]
+    if (item.kind === 'user') break
+    if (item.kind !== 'tool' || item.status !== 'done') continue
+    if (item.toolName !== 'fs_write' && item.toolName !== 'fs_edit') continue
+    const path = documentPath(item)
+    if (!path) continue
+    const rev = documentRev(item)
+    const existing = changes.get(path)
+    if (!existing) {
+      changes.set(path, {
+        path,
+        rev,
+        created: item.toolName === 'fs_write',
+        calls: 1,
+        tools: [item.toolName],
+      })
+      continue
+    }
+    existing.calls += 1
+    if (!existing.tools.includes(item.toolName)) existing.tools.push(item.toolName)
+    // A known revision always wins over an unknown one.
+    if (existing.rev !== null && rev !== null) existing.rev = Math.min(existing.rev, rev)
+  }
+  return [...changes.values()]
 }
 
 /** Insert or update a tool card without touching the rest of the transcript. */
@@ -374,6 +462,7 @@ export function createView(items: Item[]): ChatView {
   return {
     items,
     streamingId: null,
+    thinkingStartedAt: null,
     pendingInitialUser: false,
     settled: true,
     closeOut: false,
@@ -462,6 +551,7 @@ export function reduceEvent(
           streamingId: generated.id,
           closeOut: false,
           buffer: null,
+          thinkingStartedAt: null,
           items: [...generated.view.items, { id: generated.id, kind: 'assistant', text: '', streaming: true }],
         },
         effects,
@@ -476,18 +566,27 @@ export function reduceEvent(
         return { view: bufferFor(view, id, { text: update.delta }), effects }
       }
       if (update.type === 'thinking_delta') {
-        return { view: bufferFor(view, id, { thinking: update.delta }), effects }
+        const flushed = bufferFor(view, id, { thinking: update.delta })
+        // The first delta starts the clock; later frames keep it.
+        return {
+          view: { ...flushed, thinkingStartedAt: flushed.thinkingStartedAt ?? now() },
+          effects,
+        }
       }
       if (update.type === 'thinking_end') {
         const flushed = flushBuffer(view)
         const block = update.partial.content[update.contentIndex]
         const signature = block?.type === 'thinking' ? (block.thinkingSignature ?? null) : null
+        const started = flushed.thinkingStartedAt
+        const thinkingMs =
+          started === null ? undefined : Math.max(0, Math.round(now() - started))
         return {
           view: {
             ...flushed,
+            thinkingStartedAt: null,
             items: flushed.items.map((item) =>
               item.id === id && item.kind === 'assistant' && item.thinking
-                ? { ...item, thinkingSignature: signature }
+                ? { ...item, thinkingSignature: signature, thinkingMs }
                 : item,
             ),
           },
@@ -536,6 +635,11 @@ export function reduceEvent(
       const message = event.message
       const id = view.streamingId
       const flushed = flushBuffer(view)
+      // A provider may skip `thinking_end`; settle the clock at message end.
+      const pendingThinkingMs =
+        flushed.thinkingStartedAt === null
+          ? undefined
+          : Math.max(0, Math.round(now() - flushed.thinkingStartedAt))
       const current = id
         ? flushed.items.find((item): item is Bubble => item.id === id && item.kind === 'assistant')
         : undefined
@@ -560,6 +664,7 @@ export function reduceEvent(
             ...flushed,
             items: id ? flushed.items.filter((item) => item.id !== id) : flushed.items,
             streamingId: null,
+            thinkingStartedAt: null,
             settled: true,
             closeOut: false,
             pendingInitialUser: false,
@@ -582,6 +687,7 @@ export function reduceEvent(
             usage,
             thinking: settledThinking,
             thinkingSignature: failed ? null : thinkingSignature,
+            thinkingMs: (items[index] as Bubble).thinkingMs ?? pendingThinkingMs,
           }
           items = items.map((item, i) => (i === index ? settled : item))
         }
@@ -603,6 +709,7 @@ export function reduceEvent(
           ...flushed,
           items,
           streamingId: null,
+          thinkingStartedAt: null,
           settled: true,
           closeOut: false,
           pendingInitialUser: false,
@@ -679,10 +786,14 @@ export function reduceEvent(
 
     case 'agent_end': {
       // Safety net: never leave a bubble stuck in streaming state (P0-1).
+      const pendingThinkingMs =
+        view.thinkingStartedAt === null
+          ? undefined
+          : Math.max(0, Math.round(now() - view.thinkingStartedAt))
       const items = view.streamingId
         ? view.items.map((item) =>
             item.id === view.streamingId && item.kind === 'assistant'
-              ? { ...item, streaming: false }
+              ? { ...item, streaming: false, thinkingMs: item.thinkingMs ?? pendingThinkingMs }
               : item,
           )
         : view.items
@@ -691,6 +802,7 @@ export function reduceEvent(
           ...view,
           items,
           streamingId: null,
+          thinkingStartedAt: null,
           closeOut: false,
           settled: true,
           pendingInitialUser: false,

@@ -11,6 +11,8 @@
   --accent-deep: #f06607;
   --accent-weak: rgba(255, 122, 26, 0.1);
   --accent-border: rgba(255, 122, 26, 0.35);
+  /* User bubbles share the AI card shape; only the surface color differs. */
+  --bubble-user-bg: #fdeee1;
   --danger: #f04438;
   --danger-weak: rgba(240, 68, 56, 0.1);
   --info: #2e6ff2;
@@ -1808,6 +1810,217 @@ body.split-resizing {
   text-decoration-color: rgba(180, 35, 24, 0.4);
 }
 
+/* ---- Tool detail sheet: heavy content gets room outside the chat flow ---- */
+.tool-detail {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+
+/* Fixed inspector header: L1 name + status, L2 the full file path. */
+.tool-detail-head {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-bottom: 10px;
+}
+
+.tool-detail-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tool-detail-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.tool-detail-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-3);
+  font-size: 11.5px;
+}
+
+.tool-detail-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.tool-detail-state.error {
+  color: var(--danger);
+}
+
+.tool-detail-state.running {
+  color: var(--info);
+}
+
+.tool-detail-state.done {
+  color: var(--success);
+}
+
+.tool-detail-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12.5px;
+}
+
+/* The stat bar is pinned: it sits above, not inside, the scroll viewport. */
+.tool-detail-stats {
+  flex: none;
+  padding: 2px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.tool-detail-stats .diff-stats {
+  padding: 6px 2px;
+  font-size: 13px;
+}
+
+/* Only the code/read body scrolls; header and stats stay put. */
+.tool-detail-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.tool-detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tool-detail-scroll .tool-detail-section + .tool-detail-section {
+  margin-top: 14px;
+}
+
+.tool-detail-section h4 {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.tool-detail-pre {
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 13.5px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tool-detail .diff-body {
+  border-radius: 12px;
+  font-size: 13.5px;
+  line-height: 1.75;
+}
+
+.tool-detail .diff-row {
+  padding: 2px 10px;
+}
+
+.tool-detail .diff-row .no {
+  width: 34px;
+}
+
+/* ---- Turn rollback: impact preview and receipt ---- */
+.undo-impact,
+.undo-receipt {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.undo-impact {
+  max-height: 44vh;
+  overflow-y: auto;
+}
+
+.undo-impact-summary,
+.undo-receipt-lead {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.undo-impact-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.undo-impact-title {
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.undo-impact-group ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.undo-impact-group li {
+  color: var(--text-3);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12.5px;
+  word-break: break-all;
+}
+
+.undo-impact-path {
+  display: block;
+  color: var(--text-2);
+}
+
+.undo-impact-tools {
+  display: block;
+  margin-top: 1px;
+  color: var(--text-3);
+  font-size: 11.5px;
+}
+
+.undo-impact-empty {
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+.undo-impact-warning {
+  margin: 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  color: var(--danger);
+  font-size: 12.5px;
+}
+
 /* ============ Modals & dialogs ============ */
 .modal-overlay {
   position: absolute;
@@ -1833,6 +2046,12 @@ body.split-resizing {
   margin-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
 }
 
+/* Reading-heavy sheets (diff, file body) get a wider, taller canvas. */
+.modal.modal-wide {
+  width: min(94vw, 760px);
+  max-height: 90%;
+}
+
 .modal-header {
   display: flex;
   align-items: center;
@@ -1853,6 +2072,13 @@ body.split-resizing {
   /* Bottom rows of a bottom sheet must clear the gesture zone even when the
      OS reports no inset (env()=0) — see --gesture-lift / --safe-bottom-pad. */
   padding: 8px 18px var(--safe-bottom-pad);
+}
+
+/* Fill mode: the sheet body stops scrolling and the child owns the viewport. */
+.modal-body.modal-body-fill {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .modal-footer {
@@ -3675,6 +3901,7 @@ body.split-resizing {
   --accent-deep: #ff9a3d;
   --accent-weak: rgba(255, 138, 51, 0.14);
   --accent-border: rgba(255, 138, 51, 0.4);
+  --bubble-user-bg: #3b2a20;
   --danger: #f0615a;
   --danger-weak: rgba(240, 68, 56, 0.16);
   --info: #4d8df7;
@@ -4038,9 +4265,11 @@ body.split-resizing {
 
 .chat-bubble.user {
   margin-left: auto;
-  background: var(--accent);
-  color: #fff;
+  background: var(--bubble-user-bg);
+  border: 1px solid var(--border);
+  color: var(--text);
   border-bottom-right-radius: 6px;
+  box-shadow: var(--shadow);
 }
 
 .chat-bubble.assistant {
@@ -4095,89 +4324,6 @@ body.split-resizing {
 
 .chat-retry:active {
   background: rgba(240, 68, 56, 0.12);
-}
-
-.chat-tool {
-  margin: 8px 0;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
-  font-size: 12.5px;
-  color: var(--text-2);
-}
-
-.chat-tool.running {
-  border-style: dashed;
-}
-
-.chat-tool.error {
-  border-color: rgba(240, 68, 56, 0.35);
-}
-
-.chat-tool-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.chat-tool-name {
-  color: var(--text);
-  font-weight: 600;
-}
-
-.chat-tool-state {
-  color: var(--text-3);
-}
-
-.chat-tool.error .chat-tool-state {
-  color: var(--danger);
-}
-
-.chat-tool-args,
-.chat-tool-result {
-  margin-top: 5px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-/* Long payloads collapse by default; 展开 removes the clamp. */
-.chat-tool:not(.expanded) .chat-tool-args,
-.chat-tool:not(.expanded) .chat-tool-result {
-  max-height: 84px;
-  overflow: hidden;
-}
-
-.chat-tool.expanded .chat-tool-args,
-.chat-tool.expanded .chat-tool-result {
-  max-height: 45vh;
-  overflow-y: auto;
-}
-
-.chat-tool-args {
-  color: var(--text-3);
-}
-
-.chat-tool-result {
-  color: var(--text);
-}
-
-.chat-tool-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 6px;
-}
-
-.chat-tool-action {
-  padding: 2px 0;
-  color: var(--accent-deep);
-  font-size: 12.5px;
-}
-
-.chat-tool-action:active {
-  opacity: 0.6;
 }
 
 /* ---- Message rows and reply toolbar ---- */
@@ -4294,28 +4440,6 @@ body.split-resizing {
   white-space: nowrap;
 }
 
-.chat-thinking {
-  margin: 0 0 6px;
-}
-
-.chat-thinking-toggle {
-  padding: 2px 8px;
-  border-radius: 8px;
-  color: var(--text-3);
-  font-size: 11.5px;
-  background: var(--surface-2);
-}
-
-.chat-thinking-body {
-  margin-top: 4px;
-  padding: 8px 10px;
-  border-left: 2px solid var(--border);
-  color: var(--text-2);
-  font-size: 12px;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
 /* Ring + its token-usage popover, pinned to the toolbar's right edge. */
 .chat-context {
   position: relative;
@@ -4388,25 +4512,67 @@ body.split-resizing {
   z-index: 2;
 }
 
-/* ---- Agent trace nodes ---- */
-.chat-trace-node {
-  position: relative;
+/* ---- Agent trace groups ---- */
+.chat-trace-group {
+  margin: 8px 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.chat-trace-group-head {
   display: flex;
-  gap: 10px;
-  margin: 2px 0 6px;
-  padding-left: 2px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 10px;
 }
 
-.chat-trace-node::before {
-  content: '';
-  position: absolute;
-  left: 13px;
-  top: 26px;
-  bottom: -10px;
-  width: 1px;
-  background: var(--border);
+.chat-trace-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1;
+  min-width: 0;
+  padding: 2px 0;
+  text-align: left;
+  color: var(--text-2);
+  font-size: 12px;
 }
 
+.chat-trace-group-title {
+  flex: none;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.chat-trace-group-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+.chat-trace-group-all {
+  flex: none;
+  padding: 2px 4px;
+  color: var(--accent-deep);
+  font-size: 11px;
+}
+
+/* One indent line per level: the group body and each child detail. */
+.chat-trace-group-body {
+  margin: 0 8px 6px 18px;
+  padding: 2px 0 2px 9px;
+  border-left: 1px solid var(--border);
+  /* Keep long traces inside the card instead of pushing the conversation. */
+  max-height: 45vh;
+  overflow-y: auto;
+}
+
+/* ---- Agent trace primitives ---- */
 .chat-trace-icon {
   position: relative;
   z-index: 1;
@@ -4446,18 +4612,6 @@ body.split-resizing {
   background: rgba(180, 35, 143, 0.12);
 }
 
-.chat-trace-main {
-  flex: 1;
-  min-width: 0;
-  padding: 1px 0 6px;
-}
-
-.chat-trace-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
 .chat-trace-step {
   flex: none;
   color: var(--text-3);
@@ -4470,21 +4624,6 @@ body.split-resizing {
   font-size: 12.5px;
   font-weight: 600;
   color: var(--text);
-}
-
-.chat-trace-duration {
-  font-size: 11px;
-  color: var(--text-3);
-  font-variant-numeric: tabular-nums;
-}
-
-.chat-trace-state {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  margin-left: auto;
-  font-size: 11px;
-  color: var(--text-3);
 }
 
 /* Status dot: gray waiting/orphan, blue running, green done, red failed. */
@@ -4519,79 +4658,214 @@ body.split-resizing {
   }
 }
 
-.chat-trace-state.running {
-  color: var(--info);
-}
-
-.chat-trace-state.done {
-  color: var(--success);
-}
-
-.chat-trace-state.error {
-  color: var(--danger);
-}
-
-.chat-trace-node.error .chat-trace-state {
-  color: var(--danger);
-}
-
-.chat-trace-toggle {
-  padding: 2px 4px;
-  font-size: 11px;
-  color: var(--accent-deep);
-}
-
-.chat-trace-summary {
-  margin-top: 3px;
-  font-size: 12px;
-}
-
-.chat-file-link {
-  padding: 0;
-  color: var(--accent-deep);
-  font-size: 12px;
-  text-align: left;
-  word-break: break-all;
-}
-
-.chat-trace-preview {
+.chat-trace-chevron {
+  flex: none;
   color: var(--text-3);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  font-size: 10px;
+  line-height: 1;
+  transition: transform 0.15s ease;
 }
 
-.chat-trace-detail {
-  margin-top: 6px;
-  padding-left: 8px;
-  border-left: 2px solid var(--border);
-  max-height: 45vh;
-  overflow-y: auto;
+.chat-trace-chevron.open {
+  transform: rotate(90deg);
 }
 
-.chat-trace-audit {
+.chat-trace-open-hint {
+  flex: none;
+  margin-left: 2px;
+  color: var(--text-3);
+  font-size: 16px;
+  line-height: 1;
+}
+
+/* One-line entry: the path/preview shrinks before the status label. */
+.chat-trace-path {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 5px;
-  color: var(--text-3);
-  font-size: 11px;
+  align-items: baseline;
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--font-mono, ui-monospace, 'SFMono-Regular', Consolas, monospace);
+  font-size: 11.5px;
 }
 
-.chat-trace-audit code {
+.chat-file-dir {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--font-mono, ui-monospace, 'SFMono-Regular', Consolas, monospace);
-  color: var(--text-2);
+  color: var(--text-3);
 }
 
-.chat-trace-section-title {
-  margin-top: 4px;
+.chat-file-name {
+  flex: none;
+  max-width: 72%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.chat-trace-preview {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+}
+
+/* ---- Trace card primitive: reasoning and tool calls share one shell ---- */
+.chat-trace-card {
+  margin: 2px 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.chat-trace-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  text-align: left;
+}
+
+.chat-trace-card-toggle .chat-trace-chevron {
+  margin-left: auto;
+}
+
+/* The detail area hugs short content; past the safe viewport it scrolls
+   internally instead of stretching the page. */
+.chat-trace-card-body {
+  height: fit-content;
+  max-height: min(70vh, calc(100dvh - var(--safe-top) - var(--safe-bottom) - 120px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-top: 1px solid var(--border);
+}
+
+.chat-trace-card-body.thinking {
+  padding: 8px 10px;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-trace-card-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+
+.chat-trace-chevron-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: 6px;
+  color: var(--text-3);
+}
+
+.chat-trace-chevron-btn:hover {
+  background: var(--surface-2);
+}
+
+/* Inline meta row: one line, shared baseline, the name shrinks first. */
+.chat-tool-call-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.chat-tool-call-meta .chat-trace-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-tool-call-duration {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--surface-2);
   color: var(--text-3);
   font-size: 10.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-tool-call-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-3);
+  font-size: 10.5px;
+}
+
+.chat-tool-call-badge.running {
+  color: var(--info);
+  background: rgba(47, 111, 237, 0.1);
+}
+
+.chat-tool-call-badge.done {
+  color: var(--success);
+  background: rgba(18, 183, 106, 0.1);
+}
+
+.chat-tool-call-badge.error {
+  color: var(--danger);
+  background: rgba(240, 68, 56, 0.1);
+}
+
+.chat-tool-call-payload {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px 9px 6px;
+}
+
+/* One file per row; the directory truncates before the filename. */
+.chat-tool-call-file {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
+  padding: 3px 2px;
+  text-align: left;
+}
+
+.chat-tool-call-file-dot {
+  width: 4px;
+  height: 4px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+
+.chat-tool-call-file .chat-trace-path {
+  flex: 1;
+}
+
+.chat-tool-call-more {
+  padding: 2px;
+  color: var(--text-3);
+  font-size: 11px;
 }
 
 /* ---- Diff viewer ---- */
