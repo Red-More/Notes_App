@@ -68,6 +68,8 @@ export type DocCreateParams = {
   content: string
   folderId?: number | null
   fields?: DocFields
+  /** Optional extension without the dot; defaults to `md`. */
+  ext?: string
 }
 
 export type DocSaveParams = {
@@ -87,6 +89,7 @@ export const docApi = {
   list: (params: DocListParams) => invoke<Doc[]>('doc_list', params),
   get: (id: number, includeDeleted = false) => invoke<Doc>('doc_get', { id, includeDeleted }),
   create: (params: DocCreateParams) => invoke<Doc>('doc_create', params),
+  rename: (params: { id: number; name: string }) => invoke<Doc>('doc_rename', params),
   save: (params: DocSaveParams) => invoke<DocSaveReceipt>('doc_save', params),
   delete: (ids: number[]) => invoke<void>('doc_delete', { ids }),
   restore: (ids: number[]) => invoke<void>('doc_restore', { ids }),
@@ -94,13 +97,20 @@ export const docApi = {
   emptyTrash: () => invoke<void>('doc_empty_trash'),
   setPinned: (params: { ids: number[]; pinned: boolean }) => invoke<void>('doc_set_pinned', params),
   move: (params: { ids: number[]; folderId: number | null }) => invoke<void>('doc_move', params),
+  moveToPath: (params: { ids: number[]; dir: string }) =>
+    invoke<void>('doc_move_path', params),
 
-  listFolders: (parentId: number | null = null, root: string | null = null) =>
-    invoke<FolderStats>('folder_list', { parentId, root }),
+  listFolders: (
+    parentId: number | null = null,
+    root: string | null = null,
+    includeSystem = false,
+  ) => invoke<FolderStats>('folder_list', { parentId, root, includeSystem }),
   folderPath: (id: number | null = null, root: string | null = null) =>
     invoke<FolderCrumb[]>('folder_path', { id, root }),
-  createFolder: (name: string, parentId: number | null = null) =>
-    invoke<Folder>('folder_create', { name, parentId }),
+  createFolder: (name: string, parentId: number | null = null, root: string | null = null) =>
+    invoke<Folder>('folder_create', { name, parentId, root }),
+  reorderFolders: (params: { parentId: number | null; root: string | null; ids: number[] }) =>
+    invoke<void>('folder_reorder', params),
   renameFolder: (params: { id: number; name: string }) => invoke<void>('folder_rename', params),
   renameDefaultFolder: (name: string) => invoke<void>('folder_rename_default', { name }),
   deleteFolder: (id: number) => invoke<void>('folder_delete', { id }),
@@ -148,6 +158,7 @@ function bool(value: unknown, fallback = false): boolean {
 function docToNote(doc: Doc): Note {
   return {
     id: doc.id,
+    path: doc.path,
     title: doc.title,
     content: doc.content,
     folderId: doc.folderId,
@@ -328,13 +339,21 @@ export const api = {
     }
   },
   getNote: async (id: number) => docToNote(await docApi.get(id)),
-  createNote: async (params: { title: string; content: string; folderId: number | null }) =>
+  /** Rename the backing file (title + extension) in place. */
+  renameNoteFile: async (id: number, name: string) => docToNote(await docApi.rename({ id, name })),
+  createNote: async (params: {
+    title: string
+    content: string
+    folderId: number | null
+    ext?: string
+  }) =>
     docToNote(
       await docApi.create({
         kind: 'note',
         title: params.title,
         content: params.content,
         folderId: params.folderId,
+        ext: params.ext,
       }),
     ),
   saveNote: async (params: {
@@ -418,12 +437,14 @@ export const api = {
   },
 
   // ---- Folders ----
-  listFolders: (parentId: number | null = null, root: string | null = null) =>
-    docApi.listFolders(parentId, root),
+  listFolders: (parentId: number | null = null, root: string | null = null, includeSystem = false) =>
+    docApi.listFolders(parentId, root, includeSystem),
   folderPath: (id: number | null = null, root: string | null = null) =>
     docApi.folderPath(id, root),
-  createFolder: (name: string, parentId: number | null = null) =>
-    docApi.createFolder(name, parentId),
+  createFolder: (name: string, parentId: number | null = null, root: string | null = null) =>
+    docApi.createFolder(name, parentId, root),
+  reorderFolders: (params: { parentId: number | null; root: string | null; ids: number[] }) =>
+    docApi.reorderFolders(params),
   renameFolder: (params: { id: number; name: string }) => docApi.renameFolder(params),
   renameDefaultFolder: (name: string) => docApi.renameDefaultFolder(name),
   deleteFolder: (id: number) => docApi.deleteFolder(id),

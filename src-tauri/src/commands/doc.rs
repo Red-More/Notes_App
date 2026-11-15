@@ -72,9 +72,18 @@ pub fn doc_create(
     content: String,
     folder_id: Option<i64>,
     fields: Option<DocFields>,
+    ext: Option<String>,
 ) -> Result<Doc, ToolError> {
     let mut vfs = crate::lock(&state.0);
-    docs::create(&mut vfs, &kind, &title, &content, folder_id, fields)
+    docs::create_typed(
+        &mut vfs,
+        &kind,
+        &title,
+        &content,
+        folder_id,
+        fields,
+        ext.as_deref(),
+    )
 }
 
 /// 保存文档；字段用 null 表示清除。folder_id 仅对笔记生效：
@@ -91,6 +100,28 @@ pub fn doc_save(
 ) -> Result<DocSaveReceipt, ToolError> {
     let mut vfs = crate::lock(&state.0);
     docs::save(&mut vfs, id, title, content, fields, folder_id, expect_rev)
+}
+
+/// 批量移动到任意虚拟目录（长按菜单的“移动到”）。
+#[tauri::command]
+pub fn doc_move_path(
+    state: State<'_, VfsState>,
+    ids: Vec<i64>,
+    dir: String,
+) -> Result<(), ToolError> {
+    let mut vfs = crate::lock(&state.0);
+    docs::move_many_to_dir(&mut vfs, &ids, &dir)
+}
+
+/// 重命名文件（标题即文件名，支持切换扩展名）。
+#[tauri::command]
+pub fn doc_rename(
+    state: State<'_, VfsState>,
+    id: i64,
+    name: String,
+) -> Result<Doc, ToolError> {
+    let mut vfs = crate::lock(&state.0);
+    docs::rename_file(&mut vfs, id, &name)
 }
 
 #[tauri::command]

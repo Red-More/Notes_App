@@ -63,6 +63,8 @@ export const NOTES_ROOT_SCOPE: FolderScope = {
 
 export interface Note {
   id: number
+  /** Virtual path; its extension is the displayed file type. */
+  path: string
   title: string
   content: string
   folderId: number | null

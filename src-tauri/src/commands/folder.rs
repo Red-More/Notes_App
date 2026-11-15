@@ -12,9 +12,15 @@ pub fn folder_list(
     state: State<'_, VfsState>,
     parent_id: Option<i64>,
     root: Option<String>,
+    include_system: Option<bool>,
 ) -> Result<FolderStats, ToolError> {
     let vfs = crate::lock(&state.0);
-    folders::list(&vfs, parent_id, root.as_deref())
+    folders::list_scoped(
+        &vfs,
+        parent_id,
+        root.as_deref(),
+        include_system.unwrap_or(false),
+    )
 }
 
 #[tauri::command]
@@ -32,9 +38,21 @@ pub fn folder_create(
     state: State<'_, VfsState>,
     name: String,
     parent_id: Option<i64>,
+    root: Option<String>,
 ) -> Result<Folder, ToolError> {
     let mut vfs = crate::lock(&state.0);
-    folders::create(&mut vfs, &name, parent_id)
+    folders::create_scoped(&mut vfs, &name, parent_id, root.as_deref())
+}
+
+#[tauri::command]
+pub fn folder_reorder(
+    state: State<'_, VfsState>,
+    parent_id: Option<i64>,
+    root: Option<String>,
+    ids: Vec<i64>,
+) -> Result<(), ToolError> {
+    let vfs = crate::lock(&state.0);
+    folders::reorder(&vfs, parent_id, root.as_deref(), &ids)
 }
 
 #[tauri::command]

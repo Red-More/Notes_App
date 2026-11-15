@@ -88,11 +88,21 @@ pub(super) fn unique_file_path(
     dir: &str,
     stem: &str,
 ) -> Result<String, ToolError> {
+    unique_file_path_ext(conn, dir, stem, "md")
+}
+
+/// Same as [`unique_file_path`] but with an explicit extension (without dot).
+pub(super) fn unique_file_path_ext(
+    conn: &Connection,
+    dir: &str,
+    stem: &str,
+    ext: &str,
+) -> Result<String, ToolError> {
     for n in 1..=9999 {
         let name = if n == 1 {
-            format!("{stem}.md")
+            format!("{stem}.{ext}")
         } else {
-            format!("{stem}-{n}.md")
+            format!("{stem}-{n}.{ext}")
         };
         let candidate = format!("{dir}/{name}");
         if !path_exists(conn, &candidate)? {
@@ -100,6 +110,50 @@ pub(super) fn unique_file_path(
         }
     }
     Err(ToolError::invalid("同名文档过多，无法生成唯一路径"))
+}
+
+/// Validate one user-supplied file name (base name + extension included).
+///
+/// Mirrors the frontend rules so a hand-crafted command cannot store a name
+/// Windows cannot represent.
+pub(super) fn validate_file_name(name: &str) -> Result<String, ToolError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(ToolError::invalid("文件名不能为空"));
+    }
+    if name.chars().count() > 120 {
+        return Err(ToolError::invalid("文件名最多 120 个字符"));
+    }
+    if name.chars().any(|c| c.is_control() || "/\\:*?\"<>|".contains(c)) {
+        return Err(ToolError::invalid("文件名不能包含 / \\ : * ? \" < > | 等字符"));
+    }
+    if name == "." || name == ".." {
+        return Err(ToolError::invalid("文件名不能是 . 或 .."));
+    }
+    if name.ends_with('.') || name.ends_with(' ') {
+        return Err(ToolError::invalid("文件名不能以点或空格结尾"));
+    }
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if RESERVED.contains(&stem.as_str()) {
+        return Err(ToolError::invalid("该文件名是系统保留名称"));
+    }
+    Ok(name.to_string())
+}
+
+/// Normalize a user-supplied extension (accepts a leading dot).
+pub(super) fn normalize_extension(raw: &str) -> Result<String, ToolError> {
+    let ext = raw.trim().trim_start_matches('.');
+    if ext.is_empty() || ext.chars().count() > 16 {
+        return Err(ToolError::invalid("扩展名长度必须在 1–16 个字符之间"));
+    }
+    if !ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(ToolError::invalid("扩展名只能包含字母和数字"));
+    }
+    Ok(ext.to_ascii_lowercase())
 }
 
 /// 生成不冲突的目录路径。

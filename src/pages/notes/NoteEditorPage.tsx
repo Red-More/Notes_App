@@ -21,6 +21,15 @@ import {
   safeFileName,
 } from '../../utils'
 import { hasAssetRefs } from '../../assets'
+import {
+  COMMON_FILE_TYPES,
+  baseNameOf,
+  extensionOf,
+  fileNameError,
+  fileNameTypingError,
+  fileTypeLabel,
+  normalizeExtension,
+} from '../../fileTypes'
 import type { Doc, NoteVersion } from '../../types'
 import { ConfirmDialog, DiffView, Modal } from '../../components/ui'
 import { toast } from '../../toast'
@@ -166,6 +175,11 @@ export default function NoteEditorPage({
 }: Props) {
   const [title, setTitle] = useState('')
   const [content, setContent] = useState('')
+  /** Extension of the backing file, shown in the type picker. */
+  const [fileExt, setFileExt] = useState('md')
+  const [typeMenuOpen, setTypeMenuOpen] = useState(false)
+  const [customExt, setCustomExt] = useState('')
+  const [typeError, setTypeError] = useState('')
   const [currentFolderId, setCurrentFolderId] = useState<number | null>(folderId)
   const [currentFolderName, setCurrentFolderName] = useState('')
   const [defaultFolderName, setDefaultFolderName] = useState('默认')
@@ -243,6 +257,8 @@ export default function NoteEditorPage({
     title: '',
     content: '',
   })
+  /** Avoids repeating the same file-name error for every rejected keystroke. */
+  const titleErrorRef = useRef<string | null>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
   const titleRef = useRef<HTMLInputElement>(null)
   const editorRef = useRef<MarkdownEditorHandle>(null)
@@ -273,14 +289,18 @@ export default function NoteEditorPage({
           // Generic doc load: every kind opens editable, frontmatter stays
           // system-owned and is rendered read-only below the toolbar.
           const doc = await docApi.get(noteIdRef.current)
-          setTitle(doc.title)
+          // The title input mirrors the file name: show the path stem and keep
+          // the extension in the dedicated type picker.
+          const fileTitle = baseNameOf(doc.path) || doc.title
+          setTitle(fileTitle)
           setContent(doc.content)
           setCurrentFolderId(doc.folderId)
           setUpdatedAt(doc.updatedAt)
           setDocPath(doc.path)
+          setFileExt(extensionOf(doc.path) || 'md')
           setMetaYaml(docMetaYaml(doc))
           lastSavedRef.current = {
-            title: doc.title,
+            title: fileTitle,
             content: doc.content,
           }
         } else if (mode === 'diary' && diaryDate) {
@@ -331,16 +351,29 @@ export default function NoteEditorPage({
       return true
     }
     if (noteIdRef.current == null && isBlank) return true
+    const nameError = fileNameError(t, false)
+    if (nameError) {
+      toast(nameError)
+      setSaveState('dirty')
+      return false
+    }
     setSaveState('saving')
     try {
       if (noteIdRef.current == null) {
         const note =
           mode === 'diary' && diaryDate
             ? await api.createDiary({ date: diaryDate, title: t, content: c })
-            : await api.createNote({ title: t, content: c, folderId: currentFolderId })
+            : await api.createNote({
+                title: t,
+                content: c,
+                folderId: currentFolderId,
+                ext: fileExt,
+              })
         noteIdRef.current = note.id
         setHasNote(true)
         setUpdatedAt(note.updatedAt)
+        setDocPath(note.path)
+        setFileExt(extensionOf(note.path) || fileExt)
       } else if (mode === 'diary') {
         const receipt = await api.saveDiary({ id: noteIdRef.current, title: t, content: c })
         setUpdatedAt(receipt.updatedAt)
@@ -368,7 +401,83 @@ export default function NoteEditorPage({
       toast(friendlyError(e))
       return false
     }
-  }, [title, content, isBlank, mode, diaryDate, currentFolderId])
+  }, [title, content, isBlank, mode, diaryDate, currentFolderId, fileExt])
+
+  /** Rename the backing file (base name + extension) once, not per keystroke. */
+  const commitFileName = useCallback(
+    async (nextTitle: string, nextExt: string) => {
+      if (noteIdRef.current == null) {
+        setFileExt(nextExt)
+        return true
+      }
+      // Strip trailing dots/spaces left over from lenient typing validation.
+      const base =
+        (nextTitle.trim() || baseNameOf(docPath) || 'untitled').replace(/[. ]+$/, '') || 'untitled'
+      const name = `${base}.${nextExt}`
+      const error = fileNameError(name, false)
+      if (error) {
+        toast(error)
+        return false
+      }
+      if (name === `${baseNameOf(docPath)}.${extensionOf(docPath)}`) {
+        setFileExt(nextExt)
+        return true
+      }
+      try {
+        const doc = await api.renameNoteFile(noteIdRef.current, name)
+        setDocPath(doc.path)
+        setFileExt(extensionOf(doc.path) || nextExt)
+        setUpdatedAt(doc.updatedAt)
+        toast('文件名已更新')
+        return true
+      } catch (e) {
+        console.error('重命名失败', e)
+        toast(friendlyError(e))
+        return false
+      }
+    },
+    [docPath],
+  )
+
+  const handleTitleChange = (raw: string) => {
+    // Typing-time check only: a trailing dot/space is legal mid-entry ("v1."
+    // → "v1.2") and gets validated on blur/save instead.
+    const error = fileNameTypingError(raw, true)
+    if (error) {
+      if (titleErrorRef.current !== error) {
+        toast(error)
+        titleErrorRef.current = error
+      }
+      return
+    }
+    titleErrorRef.current = null
+    setTitle(raw)
+  }
+
+  const applyFileType = async (rawExt: string) => {
+    const parsed = normalizeExtension(rawExt)
+    if (parsed.error) {
+      setTypeError(parsed.error)
+      return
+    }
+    const ok = await commitFileName(title, parsed.ext as string)
+    if (ok) {
+      setTypeMenuOpen(false)
+      setCustomExt('')
+      setTypeError('')
+    }
+  }
+
+  // Close the type popover when the user taps anywhere outside it.
+  useEffect(() => {
+    if (!typeMenuOpen) return
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Element | null
+      if (!target?.closest('.editor-type-wrap')) setTypeMenuOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => document.removeEventListener('pointerdown', onPointerDown)
+  }, [typeMenuOpen])
 
   // Mark edits as unsaved (except for a brand-new blank note).
   useEffect(() => {
@@ -821,11 +930,14 @@ export default function NoteEditorPage({
     setRestoreConfirm(null)
     try {
       const note = await api.restoreVersion(v.id)
-      setTitle(note.title)
+      const fileTitle = baseNameOf(note.path) || note.title
+      setTitle(fileTitle)
       setContent(note.content)
       setCurrentFolderId(note.folderId)
       setUpdatedAt(note.updatedAt)
-      lastSavedRef.current = { title: note.title, content: note.content }
+      setDocPath(note.path)
+      setFileExt(extensionOf(note.path) || 'md')
+      lastSavedRef.current = { title: fileTitle, content: note.content }
       setDirty(false)
       setSaveState('clean')
       setPreviewVersion(null)
@@ -841,11 +953,14 @@ export default function NoteEditorPage({
     if (noteIdRef.current == null) return
     try {
       const note = await api.restorePreviousRevision(noteIdRef.current)
-      setTitle(note.title)
+      const fileTitle = baseNameOf(note.path) || note.title
+      setTitle(fileTitle)
       setContent(note.content)
       setCurrentFolderId(note.folderId)
       setUpdatedAt(note.updatedAt)
-      lastSavedRef.current = { title: note.title, content: note.content }
+      setDocPath(note.path)
+      setFileExt(extensionOf(note.path) || 'md')
+      lastSavedRef.current = { title: fileTitle, content: note.content }
       setDirty(false)
       setSaveState('clean')
       toast('已恢复上一版')
@@ -1316,11 +1431,20 @@ export default function NoteEditorPage({
               ref={titleRef}
               className="editor-title-input"
               value={title}
-              onChange={(e) => setTitle(e.target.value)}
+              onChange={(e) => handleTitleChange(e.target.value)}
               onFocus={enterEditing}
-              placeholder="标题"
+              onBlur={() => {
+                if (
+                  noteIdRef.current != null &&
+                  title.trim() &&
+                  title !== baseNameOf(docPath)
+                ) {
+                  void commitFileName(title, fileExt)
+                }
+              }}
+              placeholder="文件名"
             />
-            {/* Status strip: last update time + live word count only. */}
+            {/* Status strip: last update time + live word count + file type. */}
             <div className="editor-meta">
               <span className="editor-meta-item" title="上次更新时间">
                 {updatedAtLabel ? `编辑于 ${updatedAtLabel}` : '尚未保存'}
@@ -1331,6 +1455,60 @@ export default function NoteEditorPage({
               <span className="editor-meta-count" title="正文字数">
                 {wordCountLabel} 字
               </span>
+              <div className="editor-type-wrap">
+                <button
+                  type="button"
+                  className="editor-type-btn"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    setTypeMenuOpen((open) => !open)
+                    setTypeError('')
+                  }}
+                  aria-haspopup="menu"
+                  aria-expanded={typeMenuOpen}
+                >
+                  类型：{fileTypeLabel(fileExt)}
+                </button>
+                {typeMenuOpen && (
+                  <div className="type-popover" role="menu" aria-label="文件类型">
+                      <div className="type-popover-title">文件类型</div>
+                      {COMMON_FILE_TYPES.map((type) => (
+                        <button
+                          key={type.ext}
+                          type="button"
+                          role="menuitem"
+                          className={`type-option ${fileExt === type.ext ? 'active' : ''}`}
+                          onClick={() => void applyFileType(type.ext)}
+                        >
+                          <span>{type.label}</span>
+                          <span className="type-ext">.{type.ext}</span>
+                        </button>
+                      ))}
+                      <div className="type-popover-divider" />
+                      <div className="type-custom">
+                        <input
+                          value={customExt}
+                          onChange={(e) => {
+                            setCustomExt(e.target.value)
+                            setTypeError('')
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault()
+                              void applyFileType(customExt)
+                            }
+                          }}
+                          placeholder="自定义扩展名"
+                          aria-label="自定义扩展名"
+                        />
+                        <button type="button" onClick={() => void applyFileType(customExt)}>
+                          应用
+                        </button>
+                      </div>
+                      {typeError && <div className="type-error">{typeError}</div>}
+                  </div>
+                )}
+              </div>
             </div>
             <div className="editor-split">
               <div

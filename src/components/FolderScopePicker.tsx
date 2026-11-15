@@ -19,6 +19,8 @@ interface Props {
   onClose: () => void
   /** Whether the namespace root itself can be selected (VFS root cannot). */
   rootSelectable?: boolean
+  /** Include dot-directories such as `.agent` / `.lifeos` while browsing. */
+  includeSystem?: boolean
   /** Anchored placement computed by the caller. */
   style?: CSSProperties
 }
@@ -40,6 +42,7 @@ export default function FolderScopePicker({
   onSelect,
   onClose,
   rootSelectable = true,
+  includeSystem = false,
   style,
 }: Props) {
   const [crumbs, setCrumbs] = useState<FolderCrumb[]>([
@@ -77,7 +80,7 @@ export default function FolderScopePicker({
     setLoading(true)
     void (async () => {
       try {
-        const stats = await api.listFolders(current.id, rootPath)
+        const stats = await api.listFolders(current.id, rootPath, includeSystem)
         if (!cancelled) setFolders(stats.folders)
       } catch (e) {
         if (!cancelled) toast(friendlyError(e))
@@ -88,17 +91,24 @@ export default function FolderScopePicker({
     return () => {
       cancelled = true
     }
-  }, [current.id, rootPath])
+  }, [current.id, rootPath, includeSystem])
 
   const choose = (scope: FolderScope) => {
     onSelect(scope)
     onClose()
   }
 
-  const position = useMemo(
-    () => ({ width: 280, maxHeight: '50vh', ...style }) as CSSProperties,
-    [style],
-  )
+  const position = useMemo(() => {
+    if (style) return { width: 280, maxHeight: '50vh', ...style } as CSSProperties
+    // No anchor (standalone picker): centre it like a small modal.
+    return {
+      left: '50%',
+      top: '50%',
+      transform: 'translate(-50%, -50%)',
+      width: 'min(320px, calc(100vw - 32px))',
+      maxHeight: '60vh',
+    } as CSSProperties
+  }, [style])
 
   return (
     <OverlayPortal>

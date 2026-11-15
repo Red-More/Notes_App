@@ -635,15 +635,15 @@ fn path_acl_table_is_not_created() {
 #[test]
 fn folders_list_returns_only_note_folders() {
     let mut vfs = test_vfs();
-    let stats = docs::folders::list(&vfs, None, None).unwrap();
+    let stats = docs::folders::list_scoped(&vfs, None, None, false).unwrap();
     assert_eq!(stats.default_folder_name, "默认");
     // System dirs (diary/todos/contacts/agent) are fixed tabs, not folders here.
     assert!(stats.folders.is_empty(), "no note folders yet");
     assert_eq!(stats.unclassified, 0);
 
-    let folder = docs::folders::create(&mut vfs, "项目", None).unwrap();
+    let folder = docs::folders::create_scoped(&mut vfs, "项目", None, None).unwrap();
     docs::create(&mut vfs, "note", "会议", "内容", Some(folder.id), None).unwrap();
-    let stats = docs::folders::list(&vfs, None, None).unwrap();
+    let stats = docs::folders::list_scoped(&vfs, None, None, false).unwrap();
     assert_eq!(stats.folders.len(), 1);
     assert_eq!(stats.folders[0].name, "项目");
     assert_eq!(stats.folders[0].note_count, 1);
@@ -703,7 +703,7 @@ fn system_folders_reject_delete_and_rename() {
 #[test]
 fn ordinary_folder_delete_still_moves_notes_to_root() {
     let mut vfs = test_vfs();
-    let folder = docs::folders::create(&mut vfs, "项目", None).unwrap();
+    let folder = docs::folders::create_scoped(&mut vfs, "项目", None, None).unwrap();
     let note = docs::create(&mut vfs, "note", "会议", "内容", Some(folder.id), None).unwrap();
     docs::folders::delete(&mut vfs, folder.id).unwrap();
 
@@ -733,12 +733,12 @@ fn ordinary_folder_delete_still_moves_notes_to_root() {
 #[test]
 fn nested_folders_list_and_delete_recursively() {
     let mut vfs = test_vfs();
-    let parent = docs::folders::create(&mut vfs, "项目", None).unwrap();
-    let child = docs::folders::create(&mut vfs, "子项目", Some(parent.id)).unwrap();
+    let parent = docs::folders::create_scoped(&mut vfs, "项目", None, None).unwrap();
+    let child = docs::folders::create_scoped(&mut vfs, "子项目", Some(parent.id), None).unwrap();
     let note = docs::create(&mut vfs, "note", "纪要", "内容", Some(child.id), None).unwrap();
 
     // The parent scope lists the child folder and counts notes recursively.
-    let stats = docs::folders::list(&vfs, Some(parent.id), None).unwrap();
+    let stats = docs::folders::list_scoped(&vfs, Some(parent.id), None, false).unwrap();
     assert_eq!(stats.folders.len(), 1);
     assert_eq!(stats.folders[0].id, child.id);
     assert!(!stats.folders[0].has_children);
@@ -754,7 +754,7 @@ fn nested_folders_list_and_delete_recursively() {
     assert_eq!(crumbs[2].path, child.path);
 
     // VFS-root scope shows the system columns with their UI labels.
-    let vfs_stats = docs::folders::list(&vfs, None, Some("/life")).unwrap();
+    let vfs_stats = docs::folders::list_scoped(&vfs, None, Some("/life"), false).unwrap();
     let notes = vfs_stats
         .folders
         .iter()
@@ -804,6 +804,233 @@ fn doc_list_inside_a_folder_ignores_kind_filter() {
     )
     .unwrap();
     assert!(listed.iter().any(|doc| doc.id == todo.id));
+}
+
+#[test]
+fn folder_list_can_include_system_directories() {
+    let vfs = test_vfs();
+    let hidden = docs::folders::list_scoped(&vfs, None, Some("/life"), false).unwrap();
+    assert!(hidden
+        .folders
+        .iter()
+        .all(|folder| folder.path != "/life/.agent" && folder.path != "/life/.lifeos"));
+
+    let visible = docs::folders::list_scoped(&vfs, None, Some("/life"), true).unwrap();
+    let agent = visible
+        .folders
+        .iter()
+        .find(|folder| folder.path == "/life/.agent")
+        .expect(".agent must be browsable when requested");
+    assert!(agent.has_children, ".agent/skills is a real child directory");
+    assert!(visible
+        .folders
+        .iter()
+        .any(|folder| folder.path == "/life/.lifeos"));
+}
+
+#[test]
+fn folders_outside_notes_support_create_rename_move_and_delete() {
+    let mut vfs = test_vfs();
+    let folder =
+        docs::folders::create_scoped(&mut vfs, "待办归档", None, Some("/life/todos")).unwrap();
+    assert_eq!(folder.path, "/life/todos/待办归档");
+
+    docs::folders::rename(&mut vfs, folder.id, "归档").unwrap();
+    let todo = docs::create(&mut vfs, "todo", "买菜", "- [ ] 买菜", None, None).unwrap();
+    docs::move_many_to_dir(&mut vfs, &[todo.id], &folder.path).unwrap();
+
+    let path: String = vfs
+        .conn()
+        .query_row(
+            "SELECT path FROM inodes WHERE inode = ?1",
+            params![todo.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        path.starts_with("/life/todos/待办归档/"),
+        "moved by path: {path}"
+    );
+
+    // Deleting a non-notes folder recycles its documents instead of dropping them.
+    docs::folders::delete(&mut vfs, folder.id).unwrap();
+    let deleted: i64 = vfs
+        .conn()
+        .query_row(
+            "SELECT deleted FROM inodes WHERE inode = ?1",
+            params![todo.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(deleted, 1, "documents must land in the recycle bin");
+    let dirs: i64 = vfs
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM inodes WHERE kind = 'directory' AND path LIKE '/life/todos/归档%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dirs, 0, "the directory subtree is removed");
+}
+
+#[test]
+fn reserved_config_folders_are_managed_like_ordinary_folders() {
+    let mut vfs = test_vfs();
+    let agent = inode_of(&vfs, "/life/.agent");
+    docs::folders::rename(&mut vfs, agent, "agent2").unwrap();
+    let title: String = vfs
+        .conn()
+        .query_row(
+            "SELECT title FROM meta WHERE inode = ?1",
+            params![agent],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(title, "agent2");
+
+    docs::folders::delete(&mut vfs, agent).unwrap();
+    let left: i64 = vfs
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM inodes WHERE path = '/life/.agent' AND deleted = 0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(left, 0, "ordinary folder deletion removes the directory");
+}
+
+#[test]
+fn grep_finds_moved_documents_without_reindexing() {
+    let mut vfs = test_vfs();
+    let note = docs::create(&mut vfs, "note", "拉面", "今天吃了拉面", None, None).unwrap();
+    docs::move_many_to_dir(&mut vfs, &[note.id], "/life/ai_default").unwrap();
+    let path: String = vfs
+        .conn()
+        .query_row(
+            "SELECT path FROM inodes WHERE inode = ?1",
+            params![note.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(path.starts_with("/life/ai_default/"), "path moved: {path}");
+
+    // FTS rows are keyed by inode and carry no path, so a move must remain
+    // searchable without touching the index.
+    let hits = vfs
+        .grep(GrepRequest {
+            pattern: "拉面".into(),
+            path: None,
+            max_results: Some(10),
+            context_lines: None,
+            doc_type: None,
+            principal: Principal::User,
+        })
+        .unwrap();
+    assert!(
+        hits.hits.iter().any(|hit| hit.path == path),
+        "search must follow the inode to its new path"
+    );
+}
+
+#[test]
+fn reserved_config_files_are_listable_and_editable_by_the_user() {
+    let mut vfs = test_vfs();
+    seed_policy(&vfs, "/life/.lifeos/ai.policy", r#"{"version":1,"read":"deny"}"#);
+    let id = inode_of(&vfs, "/life/.lifeos/ai.policy");
+
+    let listed = docs::list(
+        &vfs,
+        docs::types::ListQuery {
+            root: Some("/life/.lifeos".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        listed.iter().any(|doc| doc.id == id),
+        "config files must appear when browsing the folder"
+    );
+
+    let raw = r#"{"version":1,"read":"allow","write":"allow"}"#;
+    docs::save(&mut vfs, id, None, Some(raw.into()), None, None, None).unwrap();
+    let body: String = vfs
+        .conn()
+        .query_row(
+            "SELECT b.content FROM blobs b JOIN inodes i ON i.inode = b.inode
+             WHERE i.inode = ?1 AND b.rev = i.head_rev",
+            params![id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(body, raw, "reserved files keep their raw body");
+    let meta_rows: i64 = vfs
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM meta WHERE inode = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(meta_rows, 0, "config files stay out of the document mirror");
+
+    // Renaming a policy file (in or out) would silently change ACL
+    // enforcement, so it must be rejected on both sides.
+    assert!(docs::rename_file(&mut vfs, id, "old-policy.json").is_err());
+    let other = docs::create_typed(&mut vfs, "note", "普通", "正文", None, None, Some("md")).unwrap();
+    assert!(docs::rename_file(&mut vfs, other.id, "ai.policy").is_err());
+}
+
+#[test]
+fn folder_reorder_persists_and_is_listed_first() {
+    let mut vfs = test_vfs();
+    let alpha = docs::folders::create_scoped(&mut vfs, "甲", None, None).unwrap();
+    let beta = docs::folders::create_scoped(&mut vfs, "乙", None, None).unwrap();
+    let gamma = docs::folders::create_scoped(&mut vfs, "丙", None, None).unwrap();
+
+    docs::folders::reorder(&vfs, None, None, &[gamma.id, alpha.id, beta.id]).unwrap();
+    let stats = docs::folders::list_scoped(&vfs, None, None, false).unwrap();
+    let names: Vec<&str> = stats.folders.iter().map(|folder| folder.name.as_str()).collect();
+    assert_eq!(names, vec!["丙", "甲", "乙"]);
+    assert_eq!(stats.folders[0].sort_order, 0);
+    assert_eq!(stats.folders[2].sort_order, 2);
+
+    // Only direct children of the scope can be ordered.
+    let nested = docs::folders::create_scoped(&mut vfs, "子", Some(alpha.id), None).unwrap();
+    assert!(docs::folders::reorder(&vfs, None, None, &[nested.id]).is_err());
+}
+
+#[test]
+fn typed_create_and_rename_reject_illegal_names() {
+    let mut vfs = test_vfs();
+    let doc = docs::create_typed(&mut vfs, "note", "说明", "正文内容", None, None, Some("txt"))
+        .unwrap();
+    assert!(doc.path.ends_with("说明.txt"), "typed extension: {}", doc.path);
+
+    let renamed = docs::rename_file(&mut vfs, doc.id, "说明-v2.js").unwrap();
+    assert!(renamed.path.ends_with("说明-v2.js"));
+    // The title mirror follows the file name so `doc_list` cards stay in sync
+    // with the editor, which treats the file name as the title.
+    assert_eq!(renamed.title, "说明-v2");
+
+    assert!(docs::rename_file(&mut vfs, doc.id, "bad/name.md").is_err());
+    assert!(docs::rename_file(&mut vfs, doc.id, "CON.md").is_err());
+    assert!(docs::rename_file(&mut vfs, doc.id, "trailing.").is_err());
+    assert!(docs::create_typed(&mut vfs, "note", "坏", "", None, None, Some("a/b")).is_err());
+
+    // The path move is transparent to FTS, which is keyed by inode.
+    let hits = vfs
+        .grep(GrepRequest {
+            pattern: "正文内容".into(),
+            path: None,
+            max_results: Some(10),
+            context_lines: None,
+            doc_type: None,
+            principal: Principal::User,
+        })
+        .unwrap();
+    assert!(hits.hits.iter().any(|hit| hit.path == renamed.path));
 }
 
 fn write_file(vfs: &mut VirtualFs, path: &str, content: &str, source: WriteSource) -> WriteReceipt {

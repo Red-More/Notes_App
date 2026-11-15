@@ -5,11 +5,13 @@
 //! `list` 只返回笔记文件夹（`/life/notes` 的直接子目录）；日记、待办等系统
 //! 目录属于固定页签，不在文件夹管理范围内。
 
+use std::collections::HashMap;
+
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::db::schema::{ensure_notes_root, NOTES_ROOT};
 use crate::vfs::error::ToolError;
-use crate::vfs::{cap_gate, VirtualFs};
+use crate::vfs::{cap_gate, reserved, VirtualFs};
 
 use super::types::{Folder, FolderCrumb, FolderStats};
 use super::util::{basename, now, parent_dir, safe_segment, unique_dir_path, unique_file_path};
@@ -122,10 +124,15 @@ fn guard_protected(path: &str, action: &str) -> Result<(), ToolError> {
 ///
 /// `parent_id` 为 `None` 时作用域是 `root`（缺省 `/life/notes`）；`root` 为
 /// `/life` 时可浏览整个虚拟文件系统。只返回直接子目录，深层节点由前端懒加载。
-pub fn list(
+/// List the direct child folders of a scope.
+///
+/// `include_system` also exposes `.agent` / `.lifeos` when the caller wants the
+/// complete tree (title picker and folder manager).
+pub fn list_scoped(
     vfs: &VirtualFs,
     parent_id: Option<i64>,
     root: Option<&str>,
+    include_system: bool,
 ) -> Result<FolderStats, ToolError> {
     let conn = vfs.conn();
     ensure_notes_root(conn)?;
@@ -137,16 +144,20 @@ pub fn list(
 
     let scope_prefix = format!("{scope_path}/");
     let like = format!("{}%", cap_gate::escape_like(&scope_prefix));
-    let mut stmt = conn.prepare(
+    let system_filter = if include_system {
+        ""
+    } else {
+        " AND i.path NOT GLOB '*/.agent' AND i.path NOT GLOB '*/.lifeos'"
+    };
+    let sql = format!(
         "SELECT i.inode, i.path, i.pinned, i.ctime
          FROM inodes i
          WHERE i.kind = 'directory' AND i.deleted = 0
            AND i.path LIKE ?1 ESCAPE '\\'
-           AND instr(substr(i.path, length(?2) + 1), '/') = 0
-           AND i.path NOT GLOB '*/.agent'
-           AND i.path NOT GLOB '*/.lifeos'
-         ORDER BY i.pinned DESC, i.ctime ASC, i.inode ASC",
-    )?;
+           AND instr(substr(i.path, length(?2) + 1), '/') = 0{system_filter}
+         ORDER BY i.pinned DESC, i.ctime ASC, i.inode ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params![like, scope_prefix], |r| {
         Ok((
             r.get::<_, i64>(0)?,
@@ -166,9 +177,23 @@ pub fn list(
             is_pinned: pinned,
             sort_order: 0,
             note_count: count_direct_files(conn, &path)?,
-            has_children: has_child_dirs(conn, &path)?,
+            has_children: has_child_dirs(conn, &path, include_system)?,
             created_at,
         });
+    }
+
+    // A custom order overrides pinned/ctime when the user dragged the chips.
+    let order = load_order(conn, &scope_path);
+    if !order.is_empty() {
+        let rank: HashMap<i64, usize> = order
+            .iter()
+            .enumerate()
+            .map(|(index, id)| (*id, index))
+            .collect();
+        folders.sort_by_key(|folder| rank.get(&folder.id).copied().unwrap_or(usize::MAX));
+    }
+    for (index, folder) in folders.iter_mut().enumerate() {
+        folder.sort_order = index as i64;
     }
 
     Ok(FolderStats {
@@ -181,17 +206,74 @@ pub fn list(
     })
 }
 
-/// 新建文件夹；`parent_id` 指定父级，缺省挂在笔记根目录下。
-pub fn create(
+/// Persist the display order of a folder's direct children.
+pub fn reorder(
+    vfs: &VirtualFs,
+    parent_id: Option<i64>,
+    root: Option<&str>,
+    ids: &[i64],
+) -> Result<(), ToolError> {
+    let conn = vfs.conn();
+    let (_, scope_path, _) = resolve_scope(conn, parent_id, root)?;
+    let mut seen = std::collections::HashSet::new();
+    for id in ids {
+        if !seen.insert(*id) {
+            return Err(ToolError::invalid("文件夹排序包含重复项"));
+        }
+        let path = directory_path_by_id(conn, *id)?;
+        if parent_dir(&path) != scope_path {
+            return Err(ToolError::invalid("只能排序当前文件夹的直接子文件夹"));
+        }
+    }
+    save_order(conn, &scope_path, ids)
+}
+
+fn order_key(parent: &str) -> String {
+    format!("folder.order:{parent}")
+}
+
+fn load_order(conn: &Connection, parent: &str) -> Vec<i64> {
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        params![order_key(parent)],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .and_then(|raw| serde_json::from_str::<Vec<i64>>(&raw).ok())
+    .unwrap_or_default()
+}
+
+fn save_order(conn: &Connection, parent: &str, ids: &[i64]) -> Result<(), ToolError> {
+    let value = serde_json::to_string(ids)
+        .map_err(|error| ToolError::invalid(format!("文件夹排序序列化失败：{error}")))?;
+    conn.execute(
+        "INSERT INTO settings (key, value, updated_at)
+         VALUES (?1, ?2, datetime('now','localtime'))
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        params![order_key(parent), value],
+    )?;
+    Ok(())
+}
+
+/// Create a folder under `parent_id`, or directly under `root` when omitted.
+pub fn create_scoped(
     vfs: &mut VirtualFs,
     name: &str,
     parent_id: Option<i64>,
+    root: Option<&str>,
 ) -> Result<Folder, ToolError> {
     let name = validate_name(name)?;
     ensure_notes_root(vfs.conn())?;
+    let (root_path, _) = resolve_root(vfs.conn(), root)?;
     let parent_path = match parent_id {
-        None => NOTES_ROOT.to_string(),
-        Some(id) => folder_path_by_id(vfs.conn(), id)?,
+        None => root_path.clone(),
+        Some(id) => {
+            let path = directory_path_by_id(vfs.conn(), id)?;
+            ensure_under(&path, &root_path)?;
+            path
+        }
     };
     if folder_name_exists(vfs.conn(), &name, None, &parent_path)? {
         return Err(ToolError::invalid("同级已存在同名文件夹"));
@@ -217,7 +299,7 @@ pub fn create(
     Ok(Folder {
         id,
         name,
-        path,
+        path: path.clone(),
         is_pinned: 0,
         sort_order: 0,
         note_count: 0,
@@ -235,7 +317,7 @@ pub fn rename(vfs: &mut VirtualFs, id: i64, name: &str) -> Result<(), ToolError>
         return Err(ToolError::invalid("默认文件夹请使用重命名默认文件夹接口"));
     }
     guard_protected(&path, "重命名")?;
-    ensure_note_folder(&path)?;
+    ensure_manageable(&path)?;
     if folder_name_exists(conn, &name, Some(id), parent_dir(&path))? {
         return Err(ToolError::invalid("同级已存在同名文件夹"));
     }
@@ -255,41 +337,85 @@ pub fn rename_default(vfs: &mut VirtualFs, name: &str) -> Result<(), ToolError> 
     Ok(())
 }
 
-/// 删除文件夹：先把其中笔记移动到默认文件夹，再删除空目录。
+/// 删除文件夹。
+///
+/// Notes folders keep the original behaviour (documents return to the notes
+/// root). Any other namespace sends its documents to the recycle bin and then
+/// removes the empty directory subtree, so nothing is lost irreversibly.
 pub fn delete(vfs: &mut VirtualFs, id: i64) -> Result<(), ToolError> {
-    let tx = vfs.conn_mut().transaction()?;
-    let path = directory_path_by_id(&tx, id)?;
+    let path = directory_path_by_id(vfs.conn(), id)?;
+    if path == cap_gate::ROOT {
+        return Err(ToolError::invalid("不能删除文件根目录"));
+    }
     if path.as_str() == NOTES_ROOT {
         return Err(ToolError::invalid("不能删除默认文件夹"));
     }
     guard_protected(&path, "删除")?;
-    ensure_note_folder(&path)?;
+    ensure_manageable(&path)?;
 
-    // Recursive delete: every document in the subtree returns to the default
-    // root, then the whole directory subtree is removed in one statement.
     let prefix = format!("{path}/");
     let like = format!("{}%", cap_gate::escape_like(&prefix));
-    let files: Vec<String> = {
+
+    if path.starts_with("/life/notes/") {
+        let tx = vfs.conn_mut().transaction()?;
+        // Recursive delete: every document in the subtree returns to the default
+        // root, then the whole directory subtree is removed in one statement.
+        let files: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT path FROM inodes
+                 WHERE kind = 'file' AND deleted = 0 AND path LIKE ?1 ESCAPE '\\'",
+            )?;
+            let rows = stmt.query_map(params![like], |r| r.get::<_, String>(0))?;
+            let mut files = Vec::new();
+            for row in rows {
+                files.push(row?);
+            }
+            files
+        };
+
+        for file in files {
+            let stem = basename(&file).to_string();
+            let new_path = unique_file_path(&tx, NOTES_ROOT, &stem)?;
+            tx.execute(
+                "UPDATE inodes SET path = ?1, mtime = datetime('now','localtime')
+                 WHERE path = ?2 AND kind = 'file'",
+                params![new_path, file],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM inodes
+             WHERE kind = 'directory' AND (path = ?1 OR path LIKE ?2 ESCAPE '\\')",
+            params![path, format!("{}%", cap_gate::escape_like(&prefix))],
+        )?;
+        tx.commit()?;
+        return Ok(());
+    }
+
+    // Soft-delete the documents and remove the directory subtree in ONE
+    // transaction, mirroring `delete_many` per file, so a failure cannot leave
+    // a half-deleted folder behind.
+    let tx = vfs.conn_mut().transaction()?;
+    let now = now(&tx)?;
+    let file_ids: Vec<i64> = {
         let mut stmt = tx.prepare(
-            "SELECT path FROM inodes
+            "SELECT inode FROM inodes
              WHERE kind = 'file' AND deleted = 0 AND path LIKE ?1 ESCAPE '\\'",
         )?;
-        let rows = stmt.query_map(params![like], |r| r.get::<_, String>(0))?;
-        let mut files = Vec::new();
+        let rows = stmt.query_map(params![like], |r| r.get::<_, i64>(0))?;
+        let mut ids = Vec::new();
         for row in rows {
-            files.push(row?);
+            ids.push(row?);
         }
-        files
+        ids
     };
-
-    for file in files {
-        let stem = basename(&file).to_string();
-        let new_path = unique_file_path(&tx, NOTES_ROOT, &stem)?;
+    for id in &file_ids {
         tx.execute(
-            "UPDATE inodes SET path = ?1, mtime = datetime('now','localtime')
-             WHERE path = ?2 AND kind = 'file'",
-            params![new_path, file],
+            "UPDATE inodes SET deleted = 1, deleted_at = ?1, mtime = ?1
+             WHERE inode = ?2 AND kind = 'file' AND deleted = 0",
+            params![now, id],
         )?;
+        // Trash content must not be searchable; the index row returns on restore.
+        crate::vfs::fts::remove_document(&tx, *id)?;
     }
     tx.execute(
         "DELETE FROM inodes
@@ -302,9 +428,9 @@ pub fn delete(vfs: &mut VirtualFs, id: i64) -> Result<(), ToolError> {
 
 /// 文件夹置顶。
 pub fn set_pinned(vfs: &mut VirtualFs, id: i64, pinned: bool) -> Result<(), ToolError> {
-    let path = folder_path_by_id(vfs.conn(), id)?;
-    if path.as_str() == NOTES_ROOT {
-        return Err(ToolError::invalid("默认文件夹不能置顶"));
+    let path = directory_path_by_id(vfs.conn(), id)?;
+    if path == cap_gate::ROOT || path.as_str() == NOTES_ROOT {
+        return Err(ToolError::invalid("该文件夹不能置顶"));
     }
     vfs.conn_mut().execute(
         "UPDATE inodes SET pinned = ?1 WHERE inode = ?2 AND kind = 'directory'",
@@ -441,15 +567,21 @@ fn display_name(conn: &Connection, path: &str, vfs_mode: bool) -> Result<String,
     Ok(basename(path).to_string())
 }
 
-fn has_child_dirs(conn: &Connection, dir: &str) -> Result<bool, ToolError> {
+fn has_child_dirs(conn: &Connection, dir: &str, include_system: bool) -> Result<bool, ToolError> {
     let prefix = format!("{dir}/");
-    let count: i64 = conn.query_row(
+    let system_filter = if include_system {
+        ""
+    } else {
+        " AND path NOT GLOB '*/.agent' AND path NOT GLOB '*/.lifeos'"
+    };
+    let sql = format!(
         "SELECT COUNT(*) FROM inodes
          WHERE kind = 'directory' AND deleted = 0
            AND path LIKE ?1 ESCAPE '\\'
-           AND instr(substr(path, length(?2) + 1), '/') = 0
-           AND path NOT GLOB '*/.agent'
-           AND path NOT GLOB '*/.lifeos'",
+           AND instr(substr(path, length(?2) + 1), '/') = 0{system_filter}"
+    );
+    let count: i64 = conn.query_row(
+        &sql,
         params![format!("{}%", cap_gate::escape_like(&prefix)), prefix],
         |r| r.get(0),
     )?;
@@ -525,28 +657,6 @@ fn folder_id_by_path(conn: &Connection, path: &str) -> Result<Option<i64>, ToolE
     .map_err(ToolError::from)
 }
 
-fn folder_path_by_id(conn: &Connection, id: i64) -> Result<String, ToolError> {
-    let row: Option<(String, String)> = conn
-        .query_row(
-            "SELECT kind, path FROM inodes WHERE inode = ?1 AND deleted = 0",
-            params![id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    match row {
-        Some((kind, path))
-            if kind == "directory"
-                && (path.as_str() == NOTES_ROOT || path.starts_with("/life/notes/")) =>
-        {
-            Ok(path)
-        }
-        Some(_) => Err(ToolError::invalid("目标不是笔记文件夹")),
-        None => Err(ToolError::NotFound {
-            path: format!("folder#{id}"),
-        }),
-    }
-}
-
 /// Resolve any directory by id so delete/rename can reject system folders with
 /// their own error before falling back to the notes-root check.
 fn directory_path_by_id(conn: &Connection, id: i64) -> Result<String, ToolError> {
@@ -566,13 +676,16 @@ fn directory_path_by_id(conn: &Connection, id: i64) -> Result<String, ToolError>
     }
 }
 
-/// Anything past the system-folder guard must be an ordinary folder.
-fn ensure_note_folder(path: &str) -> Result<(), ToolError> {
-    if path.starts_with("/life/notes/") {
-        Ok(())
-    } else {
-        Err(ToolError::invalid("目标不是笔记文件夹"))
+/// Folder management is allowed on any ordinary `/life` subdirectory.
+///
+/// The VFS root and the notes root (rename has its own command) are never
+/// managed here. `.agent` / `.lifeos` follow the same rules as ordinary
+/// folders; the model-facing guards live in the VFS layer instead.
+fn ensure_manageable(path: &str) -> Result<(), ToolError> {
+    if path == cap_gate::ROOT || !path.starts_with("/life/") {
+        return Err(ToolError::invalid("不能在文件根目录执行该操作"));
     }
+    Ok(())
 }
 
 fn upsert_title(conn: &Connection, id: i64, name: &str) -> Result<(), ToolError> {
@@ -587,28 +700,35 @@ fn upsert_title(conn: &Connection, id: i64, name: &str) -> Result<(), ToolError>
 
 fn count_files_under(conn: &Connection, dir: &str) -> Result<i64, ToolError> {
     let like = format!("{}%", cap_gate::escape_like(&format!("{dir}/")));
-    Ok(conn.query_row(
+    let reserved_filter = reserved_file_filter(dir);
+    let sql = format!(
         "SELECT COUNT(*) FROM inodes
-         WHERE kind = 'file' AND deleted = 0 AND path LIKE ?1 ESCAPE '\\'
-           AND path NOT GLOB '*/.agent/*' AND path NOT GLOB '*/.lifeos/*'
-           AND path NOT GLOB '*/ai.policy'",
-        params![like],
-        |r| r.get(0),
-    )?)
+         WHERE kind = 'file' AND deleted = 0 AND path LIKE ?1 ESCAPE '\\'{reserved_filter}"
+    );
+    Ok(conn.query_row(&sql, params![like], |r| r.get(0))?)
 }
 
 fn count_direct_files(conn: &Connection, dir: &str) -> Result<i64, ToolError> {
     let prefix = format!("{dir}/");
     let like = format!("{}%", cap_gate::escape_like(&prefix));
-    Ok(conn.query_row(
+    let reserved_filter = reserved_file_filter(dir);
+    let sql = format!(
         "SELECT COUNT(*) FROM inodes
          WHERE kind = 'file' AND deleted = 0
            AND path LIKE ?1 ESCAPE '\\'
-           AND instr(substr(path, length(?2) + 1), '/') = 0
-           AND path NOT GLOB '*/.agent/*'
-           AND path NOT GLOB '*/.lifeos/*'
-           AND path NOT GLOB '*/ai.policy'",
-        params![like, prefix],
-        |r| r.get(0),
-    )?)
+           AND instr(substr(path, length(?2) + 1), '/') = 0{reserved_filter}"
+    );
+    Ok(conn.query_row(&sql, params![like, prefix], |r| r.get(0))?)
+}
+
+/// Hide config files from counts, except when the counted folder is itself a
+/// reserved config tree that the user explicitly opened.
+fn reserved_file_filter(dir: &str) -> &'static str {
+    if reserved::has_segment(dir, reserved::AGENT_DIR)
+        || reserved::has_segment(dir, reserved::LIFEOS_DIR)
+    {
+        ""
+    } else {
+        " AND path NOT GLOB '*/.agent/*' AND path NOT GLOB '*/.lifeos/*' AND path NOT GLOB '*/ai.policy'"
+    }
 }

@@ -26,8 +26,19 @@ type EditorMode = 'note' | 'diary'
 
 type Overlay =
   | { kind: 'editor'; noteId: number | null; folderId?: number | null; mode?: EditorMode; diaryDate?: string }
-  | { kind: 'folders'; folderId: number | null }
+  | { kind: 'folders'; folderId: number | null; rootPath: string }
   | { kind: 'settings' }
+
+/**
+ * Namespace root used by the folder manager: the first level under `/life`,
+ * so any future namespace works without updating a hardcoded list.
+ */
+function folderRootPath(path: string): string {
+  if (path.startsWith('/life/')) {
+    return `/life/${path.slice('/life/'.length).split('/')[0]}`
+  }
+  return '/life'
+}
 
 const TABS: Array<{ key: Tab; label: string; icon: typeof IconNote }> = [
   { key: 'chat', label: '对话', icon: IconChat },
@@ -142,9 +153,9 @@ function App() {
           g.locked = 'v'
           return
         }
-        // Horizontal-only scrollable (chips row): let the browser scroll it.
-        const chips = target.closest('.chips') as HTMLElement | null
-        if (chips && chips.scrollWidth > chips.clientWidth) {
+        // Any interaction inside the chips row belongs to the chips (including
+        // long-press drag reordering); never take it over for page swiping.
+        if (target.closest('.chips')) {
           g.locked = 'chips'
           return
         }
@@ -340,7 +351,11 @@ function App() {
   if (overlay?.kind === 'folders') {
     return (
       <>
-        <FolderManagePage initialFolderId={overlay.folderId} onBack={closeOverlay} />
+        <FolderManagePage
+          initialFolderId={overlay.folderId}
+          rootPath={overlay.rootPath}
+          onBack={closeOverlay}
+        />
         <ToastHost />
       </>
     )
@@ -357,12 +372,6 @@ function App() {
   }
 
   const openSettings = () => setOverlay({ kind: 'settings' })
-  // Folder management is notes-only; other VFS scopes open it at the notes root
-  // instead of exposing system directories.
-  const notesFolderId =
-    notesScope.path === '/life/notes' || notesScope.path.startsWith('/life/notes/')
-      ? notesScope.id
-      : null
 
   return (
     <div className="app">
@@ -390,7 +399,13 @@ function App() {
               onOpenNote={(noteId, folderId) =>
                 setOverlay({ kind: 'editor', noteId, folderId })
               }
-              onOpenFolders={() => setOverlay({ kind: 'folders', folderId: notesFolderId })}
+              onOpenFolders={(scope) =>
+                setOverlay({
+                  kind: 'folders',
+                  folderId: scope.id,
+                  rootPath: folderRootPath(scope.path),
+                })
+              }
             />
           </section>
           <section className="pager-page" role="tabpanel" id="panel-todos" aria-label="待办">

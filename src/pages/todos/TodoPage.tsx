@@ -129,7 +129,14 @@ export default function TodoPage({ isActive, onOpenSettings }: Props) {
   }
 
   const renderRow = (t: Todo) => (
-    <div key={t.id} className={`todo-row ${t.isCompleted === 1 ? 'done' : ''}`} onClick={() => setEditing(t)}>
+    <div
+      key={t.id}
+      className={`todo-row ${t.isCompleted === 1 ? 'done' : ''}`}
+      onClick={() => {
+        setEditing(t)
+        setEditOpen(true)
+      }}
+    >
       <button
         type="button"
         className="todo-check"

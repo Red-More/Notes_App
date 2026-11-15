@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { hapticTap } from './system/haptics'
 
 /**
  * Debounced search state: returns the raw input value, its setter and a
@@ -98,16 +99,27 @@ export function useEdgeBack(onBack: () => void, enabled = true): void {
  * tell which item was held. `didLongPress` suppresses the click that follows a
  * completed long-press.
  */
-export function useLongPress<T = undefined>(callback: (payload: T) => void, ms = 500) {
+export function useLongPress<T = undefined>(
+  callback: (payload: T) => void,
+  ms = 500,
+  options: { hapticOnPress?: boolean } = {},
+) {
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fired = useRef(false)
   const pos = useRef({ x: 0, y: 0 })
+  /** Payload currently held down, used by callers to render the Pressed state. */
+  const [pressing, setPressing] = useState<T | null>(null)
 
   const cancel = () => {
     if (timer.current) {
       clearTimeout(timer.current)
       timer.current = null
     }
+  }
+
+  const release = () => {
+    cancel()
+    setPressing(null)
   }
 
   const bind = (payload?: T) => ({
@@ -117,26 +129,31 @@ export function useLongPress<T = undefined>(callback: (payload: T) => void, ms =
       fired.current = false
       pos.current = { x: e.clientX, y: e.clientY }
       cancel()
+      setPressing(payload ?? null)
+      if (options.hapticOnPress) hapticTap(8)
       timer.current = setTimeout(() => {
         timer.current = null
         fired.current = true
+        // Commit leaves the Pressed state immediately; the item itself renders
+        // the selected/commit style from here on.
+        setPressing(null)
         callback(payload as T)
       }, ms)
     },
-    onPointerUp: cancel,
-    onPointerLeave: cancel,
-    onPointerCancel: cancel,
+    onPointerUp: release,
+    onPointerLeave: release,
+    onPointerCancel: release,
     onPointerMove: (e: React.PointerEvent) => {
       // Cancel once the pointer drifts beyond a small slop radius.
       if (Math.abs(e.clientX - pos.current.x) > 10 || Math.abs(e.clientY - pos.current.y) > 10) {
-        cancel()
+        release()
       }
     },
     // Suppress the browser context menu triggered by long-press.
     onContextMenu: (e: React.MouseEvent) => e.preventDefault(),
   })
 
-  return { bind, didLongPress: () => fired.current }
+  return { bind, didLongPress: () => fired.current, pressing }
 }
 
 /**

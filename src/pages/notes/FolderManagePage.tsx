@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { save } from '@tauri-apps/plugin-dialog'
 import { api } from '../../api'
 import { useElasticOverscroll, useEdgeBack, useLongPress, useScrollContainer } from '../../hooks'
+import { hapticTap } from '../../system/haptics'
 import { exportTs, safeFileName, friendlyError } from '../../utils'
 import type { Folder, FolderCrumb, FolderStats } from '../../types'
 import { ConfirmDialog, Modal } from '../../components/ui'
@@ -23,20 +24,27 @@ import { usePhysicalBack } from '../../system/backButton'
 
 interface Props {
   onBack: () => void
-  /** Open the manager at the notes scope currently selected by the title. */
+  /** Open the manager at the folder currently selected by the title. */
   initialFolderId?: number | null
+  /** Namespace root, e.g. `/life/notes`, `/life/todos` or `/life`. */
+  rootPath?: string
+  /** Label of the root crumb; notes keeps its fixed 笔记 label. */
+  rootLabel?: string
 }
 
 /** Synthetic id for the virtual default folder (notes with folder_id = NULL). */
 const DEFAULT_FOLDER_ID = -1
 
-/** Namespace label shown as the root breadcrumb in the notes column. */
-const ROOT_LABEL = '笔记'
-
-export default function FolderManagePage({ onBack, initialFolderId = null }: Props) {
+export default function FolderManagePage({
+  onBack,
+  initialFolderId = null,
+  rootPath = '/life/notes',
+  rootLabel = '笔记',
+}: Props) {
+  const isNotesRoot = rootPath === '/life/notes'
   const [scopeId, setScopeId] = useState<number | null>(initialFolderId)
   const [crumbs, setCrumbs] = useState<FolderCrumb[]>([
-    { id: null, name: ROOT_LABEL, path: '/life/notes' },
+    { id: null, name: rootLabel, path: rootPath },
   ])
   const [rootName, setRootName] = useState('默认')
   const [stats, setStats] = useState<FolderStats | null>(null)
@@ -57,17 +65,21 @@ export default function FolderManagePage({ onBack, initialFolderId = null }: Pro
   const load = useCallback(async () => {
     try {
       const [nextStats, path] = await Promise.all([
-        api.listFolders(scopeId),
-        api.folderPath(scopeId),
+        api.listFolders(scopeId, rootPath, true),
+        api.folderPath(scopeId, rootPath),
       ])
       setStats(nextStats)
-      // The picker namespace is the notes column, so the root crumb says 笔记
-      // while the folder's own renameable title is kept for delete messages.
+      // Notes keeps its fixed 笔记 crumb; other namespaces use the folder's
+      // own display name (待办 / AI 工作区 / basename).
+      const rootNameFromPath = path[0]?.name ?? rootLabel
       setRootName(path[0]?.name ?? '默认')
       setCrumbs(
         path.length > 0
-          ? [{ ...path[0], name: ROOT_LABEL }, ...path.slice(1)]
-          : [{ id: null, name: ROOT_LABEL, path: '/life/notes' }],
+          ? [
+              { ...path[0], name: isNotesRoot ? rootLabel : rootNameFromPath },
+              ...path.slice(1),
+            ]
+          : [{ id: null, name: rootLabel, path: rootPath }],
       )
     } catch (e) {
       // The selected scope disappeared (deleted elsewhere): fall back to root.
@@ -80,15 +92,20 @@ export default function FolderManagePage({ onBack, initialFolderId = null }: Pro
     } finally {
       setLoading(false)
     }
-  }, [scopeId])
+  }, [scopeId, rootPath, rootLabel, isNotesRoot])
 
   useEffect(() => {
     void load()
   }, [load])
 
-  const { bind, didLongPress } = useLongPress(() => {
-    if (!selectMode) setSelectMode(true)
-  })
+  const { bind, didLongPress, pressing } = useLongPress<Folder | 'default'>(
+    () => {
+      hapticTap()
+      if (!selectMode) setSelectMode(true)
+    },
+    300,
+    { hapticOnPress: true },
+  )
 
   const exitSelect = () => {
     setSelectMode(false)
@@ -131,12 +148,12 @@ export default function FolderManagePage({ onBack, initialFolderId = null }: Pro
   const defaultName = stats?.defaultFolderName ?? rootName
   const selectedIds = useMemo(() => [...selected], [selected])
   const selectedFolders = folders.filter((f) => selected.has(f.id))
-  const includesDefault = atRoot && selected.has(DEFAULT_FOLDER_ID)
+  const includesDefault = isNotesRoot && atRoot && selected.has(DEFAULT_FOLDER_ID)
   const defaultOnly = includesDefault && selectedFolders.length === 0
   // The virtual default folder has no row to pin, so pin needs a real folder.
   const canPin = selectedFolders.length > 0
   const pinTarget = !selectedFolders.every((f) => f.isPinned === 1)
-  const selectableIds = atRoot
+  const selectableIds = includesDefault
     ? [DEFAULT_FOLDER_ID, ...folders.map((f) => f.id)]
     : folders.map((f) => f.id)
   const allSelected = selectableIds.length > 0 && selected.size === selectableIds.length
@@ -148,7 +165,7 @@ export default function FolderManagePage({ onBack, initialFolderId = null }: Pro
       return
     }
     try {
-      await api.createFolder(name, scopeId)
+      await api.createFolder(name, scopeId, rootPath)
       setCreateOpen(false)
       setNewName('')
       toast('文件夹已创建')
@@ -196,7 +213,7 @@ export default function FolderManagePage({ onBack, initialFolderId = null }: Pro
       } else if (includesDefault) {
         toast(`${defaultName}文件夹已清空，笔记移入回收站`)
       } else {
-        toast(`已删除，原笔记移入${rootName}`)
+        toast(isNotesRoot ? `已删除，原笔记移入${rootName}` : '已删除，内容已移入回收站')
       }
       exitSelect()
       await load()
@@ -330,15 +347,17 @@ export default function FolderManagePage({ onBack, initialFolderId = null }: Pro
           className={`scroll-content ${springing ? 'springing' : ''}`}
           style={pullDist ? { transform: `translateY(${pullDist}px)` } : undefined}
         >
-          {/* The default folder only exists at the namespace root. */}
-          {atRoot && (
+          {/* The virtual default folder only exists in the notes namespace. */}
+          {isNotesRoot && atRoot && (
             <div
-              className={`folder-row virtual${selectMode && includesDefault ? ' selected' : ''}`}
+              className={`folder-row virtual${selectMode && includesDefault ? ' selected' : ''} ${
+                pressing === 'default' ? 'pressed' : ''
+              }`}
               onClick={() => {
                 if (didLongPress()) return
                 if (selectMode) toggleSelected(DEFAULT_FOLDER_ID)
               }}
-              {...bind()}
+              {...bind('default')}
             >
               {selectMode && (
                 <span className="check-dot">{includesDefault && <IconCheck size={14} />}</span>
@@ -356,9 +375,11 @@ export default function FolderManagePage({ onBack, initialFolderId = null }: Pro
           {folders.map((f) => (
             <div
               key={f.id}
-              className={`folder-row ${selectMode && selected.has(f.id) ? 'selected' : ''}`}
+              className={`folder-row ${selectMode && selected.has(f.id) ? 'selected' : ''} ${
+                pressing === f ? 'pressed' : ''
+              }`}
               onClick={() => handleRowClick(f)}
-              {...bind()}
+              {...bind(f)}
             >
               {selectMode && (
                 <span className="check-dot">{selected.has(f.id) && <IconCheck size={14} />}</span>
@@ -372,22 +393,25 @@ export default function FolderManagePage({ onBack, initialFolderId = null }: Pro
                   {f.name}
                 </div>
                 <div className="folder-count">
-                  {f.noteCount} 篇笔记{f.hasChildren ? ' · 含子文件夹' : ''}
+                  {f.noteCount} {isNotesRoot ? '篇笔记' : '项'}
+                  {f.hasChildren ? ' · 含子文件夹' : ''}
                 </div>
               </div>
               {!selectMode && (
                 <>
-                  <button
-                    type="button"
-                    className="icon-btn"
-                    aria-label="打包导出"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      void handleExport(f)
-                    }}
-                  >
-                    <IconExport size={19} />
-                  </button>
+                  {isNotesRoot && (
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      aria-label="打包导出"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        void handleExport(f)
+                      }}
+                    >
+                      <IconExport size={19} />
+                    </button>
+                  )}
                   <IconChevronRight size={18} className="folder-row-chevron" />
                 </>
               )}
@@ -500,7 +524,9 @@ export default function FolderManagePage({ onBack, initialFolderId = null }: Pro
               ? `确定清空"${defaultName}"文件夹吗？其中 ${stats?.unclassified ?? 0} 篇笔记将移入回收站。`
               : includesDefault
                 ? `确定删除选中的 ${selectedFolders.length} 个文件夹，并清空"${defaultName}"文件夹（${stats?.unclassified ?? 0} 篇笔记将移入回收站）吗？`
-                : `确定删除选中的 ${selectedFolders.length} 个文件夹吗？其中的笔记将移入"${rootName}"，子文件夹会一并删除。`
+                : isNotesRoot
+                  ? `确定删除选中的 ${selectedFolders.length} 个文件夹吗？其中的笔记将移入"${rootName}"，子文件夹会一并删除。`
+                  : `确定删除选中的 ${selectedFolders.length} 个文件夹吗？其中的内容将移入回收站，子文件夹会一并删除。`
           }
           confirmText={defaultOnly ? '清空' : '删除'}
           danger

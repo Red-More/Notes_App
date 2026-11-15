@@ -26,6 +26,7 @@ use crate::vfs::cap_gate;
 use crate::vfs::{
     error::ToolError,
     meta,
+    reserved,
     types::{WriteRequest, WriteSource},
     VirtualFs,
 };
@@ -33,7 +34,8 @@ use crate::vfs::{
 use types::{Doc, DocFields, DocSaveReceipt, ListQuery};
 use util::{
     basename, doc_date, doc_from_row, fetch_row, folder_map, folder_path, folder_path_any,
-    head_content, parent_dir, root_for, safe_segment, unique_file_path,
+    head_content, normalize_extension, parent_dir, root_for, safe_segment, unique_file_path,
+    unique_file_path_ext, validate_file_name,
 };
 
 /// 读取单个文档。
@@ -54,7 +56,7 @@ pub fn list(vfs: &VirtualFs, query: ListQuery) -> Result<Vec<Doc>, ToolError> {
         "SELECT i.inode, i.path, i.head_rev, i.pinned, i.ctime, i.mtime, i.deleted_at,
                 m.kind, m.title, COALESCE(b.content, '')
          FROM inodes i
-         JOIN meta m ON m.inode = i.inode
+         LEFT JOIN meta m ON m.inode = i.inode
          JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
          WHERE i.kind = 'file' AND i.deleted = ?",
     );
@@ -159,6 +161,8 @@ fn apply_content_policy(docs: &mut [Doc], query: &ListQuery) {
 }
 
 /// 新建文档。内容与 fields 由调用方给出，后端负责生成唯一路径与 frontmatter。
+/// 新建文档（测试与内部默认扩展名入口）。
+#[cfg(test)]
 pub fn create(
     vfs: &mut VirtualFs,
     kind: &str,
@@ -167,8 +171,25 @@ pub fn create(
     folder_id: Option<i64>,
     fields: Option<DocFields>,
 ) -> Result<Doc, ToolError> {
+    create_typed(vfs, kind, title, content, folder_id, fields, None)
+}
+
+/// Same as [`create`] but lets the UI pick the extension (e.g. `.txt`).
+pub fn create_typed(
+    vfs: &mut VirtualFs,
+    kind: &str,
+    title: &str,
+    content: &str,
+    folder_id: Option<i64>,
+    fields: Option<DocFields>,
+    ext: Option<&str>,
+) -> Result<Doc, ToolError> {
     root_for(kind)?;
     let mut fields = fields.unwrap_or_default();
+    let ext = match ext {
+        Some(raw) => normalize_extension(raw)?,
+        None => "md".to_string(),
+    };
 
     let dir = {
         let conn = vfs.conn();
@@ -182,11 +203,19 @@ pub fn create(
         }
     };
 
-    let stem = safe_segment(title, kind);
+    // safe_segment keeps trailing dots/spaces; trim them so a hand-crafted
+    // command never stores a stem like "报告." (the UI validates the same rule).
+    let raw_stem = safe_segment(title, kind);
+    let trimmed_stem = raw_stem.trim_end_matches(|c| c == '.' || c == ' ');
+    let stem = if trimmed_stem.is_empty() {
+        kind.to_string()
+    } else {
+        trimmed_stem.to_string()
+    };
 
     let path = {
         let conn = vfs.conn();
-        unique_file_path(conn, &dir, &stem)?
+        unique_file_path_ext(conn, &dir, &stem, &ext)?
     };
 
     if kind == "contact" && !fields.contains_key("personId") {
@@ -292,7 +321,15 @@ pub fn save(
 
     let created_at = parts.created_at.unwrap_or_else(|| row.ctime.clone());
     let now = util::now(&tx)?;
-    let markdown = meta::compose(&kind, &title, &created_at, &now, &merged, &body);
+    // Reserved config documents (`.agent` / `.lifeos`) are ordinary editable
+    // files for the user: write the body verbatim instead of adding Markdown
+    // frontmatter, and keep them out of the document mirror.
+    let is_reserved = reserved::is_reserved_path(&new_path);
+    let markdown = if is_reserved {
+        body
+    } else {
+        meta::compose(&kind, &title, &created_at, &now, &merged, &body)
+    };
     if markdown.len() > 1024 * 1024 {
         return Err(ToolError::ContentTooLarge {
             limit: 1024 * 1024,
@@ -324,9 +361,11 @@ pub fn save(
     )?;
     // Parse the rewritten document once and share it with both mirrors.
     let written = meta::parse_document(&markdown);
-    meta::upsert_parts(&tx, id, &new_path, &written)?;
-    crate::vfs::index::refresh_parts(&tx, id, &new_path, &written)?;
-    crate::vfs::fts::index_document(&tx, id, &markdown)?;
+    if !is_reserved {
+        meta::upsert_parts(&tx, id, &new_path, &written)?;
+        crate::vfs::index::refresh_parts(&tx, id, &new_path, &written)?;
+        crate::vfs::fts::index_document(&tx, id, &markdown)?;
+    }
     let receipt = DocSaveReceipt {
         id,
         path: new_path,
@@ -336,6 +375,51 @@ pub fn save(
     tx.commit()?;
 
     Ok(receipt)
+}
+
+/// Rename one document file (base name + extension) in place.
+///
+/// Moving the path does not touch FTS or the cross index: both are keyed by
+/// inode and resolve the current path from `inodes`.
+pub fn rename_file(vfs: &mut VirtualFs, id: i64, name: &str) -> Result<Doc, ToolError> {
+    let name = validate_file_name(name)?;
+    let row = fetch_row(vfs.conn(), id, false)?;
+    let target = format!("{}/{}", parent_dir(&row.path), name);
+    // Renaming a policy file (in or out) silently changes visibility ACL
+    // enforcement; the file must stay editable in place instead.
+    if reserved::is_policy_file(&row.path) || reserved::is_policy_file(&target) {
+        return Err(ToolError::invalid("可见性策略文件 ai.policy 不能重命名"));
+    }
+    if target == row.path {
+        return get(vfs, id, false);
+    }
+    let exists: i64 = vfs.conn().query_row(
+        "SELECT COUNT(*) FROM inodes WHERE path = ?1",
+        params![target],
+        |row| row.get(0),
+    )?;
+    if exists > 0 {
+        return Err(ToolError::AlreadyExists { path: target });
+    }
+    // Path and title stay in one transaction: `doc_list` renders `meta.title`
+    // directly, and the editor treats the file name as the title. Reserved
+    // config files keep no meta row at all.
+    let tx = vfs.conn_mut().transaction()?;
+    tx.execute(
+        "UPDATE inodes SET path = ?1, mtime = datetime('now','localtime')
+         WHERE inode = ?2 AND kind = 'file'",
+        params![target, id],
+    )?;
+    if !reserved::is_reserved_path(&target) {
+        // Title = file stem; the extension is not part of the display title.
+        let stem = match name.rsplit_once('.') {
+            Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => stem.to_string(),
+            _ => name.to_string(),
+        };
+        tx.execute("UPDATE meta SET title = ?1 WHERE inode = ?2", params![stem, id])?;
+    }
+    tx.commit()?;
+    get(vfs, id, false)
 }
 
 /// 批量软删除（进入回收站）。
@@ -452,6 +536,60 @@ pub fn move_many(
             return Err(ToolError::invalid("只有笔记可以移动文件夹"));
         }
         if parent_dir(&path) == target_dir.as_str() {
+            continue;
+        }
+        let stem = basename(&path).to_string();
+        let new_path = unique_file_path(&tx, &target_dir, &stem)?;
+        tx.execute(
+            "UPDATE inodes SET path = ?1, mtime = datetime('now','localtime') WHERE inode = ?2",
+            params![new_path, id],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Move documents to an arbitrary virtual directory, keeping their kind.
+///
+/// Used by the long-press menu for folders outside the notes namespace, where
+/// `folder_id` is not meaningful. Reserved config directories are rejected.
+pub fn move_many_to_dir(
+    vfs: &mut VirtualFs,
+    ids: &[i64],
+    target_dir: &str,
+) -> Result<(), ToolError> {
+    let target_dir = cap_gate::normalize_path(target_dir)?;
+    if reserved::is_reserved_path(&target_dir) {
+        return Err(ToolError::invalid("不能移动到配置目录"));
+    }
+    let kind: Option<String> = vfs
+        .conn()
+        .query_row(
+            "SELECT kind FROM inodes WHERE path = ?1 AND deleted = 0",
+            params![target_dir],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if kind.as_deref() != Some("directory") {
+        return Err(ToolError::NotFound { path: target_dir });
+    }
+
+    let tx = vfs.conn_mut().transaction()?;
+    for id in ids {
+        let path: Option<String> = tx
+            .query_row(
+                "SELECT path FROM inodes
+                 WHERE inode = ?1 AND kind = 'file' AND deleted = 0",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(path) = path else {
+            return Err(ToolError::NotFound {
+                path: format!("doc#{id}"),
+            });
+        };
+        if parent_dir(&path) == target_dir {
             continue;
         }
         let stem = basename(&path).to_string();

@@ -8,9 +8,11 @@ import {
   useLongPress,
 } from '../../hooks'
 import { exportTs, formatAmPmDateTime, friendlyError } from '../../utils'
-import type { Doc, Folder, FolderScope, FolderStats, Note } from '../../types'
+import { extensionOf, fileTypeLabel } from '../../fileTypes'
+import { hapticTap } from '../../system/haptics'
+import type { Doc, Folder, FolderScope, Note } from '../../types'
 import { NOTES_ROOT_SCOPE } from '../../types'
-import { ConfirmDialog, Modal, OverlayPortal } from '../../components/ui'
+import { ConfirmDialog, OverlayPortal } from '../../components/ui'
 import { toast } from '../../toast'
 import {
   IconCheck,
@@ -18,7 +20,7 @@ import {
   IconClose,
   IconExport,
   IconFolder,
-  IconMove,
+  IconFolderMove,
   IconNote,
   IconPin,
   IconSelectAll,
@@ -30,6 +32,7 @@ import PageHeader from '../../components/PageHeader'
 import FAB from '../../components/FAB'
 import EmptyState from '../../components/EmptyState'
 import FolderScopePicker from '../../components/FolderScopePicker'
+import FolderChips from '../../components/FolderChips'
 
 interface Props {
   isActive: boolean
@@ -39,7 +42,7 @@ interface Props {
   onScopeChange: (scope: FolderScope) => void
   onOpenSettings: () => void
   onOpenNote: (noteId: number | null, folderId: number | null) => void
-  onOpenFolders: () => void
+  onOpenFolders: (scope: FolderScope) => void
 }
 
 /** One rendered row for a note document. */
@@ -48,6 +51,8 @@ interface Row {
   title: string
   preview: string
   meta: string
+  /** File extension without the dot, rendered as `.md` etc. */
+  ext: string
   isPinned: number
   createdAt: string
   updatedAt: string
@@ -59,6 +64,7 @@ function noteRow(note: Note): Row {
     title: note.title,
     preview: note.content,
     meta: `${formatAmPmDateTime(note.updatedAt)} · ${note.content.length}字`,
+    ext: extensionOf(note.path),
     isPinned: note.isPinned,
     createdAt: note.createdAt,
     updatedAt: note.updatedAt,
@@ -72,6 +78,7 @@ function docRow(doc: Doc): Row {
     title: doc.title,
     preview: doc.content,
     meta: `${formatAmPmDateTime(doc.updatedAt)} · ${doc.content.length}字`,
+    ext: extensionOf(doc.path),
     isPinned: doc.pinned,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
@@ -128,8 +135,6 @@ export default function NoteListPage({
   onOpenFolders,
 }: Props) {
   const [notes, setNotes] = useState<Row[]>([])
-  /** Root folder stats, kept only for the «移动到» dialog. */
-  const [stats, setStats] = useState<FolderStats | null>(null)
   /** Direct child folders of the current scope, rendered as the segmented row. */
   const [childFolders, setChildFolders] = useState<Folder[]>([])
   const [filter, setFilter] = useState<SegmentFilter>('all')
@@ -142,7 +147,10 @@ export default function NoteListPage({
   const [sortOpen, setSortOpen] = useState(false)
   const [selectMode, setSelectMode] = useState(false)
   const [selected, setSelected] = useState<Set<number>>(new Set())
-  const [moveOpen, setMoveOpen] = useState(false)
+  /** Documents waiting in the «移动到» folder picker. */
+  const [moveIds, setMoveIds] = useState<number[] | null>(null)
+  /** Namespace target waiting for confirmation before a cross-namespace move. */
+  const [moveConfirm, setMoveConfirm] = useState<FolderScope | null>(null)
   const [deleteConfirm, setDeleteConfirm] = useState(false)
   const [loading, setLoading] = useState(true)
   const [visible, setVisible] = useState(PAGE)
@@ -154,13 +162,14 @@ export default function NoteListPage({
 
   /** Notes-root scope → note APIs; other VFS folders → generic docs. */
   const inNotes = scope.path === '/life/notes' || scope.path.startsWith('/life/notes/')
+  /** Namespace root used when listing the current scope's children. */
+  const foldersRootPath = scope.id == null ? '/life/notes' : '/life'
 
   // Segmented control: the direct subfolders of the current scope.
   useEffect(() => {
     let cancelled = false
-    const rootPath = scope.id == null ? '/life/notes' : '/life'
     void api
-      .listFolders(scope.id, rootPath)
+      .listFolders(scope.id, foldersRootPath, true)
       .then((folders) => {
         if (!cancelled) setChildFolders(folders.folders)
       })
@@ -170,7 +179,7 @@ export default function NoteListPage({
     return () => {
       cancelled = true
     }
-  }, [scope.id, version])
+  }, [scope.id, foldersRootPath, version])
 
   // A new namespace root always starts on the aggregate view.
   useEffect(() => {
@@ -225,7 +234,6 @@ export default function NoteListPage({
       const result = await fetchRows()
       setNotes(result.rows)
       setSearchFallback(result.fallback)
-      setStats(await api.listFolders())
     } catch (e) {
       // A folder removed from the management page invalidates the scope.
       if ((e as { code?: string })?.code === 'notFound') {
@@ -262,9 +270,6 @@ export default function NoteListPage({
         setNotes(result.rows)
         setSearchFallback(result.fallback)
         setVisible(PAGE)
-        const folderStats = await api.listFolders()
-        if (cancelled) return
-        setStats(folderStats)
       } catch (e) {
         if (cancelled) return
         if ((e as { code?: string })?.code === 'notFound') {
@@ -338,18 +343,22 @@ export default function NoteListPage({
     })
   }
 
-  const { bind, didLongPress } = useLongPress((row: Row) => {
-    // Selection actions only apply inside the notes namespace.
-    if (!inNotes) return
-    // A completed hold always acts on the pressed note: enter selection mode
-    // with it selected, or toggle it when selection is already active.
-    if (selectMode) {
-      toggleSelected(row.id)
-    } else {
-      setSelectMode(true)
-      setSelected(new Set([row.id]))
-    }
-  })
+  // Long-press goes straight into batch selection: the only action container
+  // is the multi-select action bar, never a secondary popup menu. 300 ms keeps
+  // selection snappy; a short vibration confirms the state change.
+  const { bind, didLongPress, pressing } = useLongPress(
+    (row: Row) => {
+      hapticTap()
+      if (selectMode) {
+        toggleSelected(row.id)
+      } else {
+        setSelectMode(true)
+        setSelected(new Set([row.id]))
+      }
+    },
+    300,
+    { hapticOnPress: true },
+  )
 
   const handleCardClick = (row: Row) => {
     if (didLongPress()) return
@@ -388,13 +397,24 @@ export default function NoteListPage({
     setLoading(true)
   }
 
-  const selfLabel = inNotes && scope.id == null ? (stats?.defaultFolderName ?? '默认') : '本层'
+  // The current-level option uses the folder's real name; the namespace root
+  // is shown with the conventional `./` marker instead of "本层文件夹".
+  const selfLabel = scope.id == null ? './' : scope.name
   const activeLabel =
     filter === 'all'
       ? scope.name
       : filter === 'self'
         ? selfLabel
         : (childFolders.find((folder) => folder.id === filter)?.name ?? scope.name)
+  // Folder management follows the folder actually being viewed (a chip), not
+  // only the namespace scope chosen from the title.
+  const managementScope: FolderScope =
+    typeof filter === 'number'
+      ? (() => {
+          const folder = childFolders.find((item) => item.id === filter)
+          return folder ? { id: folder.id, name: folder.name, path: folder.path } : scope
+        })()
+      : scope
   /** New notes land in the active child folder, else the namespace root. */
   const createFolderId = typeof filter === 'number' ? filter : scope.id
 
@@ -408,7 +428,6 @@ export default function NoteListPage({
   }, [pickerAnchor])
 
   const selectedIds = useMemo(() => [...selected], [selected])
-  const canSelect = inNotes
   const allSelected = notes.length > 0 && selected.size === notes.length
   const pinnedTarget =
     selected.size === 0 || !notes.filter((n) => selected.has(n.id)).every((n) => n.isPinned === 1)
@@ -426,13 +445,42 @@ export default function NoteListPage({
     }
   }
 
-  const handleMove = async (folderId: number | null) => {
-    setMoveOpen(false)
+  /** Move the pending documents to any virtual folder. */
+  const handleMoveTo = (target: FolderScope) => {
+    if (inNotes && !target.path.startsWith('/life/notes')) {
+      // Crossing the namespace boundary takes the note out of this list;
+      // confirm so the "disappearance" is not a surprise.
+      setMoveConfirm(target)
+      return
+    }
+    void doMove(target)
+  }
+
+  const doMove = async (target: FolderScope) => {
+    setMoveConfirm(null)
+    const ids = moveIds ?? selectedIds
+    setMoveIds(null)
     try {
-      await api.moveNotes({ ids: selectedIds, folderId })
+      await docApi.moveToPath({ ids, dir: target.path })
       toast('已移动')
       exitSelect()
       await load()
+    } catch (e) {
+      console.error(e)
+      toast(friendlyError(e))
+    }
+  }
+
+  const handleReorderFolders = async (ids: number[]) => {
+    // Keep the local chips in the new order while the backend persists it.
+    setChildFolders((prev) => {
+      const byId = new Map(prev.map((folder) => [folder.id, folder]))
+      return ids
+        .map((id) => byId.get(id))
+        .filter((folder): folder is Folder => folder != null)
+    })
+    try {
+      await api.reorderFolders({ parentId: scope.id, root: foldersRootPath, ids })
     } catch (e) {
       console.error(e)
       toast(friendlyError(e))
@@ -518,9 +566,11 @@ export default function NoteListPage({
               label: '设置',
               onClick: onOpenSettings,
             },
-            ...(inNotes
-              ? [{ icon: <IconFolder size={22} />, label: '文件夹管理', onClick: onOpenFolders }]
-              : []),
+            {
+              icon: <IconFolder size={22} />,
+              label: '文件夹管理',
+              onClick: () => onOpenFolders(managementScope),
+            },
           ]}
           search={{
             placeholder:
@@ -581,8 +631,8 @@ export default function NoteListPage({
         )}
       </div>
 
-      {/* Segmented folder row: 全部 aggregate, direct subfolders, current level. */}
-      <div className="chips">
+      {/* Fixed folder options: 全部 / 本层文件夹 / 其他子文件夹（可长按拖拽排序）. */}
+      <div className="chips folder-options">
         <button
           type="button"
           className={`chip ${filter === 'all' ? 'active' : ''}`}
@@ -590,23 +640,21 @@ export default function NoteListPage({
         >
           全部
         </button>
-        {childFolders.map((folder) => (
-          <button
-            key={folder.id}
-            type="button"
-            className={`chip ${filter === folder.id ? 'active' : ''}`}
-            onClick={() => selectFilter(folder.id)}
-          >
-            {folder.name}
-          </button>
-        ))}
         <button
           type="button"
           className={`chip ${filter === 'self' ? 'active' : ''}`}
           onClick={() => selectFilter('self')}
         >
-          {selfLabel}
+          本层文件夹
         </button>
+        {childFolders.length > 0 && (
+          <FolderChips
+            folders={childFolders}
+            activeId={typeof filter === 'number' ? filter : null}
+            onSelect={selectFilter}
+            onReorder={(ids) => void handleReorderFolders(ids)}
+          />
+        )}
       </div>
 
       {pickerOpen && (
@@ -614,6 +662,7 @@ export default function NoteListPage({
           rootLabel="全部文件"
           rootPath="/life"
           rootSelectable={false}
+          includeSystem
           value={scope.id}
           valuePath={scope.path}
           onSelect={handleScopeSelect}
@@ -657,9 +706,11 @@ export default function NoteListPage({
                 {sortedRows.slice(0, visible).map((row) => (
                   <div
                     key={row.id}
-                    className={`note-card ${selectMode && selected.has(row.id) ? 'selected' : ''}`}
+                    className={`note-card ${selectMode && selected.has(row.id) ? 'selected' : ''} ${
+                      pressing === row ? 'pressed' : ''
+                    }`}
                     onClick={() => handleCardClick(row)}
-                    {...(canSelect ? bind(row) : {})}
+                    {...bind(row)}
                   >
                     {selectMode && (
                       <span className="check-dot">
@@ -677,6 +728,9 @@ export default function NoteListPage({
                     </div>
                     <div className="note-card-meta">
                       <span className="note-card-time">{row.meta}</span>
+                      {row.ext && (
+                        <span className="note-card-ext">类型：{fileTypeLabel(row.ext)}</span>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -704,21 +758,23 @@ export default function NoteListPage({
             <button
               type="button"
               className="action-bar-btn"
-              onClick={() => setMoveOpen(true)}
+              onClick={() => setMoveIds(selectedIds)}
               disabled={selected.size === 0}
             >
-              <IconMove size={19} />
+              <IconFolderMove size={19} />
               移动到
             </button>
-            <button
-              type="button"
-              className="action-bar-btn"
-              onClick={() => void handleExport()}
-              disabled={selected.size === 0}
-            >
-              <IconExport size={19} />
-              导出
-            </button>
+            {inNotes && (
+              <button
+                type="button"
+                className="action-bar-btn"
+                onClick={() => void handleExport()}
+                disabled={selected.size === 0}
+              >
+                <IconExport size={19} />
+                导出
+              </button>
+            )}
             <button
               type="button"
               className="action-bar-btn danger"
@@ -743,26 +799,27 @@ export default function NoteListPage({
         />
       )}
 
-      {moveOpen && stats && (
-        <Modal title="移动到文件夹" onClose={() => setMoveOpen(false)}>
-          <button type="button" className="option-row" onClick={() => void handleMove(null)}>
-            {stats.defaultFolderName}
-            <span className="count">{stats.unclassified} 篇</span>
-          </button>
-          {stats.folders.map((f) => (
-            <button
-              key={f.id}
-              type="button"
-              className="option-row"
-              onClick={() => void handleMove(f.id)}
-            >
-              <IconFolder size={18} />
-              {f.name}
-              <span className="count">{f.noteCount} 篇</span>
-            </button>
-          ))}
-        </Modal>
+      {moveConfirm && (
+        <ConfirmDialog
+          title="移动到其他命名空间"
+          message={`确定移动到"${moveConfirm.name}"吗？移动后这些文档将不再显示在笔记列表中。`}
+          confirmText="移动"
+          onConfirm={() => void doMove(moveConfirm)}
+          onCancel={() => setMoveConfirm(null)}
+        />
       )}
+
+      {moveIds && (
+        <FolderScopePicker
+          rootLabel="全部文件"
+          rootPath="/life"
+          rootSelectable={false}
+          value={null}
+          onSelect={handleMoveTo}
+          onClose={() => setMoveIds(null)}
+        />
+      )}
+
     </div>
   )
 }
