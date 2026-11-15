@@ -409,7 +409,7 @@ function ThinkingTraceItem({
   // A measure is recorded once reasoning ends, even while the answer streams.
   const running = live && durationMs === undefined
   return (
-    <div className="chat-trace-card thinking">
+    <div className={`chat-trace-card thinking ${expanded ? 'open' : ''}`}>
       <div className="chat-trace-card-head">
         <button
           type="button"
@@ -503,7 +503,7 @@ function ToolTraceItem({ card, step, onOpen }: ToolTraceItemProps) {
   const preview = card.text.split('\n')[0]?.trim() ?? ''
   const hasPayload = files.length > 0 || preview !== ''
   return (
-    <div className="chat-trace-card">
+    <div className={`chat-trace-card ${open ? 'open' : ''}`}>
       <div className="chat-trace-card-head">
         <button
           type="button"

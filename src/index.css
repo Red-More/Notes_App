@@ -4525,6 +4525,11 @@ body.split-resizing {
 
 /* ---- Agent trace groups ---- */
 .chat-trace-group {
+  display: flex;
+  flex-direction: column;
+  /* Level 1 cap: the whole process block never grows past this, so long
+     traces cannot push the answer out of the viewport. */
+  max-height: min(55vh, calc(100dvh - var(--safe-top) - var(--safe-bottom) - 150px));
   margin: 8px 0 6px;
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -4535,6 +4540,7 @@ body.split-resizing {
 .chat-trace-group-head {
   display: flex;
   align-items: center;
+  flex: none;
   gap: 8px;
   padding: 6px 8px 6px 10px;
 }
@@ -4575,12 +4581,23 @@ body.split-resizing {
 
 /* One indent line per level: the group body and each child detail. */
 .chat-trace-group-body {
-  margin: 0 8px 6px 18px;
-  padding: 2px 0 2px 9px;
+  display: flex;
+  flex-direction: column;
+  /* Level 2 cap: the card list scrolls inside the group instead of growing. */
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 45vh;
+  /* Flex `gap` keeps every card interval identical for any item count. */
+  gap: 4px;
+  /* Symmetric 4px above the first card and below the last one: the last card
+     to the expanded area's bottom edge matches the first card to the title
+     row's bottom edge. */
+  margin: 0 8px 0 18px;
+  padding: 4px 0 4px 9px;
   border-left: 1px solid var(--border);
   /* Keep long traces inside the card instead of pushing the conversation. */
-  max-height: 45vh;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 /* ---- Agent trace primitives ---- */
@@ -4736,11 +4753,28 @@ body.split-resizing {
 
 /* ---- Trace card primitive: reasoning and tool calls share one shell ---- */
 .chat-trace-card {
-  margin: 2px 0 6px;
+  /* Capsule shell: one radius/padding spec for both reasoning and tool rows.
+     The pill radius is half the 40px collapsed row on purpose: a 999px radius
+     is clamped to half the expanded height while it animates, which briefly
+     turns the card into a full ellipse. 20px -> 14px stays a soft corner at
+     every height. */
+  --trace-capsule-radius: 20px;
+  --trace-capsule-pad-y: 7px;
+  --trace-capsule-pad-x: 12px;
+  /* Never let the column squeeze cards: overflow belongs to the group body. */
+  flex: none;
+  margin: 0;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--trace-capsule-radius);
   background: var(--surface);
   overflow: hidden;
+  /* Radius-only change: no layout reflow when the disclosure toggles. */
+  transition: border-radius 0.15s ease;
+}
+
+/* An expanded row relaxes to a soft rectangle so the body keeps its padding. */
+.chat-trace-card.open {
+  --trace-capsule-radius: 14px;
 }
 
 .chat-trace-card-head {
@@ -4750,7 +4784,7 @@ body.split-resizing {
   width: 100%;
   /* One row height for both reasoning and tool cards. */
   min-height: 40px;
-  padding: 7px 9px;
+  padding: var(--trace-capsule-pad-y) var(--trace-capsule-pad-x);
   text-align: left;
 }
 
@@ -4758,14 +4792,18 @@ body.split-resizing {
    internally instead of stretching the page. */
 .chat-trace-card-body {
   height: fit-content;
-  max-height: min(70vh, calc(100dvh - var(--safe-top) - var(--safe-bottom) - 120px));
+  /* Level 3 cap: a tool payload never outgrows the group body viewport. */
+  max-height: min(40vh, calc(100dvh - var(--safe-top) - var(--safe-bottom) - 140px));
   overflow-y: auto;
   overscroll-behavior: contain;
   border-top: 1px solid var(--border);
 }
 
 .chat-trace-card-body.thinking {
-  padding: 8px 10px;
+  /* Reasoning scrolls inside its own row without pushing the tools below. */
+  max-height: min(30vh, calc(100dvh - var(--safe-top) - var(--safe-bottom) - 180px));
+  /* Same horizontal padding as the card head keeps both levels aligned. */
+  padding: 8px 12px;
   color: var(--text-2);
   font-size: 12px;
   line-height: 1.65;
@@ -4869,7 +4907,8 @@ body.split-resizing {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  padding: 5px 9px 6px;
+  /* Matches the reasoning body so both disclosures share one inset. */
+  padding: 8px 12px;
 }
 
 /* One file per row; the directory truncates before the filename. */
