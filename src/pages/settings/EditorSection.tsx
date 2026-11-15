@@ -30,6 +30,10 @@ import {
   subscribeMermaidEnhance,
 } from '../../editor/mermaidPrefs'
 import {
+  setMarkdownDisplay,
+  useMarkdownDisplay,
+} from '../../editor/markdownPrefs'
+import {
   DEFAULT_SYNTAX_PREFS,
   SYNTAX_COLORS,
   SYNTAX_PALETTES,
@@ -145,11 +149,14 @@ export default function EditorSection() {
   const layoutSave = useSettingSave()
   const syntaxSave = useSettingSave()
   const mermaidSave = useSettingSave()
+  const markdownHtmlSave = useSettingSave()
+  const markdownBreaksSave = useSettingSave()
   const mermaidEnhance = useSyncExternalStore(
     subscribeMermaidEnhance,
     getMermaidEnhance,
     getMermaidEnhance,
   )
+  const markdownDisplay = useMarkdownDisplay()
 
   const strategyMeta = SAVE_STRATEGIES.find((meta) => meta.key === strategy.key)
   const strategyValue =
@@ -416,6 +423,30 @@ export default function EditorSection() {
           void mermaidSave.run(() => setMermaidEnhance(next))
         }
         status={<SaveStatus state={mermaidSave.state} error={mermaidSave.error} />}
+      />
+
+      <SettingsSwitchRow
+        icon={<IconNote size={20} />}
+        title="HTML 渲染"
+        subtitle="解析 Markdown 内嵌的 HTML 标签；标签与属性经白名单过滤，笔记预览与 AI 回复共用"
+        checked={markdownDisplay.html}
+        onChange={(next) =>
+          void markdownHtmlSave.run(() => setMarkdownDisplay({ html: next }))
+        }
+        status={<SaveStatus state={markdownHtmlSave.state} error={markdownHtmlSave.error} />}
+      />
+
+      <SettingsSwitchRow
+        icon={<IconSettings size={20} />}
+        title="单行换行"
+        subtitle="开启后单个换行即渲染为换行（breaks）；关闭时按标准 Markdown 合并为一段"
+        checked={markdownDisplay.breaks}
+        onChange={(next) =>
+          void markdownBreaksSave.run(() => setMarkdownDisplay({ breaks: next }))
+        }
+        status={
+          <SaveStatus state={markdownBreaksSave.state} error={markdownBreaksSave.error} />
+        }
       />
     </SettingsGroup>
   )

@@ -7,6 +7,7 @@
 import { useMemo } from 'react'
 import 'katex/dist/katex.min.css'
 import { renderMarkdownPreview } from '../../editor/markdown'
+import { useMarkdownDisplay } from '../../editor/markdownPrefs'
 import { classifyHref } from '../../editor/links'
 import { openExternal } from '../../system/openExternal'
 import { requestImageZoom } from '../../system/imageZoom'
@@ -18,9 +19,10 @@ interface Props {
 }
 
 export default function ChatMarkdown({ text }: Props) {
-  // Raw HTML stays disabled inside the shared renderer, so model output cannot
-  // introduce markup; only the parser's own tags reach the bubble.
-  const html = useMemo(() => renderMarkdownPreview(text), [text])
+  const display = useMarkdownDisplay()
+  // Raw HTML follows the shared display setting; the renderer sanitizes every
+  // raw fragment, so model output can never introduce executable markup.
+  const html = useMemo(() => renderMarkdownPreview(text, display), [text, display])
 
   const handleClick = (event: React.MouseEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement

@@ -16,6 +16,7 @@ import {
   type MermaidTheme,
 } from '../editor/mermaid'
 import { renderMarkdownPreview } from '../editor/markdown'
+import { useMarkdownDisplay } from '../editor/markdownPrefs'
 import { resolveAssetImages } from '../assets'
 import { classifyHref } from '../editor/links'
 import { lineAtOffset, offsetForLine, type PreviewBlock } from '../editor/sync'
@@ -65,7 +66,11 @@ export const MarkdownPreview = forwardRef<MarkdownPreviewHandle, MarkdownPreview
 
     // Rendering is deferred so typing stays responsive on low-end phones.
     const deferredSource = useDeferredValue(source)
-    const html = useMemo(() => renderMarkdownPreview(deferredSource), [deferredSource])
+    const display = useMarkdownDisplay()
+    const html = useMemo(
+      () => renderMarkdownPreview(deferredSource, display),
+      [deferredSource, display],
+    )
     // The app theme lives on <html data-theme>, outside React. Observe it so
     // diagrams re-render with the matching Mermaid theme while the pane stays
     // mounted (e.g. OS light/dark changes in "system" mode).

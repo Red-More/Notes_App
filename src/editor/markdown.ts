@@ -11,6 +11,8 @@ import sub from 'markdown-it-sub'
 import sup from 'markdown-it-sup'
 import ins from 'markdown-it-ins'
 import { full as emoji } from 'markdown-it-emoji'
+import { getMarkdownDisplay, type MarkdownDisplayPrefs } from './markdownPrefs'
+import { sanitizeHtml } from './sanitizeHtml'
 
 // The plugin ships as CJS; dev/prod interop may expose the whole exports object
 // as the default import, so unwrap its `.default` when necessary.
@@ -174,7 +176,8 @@ function annotateSourceLines(md: MarkdownItInstance): void {
 /**
  * Preview renderer aligned with VS Code's built-in Markdown preview: CommonMark
  * plus GFM tables, strikethrough, autolinks, task lists, KaTeX math, Mermaid
- * placeholders and common Markdown Extra extensions. Raw HTML stays disabled.
+ * placeholders and common Markdown Extra extensions. Raw HTML is gated by the
+ * display setting and every raw fragment is sanitized before it is emitted.
  */
 function createMarkdownRenderer(): MarkdownItInstance {
   const md = new MarkdownIt({
@@ -196,13 +199,25 @@ function createMarkdownRenderer(): MarkdownItInstance {
   applyPlugin(emoji, md)
   configureMath(md)
   annotateSourceLines(md)
+  // Only author-written raw HTML reaches these rules; the safe allowlist keeps
+  // script tags, event handlers and dangerous URLs out of the rendered output.
+  md.renderer.rules.html_block = (tokens, idx) => sanitizeHtml(tokens[idx].content)
+  md.renderer.rules.html_inline = (tokens, idx) => sanitizeHtml(tokens[idx].content)
   return md
 }
 
 const renderer = createMarkdownRenderer()
 
-/** Render note source to safe preview HTML. Empty input renders an empty string. */
-export function renderMarkdownPreview(source: string): string {
+/**
+ * Render Markdown to safe preview HTML. Empty input renders an empty string.
+ * Display options are applied per call so the settings switches take effect
+ * without rebuilding the parser.
+ */
+export function renderMarkdownPreview(
+  source: string,
+  display: MarkdownDisplayPrefs = getMarkdownDisplay(),
+): string {
   if (!source.trim()) return ''
+  renderer.set({ html: display.html, breaks: display.breaks })
   return renderer.render(source)
 }
