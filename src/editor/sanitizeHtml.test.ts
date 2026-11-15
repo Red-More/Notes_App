@@ -27,6 +27,8 @@ describe('sanitizeHtml', () => {
     expect(sanitizeHtml('<img src="data:image/png;base64,AA">')).toBe(
       '<img src="data:image/png;base64,AA">',
     )
+    // Unknown schemes fall outside the allowlist.
+    expect(sanitizeHtml('<a href="ftp://x">f</a>')).toBe('<a>f</a>')
   })
 
   it('keeps task-list checkboxes and drops other inputs', () => {

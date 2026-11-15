@@ -112,15 +112,23 @@ function stripControls(value: string): string {
   return out
 }
 
-/** Only http(s), mail, tel, anchors, relative paths and raster data images pass. */
+/**
+ * Explicit allowlist: http(s), mail, tel, notes assets, in-page anchors,
+ * protocol-relative paths, relative paths and raster data images. Any other
+ * scheme (`javascript:`, `vbscript:`, `file:`, unknown ones) is rejected.
+ */
 function safeUrl(value: string): string | null {
   const trimmed = value.trim()
   const lower = stripControls(trimmed).toLowerCase()
   if (lower.startsWith('data:')) {
     return /^data:image\/(png|jpe?g|gif|webp|avif);base64,/i.test(lower) ? trimmed : null
   }
-  if (/^(javascript|vbscript|file):/.test(lower)) return null
-  return trimmed
+  // Anchors and scheme-less relative paths have no scheme to abuse.
+  if (lower.startsWith('#') || !lower.includes(':')) return trimmed
+  if (/^(https?:|mailto:|tel:)/.test(lower)) return trimmed
+  // Notes reference images as `asset:<id>`; the preview swaps in data URLs.
+  if (lower.startsWith('asset:')) return trimmed
+  return null
 }
 
 /** One open tag: allowlist the name, then re-emit cleaned attributes. */
