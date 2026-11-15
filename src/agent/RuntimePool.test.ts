@@ -269,6 +269,16 @@ function poolWith(streamFn: StreamFn) {
   return { pool, store }
 }
 
+/** Counts dispose() calls so a test can prove late-attached agents are freed. */
+class CountingRuntime extends AgentRuntime {
+  disposeCalls = 0
+
+  override dispose(): Promise<void> {
+    this.disposeCalls += 1
+    return super.dispose()
+  }
+}
+
 async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
   const started = Date.now()
   while (!predicate()) {
@@ -399,6 +409,36 @@ describe('RuntimePool', () => {
     gate.release()
     await expect(opening).rejects.toBeInstanceOf(SessionClosedError)
     await closing
+  })
+
+  it('releases the agent attached after a close that raced the load', async () => {
+    const { streamFn } = controlledStreamFn()
+    const store = fakeStore()
+    const created: CountingRuntime[] = []
+    const pool = new RuntimePool(store.deps, {
+      createRuntime: (deps) => {
+        const runtime = new CountingRuntime({
+          deps,
+          streamFn,
+          schedule: (flush) => flush(),
+        })
+        created.push(runtime)
+        return runtime
+      },
+    })
+
+    const gate = store.holdOpen(1)
+    const opening = pool.open(conversation(1), profile)
+    await waitFor(gate.started)
+
+    // open() has no agent yet, so close()'s dispose cannot stop the in-flight
+    // load: the transcript and a fresh agent still attach once the gate opens.
+    await pool.close(1)
+    gate.release()
+    await expect(opening).rejects.toBeInstanceOf(SessionClosedError)
+
+    // open's own dispose, close's dispose, then the pool releasing the late agent.
+    expect(created[0]?.disposeCalls).toBe(3)
   })
 
   it('disposes every session on page teardown', async () => {
