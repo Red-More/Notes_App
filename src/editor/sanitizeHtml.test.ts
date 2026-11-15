@@ -36,6 +36,13 @@ describe('sanitizeHtml', () => {
     expect(sanitizeHtml('<input type="text" value="x">')).toBe('')
   })
 
+  it('keeps mailto, tel, anchors and relative URLs', () => {
+    expect(sanitizeHtml('<a href="mailto:a@b.c">m</a>')).toBe('<a href="mailto:a@b.c">m</a>')
+    expect(sanitizeHtml('<a href="tel:123">t</a>')).toBe('<a href="tel:123">t</a>')
+    expect(sanitizeHtml('<a href="#fn1">a</a>')).toBe('<a href="#fn1">a</a>')
+    expect(sanitizeHtml('<a href="/life/a.md">r</a>')).toBe('<a href="/life/a.md">r</a>')
+  })
+
   it('unwraps unknown tags but keeps their text', () => {
     expect(sanitizeHtml('<custom>文字</custom>')).toBe('文字')
     expect(sanitizeHtml('<iframe src="x">降级</iframe>')).toBe('降级')
