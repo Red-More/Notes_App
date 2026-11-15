@@ -588,16 +588,16 @@ function TraceGroup({
   onToggleThinking,
   onOpenTool,
 }: TraceGroupProps) {
-  const thinkingCount = entries.filter((entry) => entry.kind === 'thinking').length
-  const tools = entries.filter(
-    (entry): entry is { kind: 'tool'; card: ToolCard } => entry.kind === 'tool',
-  )
-  const running = tools.some((entry) => entry.card.status === 'running')
-  const meta = [
-    thinkingCount > 0 ? '思考' : '',
-    tools.length > 0 ? `${tools.length} 个工具` : '',
-    running ? '执行中' : '',
-  ]
+  // Header summary keeps only measurable facts: a reasoning block carries no
+  // count of its own, so only tool calls and the running state show here.
+  let toolCount = 0
+  let running = false
+  for (const entry of entries) {
+    if (entry.kind !== 'tool') continue
+    toolCount += 1
+    if (entry.card.status === 'running') running = true
+  }
+  const meta = [toolCount > 0 && `${toolCount} 次工具调用`, running && '执行中']
     .filter(Boolean)
     .join(' · ')
   return (
@@ -611,17 +611,15 @@ function TraceGroup({
         >
           <span className={`chat-trace-chevron ${open ? 'open' : ''}`}>▸</span>
           <span className="chat-trace-group-title">过程</span>
-          <span className="chat-trace-group-meta">{meta}</span>
+          {meta !== '' && <span className="chat-trace-group-meta">{meta}</span>}
         </button>
-        {thinkingCount > 0 && (
-          <button
-            type="button"
-            className="chat-trace-group-all"
-            onClick={() => onToggleAll(groupId, !open)}
-          >
-            {open ? '全部收起' : '全部展开'}
-          </button>
-        )}
+        <button
+          type="button"
+          className="chat-trace-group-all"
+          onClick={() => onToggleAll(groupId, !open)}
+        >
+          {open ? '全部收起' : '全部展开'}
+        </button>
       </div>
       {open && (
         <div className="chat-trace-group-body">
