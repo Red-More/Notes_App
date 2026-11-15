@@ -817,7 +817,10 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
   const scrollToBottomSmooth = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
-    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    // Same defensive pattern as the editor: WebViews without matchMedia
+    // fall back to the instant jump.
+    const reduce =
+      window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
     el.scrollTo({ top: el.scrollHeight, behavior: reduce ? 'auto' : 'smooth' })
   }, [])
 
