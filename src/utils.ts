@@ -170,6 +170,11 @@ export function shortTime(s: string | null | undefined): string {
   return s.length >= 16 ? s.slice(11, 16) : s
 }
 
+/** Compact wall-clock duration shared by trace rows and detail sheets. */
+export function formatDuration(ms: number): string {
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`
+}
+
 /**
  * Line-based diff between `oldText` and `newText` using LCS.
  * Rows are ordered for display: deletions before additions.

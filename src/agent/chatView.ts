@@ -6,6 +6,7 @@
 
 import type { AgentEvent } from '@earendil-works/pi-agent-core'
 import type { ChatMessageRecord, MessageUsage } from '../types'
+import { diffLines } from '../utils'
 import { classifyFailure, errorText, type ErrorCode } from './errors'
 import { extractAssistant } from './runtime'
 
@@ -224,6 +225,34 @@ export function documentRev(card: ToolCard): number | null {
   if (!match) return null
   const rev = Number(match[1])
   return Number.isFinite(rev) ? rev : null
+}
+
+/**
+ * Added/removed line counts for a write/edit card, derived from its arguments.
+ * Inline disclosures show these counters instead of the diff body; the modal
+ * renders the actual change.
+ */
+export function toolChangeStats(card: ToolCard): { added: number; removed: number } | null {
+  if (card.toolName !== 'fs_write' && card.toolName !== 'fs_edit') return null
+  let args: Record<string, unknown>
+  try {
+    args = JSON.parse(card.args || '{}') as Record<string, unknown>
+  } catch {
+    return null
+  }
+  if (card.toolName === 'fs_write') {
+    const content = typeof args.content === 'string' ? args.content : ''
+    return { added: content === '' ? 0 : content.split('\n').length, removed: 0 }
+  }
+  const before = typeof args.oldString === 'string' ? args.oldString : ''
+  const after = typeof args.newString === 'string' ? args.newString : ''
+  let added = 0
+  let removed = 0
+  for (const row of diffLines(before, after)) {
+    if (row.type === 'add') added += 1
+    else if (row.type === 'del') removed += 1
+  }
+  return { added, removed }
 }
 
 /** One file touched by a turn and how the turn touched it. */

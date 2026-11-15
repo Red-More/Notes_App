@@ -20,6 +20,7 @@ import { createRuntimeDeps } from '../../agent/runtimeDeps'
 import {
   documentPaths,
   partialLength,
+  toolChangeStats,
   turnFileChanges,
   type Bubble,
   type Item,
@@ -33,7 +34,7 @@ import type {
   ChatConversation,
   MessageUsage,
 } from '../../types'
-import { friendlyError, bytesToBase64 } from '../../utils'
+import { bytesToBase64, formatDuration, friendlyError } from '../../utils'
 import { toast } from '../../toast'
 import { ActionSheet, ConfirmDialog, Modal, OverlayPortal } from '../../components/ui'
 import PageHeader from '../../components/PageHeader'
@@ -61,7 +62,7 @@ import {
 import MessageActions from './MessageActions'
 import QueueStatusBar from './QueueStatusBar'
 import ChatMarkdown from './ChatMarkdown'
-import ToolDetailModal from './ToolDetailModal'
+import TraceDetailModal, { type TraceDetailTarget } from './TraceDetailModal'
 import { usePhysicalBack } from '../../system/backButton'
 
 interface Props {
@@ -188,10 +189,6 @@ const TOOL_META: Record<
   fs_glob: { label: 'fs_glob', tone: 'search', Icon: IconSearch },
   fs_grep: { label: 'fs_grep', tone: 'search', Icon: IconSearch },
   load_skill: { label: 'load_skill', tone: 'skill', Icon: IconInfo },
-}
-
-function formatDuration(ms: number): string {
-  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`
 }
 
 /**
@@ -386,9 +383,12 @@ interface ThinkingTraceItemProps {
   /** The owning reply is still streaming, so the body should follow its tail. */
   live: boolean
   onToggle: (id: string) => void
+  /** Opens the card modal with the full reasoning text. */
+  onOpenDetail: () => void
 }
 
-/** Level-2 reasoning row; it shares the tool-call card shell and disclosure. */
+/** Level-2 reasoning row: the row opens the card modal, the chevron toggles
+ * the inline body. */
 function ThinkingTraceItem({
   id,
   text,
@@ -396,6 +396,7 @@ function ThinkingTraceItem({
   expanded,
   live,
   onToggle,
+  onOpenDetail,
 }: ThinkingTraceItemProps) {
   const bodyRef = useRef<HTMLDivElement>(null)
   // Follow the streamed tail until the reader scrolls up; returning to the
@@ -414,8 +415,8 @@ function ThinkingTraceItem({
         <button
           type="button"
           className="chat-trace-card-main"
-          aria-expanded={expanded}
-          onClick={() => onToggle(id)}
+          title="查看详情"
+          onClick={onOpenDetail}
         >
           <span className="chat-trace-icon skill">
             <IconInfo size={14} />
@@ -464,18 +465,18 @@ interface ToolTraceItemProps {
   onOpen: (card: ToolCard, path?: string) => void
 }
 
-/** Files beyond this count collapse into one summary row. */
-const TOOL_STACK_MAX_FILES = 6
-
 /**
  * Level-2 tool row: a single-line meta header (name · duration · status) over
- * a lazily mounted file stack. The chevron alone toggles the disclosure; the
- * meta area still opens the detail inspector.
+ * a lazily mounted summary. The chevron toggles the inline summary only; the
+ * meta area opens the card modal with the full execution detail.
  */
 function ToolTraceItem({ card, step, onOpen }: ToolTraceItemProps) {
-  // Collapsed by default: the changed-files list never renders until asked.
+  // Collapsed by default: the summary never renders until asked.
   const [open, setOpen] = useState(false)
   const files = documentPaths(card)
+  // Write/edit rows summarize with line counters instead of the diff body.
+  // Memoized: the LCS diff must not rerun on every streamed frame.
+  const stats = useMemo(() => toolChangeStats(card), [card])
   const meta = TOOL_META[card.toolName] ?? {
     label: card.toolName,
     tone: 'other',
@@ -501,7 +502,7 @@ function ToolTraceItem({ card, step, onOpen }: ToolTraceItemProps) {
         ? 'error'
         : 'done'
   const preview = card.text.split('\n')[0]?.trim() ?? ''
-  const hasPayload = files.length > 0 || preview !== ''
+  const hasPayload = files.length > 0 || preview !== '' || stats !== null
   return (
     <div className={`chat-trace-card ${open ? 'open' : ''}`}>
       <div className="chat-trace-card-head">
@@ -526,7 +527,7 @@ function ToolTraceItem({ card, step, onOpen }: ToolTraceItemProps) {
             type="button"
             className="chat-trace-chevron-btn"
             aria-expanded={open}
-            aria-label={open ? '收起文件列表' : '展开文件列表'}
+            aria-label={open ? '收起工具摘要' : '展开工具摘要'}
             onClick={() => setOpen((value) => !value)}
           >
             <span className={`chat-trace-chevron ${open ? 'open' : ''}`}>▸</span>
@@ -535,10 +536,16 @@ function ToolTraceItem({ card, step, onOpen }: ToolTraceItemProps) {
           <span className="chat-trace-open-hint">›</span>
         )}
       </div>
-      {/* Lazy disclosure: the payload mounts only after the chevron opens it. */}
+      {/* Inline mode: summary only — the diff/body lives in the card modal. */}
       {open && hasPayload && (
         <div className="chat-trace-card-body chat-tool-call-payload">
-          {files.slice(0, TOOL_STACK_MAX_FILES).map((path) => (
+          {stats && (
+            <div className="chat-tool-call-diff">
+              <span className="add">+{stats.added} 行新增</span>
+              <span className="del">-{stats.removed} 行删除</span>
+            </div>
+          )}
+          {files.map((path) => (
             <button
               key={path}
               type="button"
@@ -552,11 +559,6 @@ function ToolTraceItem({ card, step, onOpen }: ToolTraceItemProps) {
               </span>
             </button>
           ))}
-          {files.length > TOOL_STACK_MAX_FILES && (
-            <span className="chat-tool-call-more">
-              还有 {files.length - TOOL_STACK_MAX_FILES} 个文件，点开查看
-            </span>
-          )}
           {files.length === 0 && preview !== '' && (
             <span className="chat-trace-preview">{preview}</span>
           )}
@@ -574,13 +576,18 @@ interface TraceGroupProps {
   expandedThinking: Set<string>
   /** Assistant item still streaming; its reasoning body follows the tail. */
   liveTraceId: string | null
-  onToggleOpen: (id: string) => void
   onToggleAll: (id: string, expand: boolean) => void
   onToggleThinking: (id: string) => void
   onOpenTool: (card: ToolCard, path?: string) => void
+  onOpenThinking: (entry: {
+    id: string
+    text: string
+    durationMs?: number
+    running: boolean
+  }) => void
 }
 
-/** Level-1 container: its header expands one level, never the child details. */
+/** Level-1 container: expanding it also unfolds every reasoning body. */
 function TraceGroup({
   groupId,
   entries,
@@ -588,10 +595,10 @@ function TraceGroup({
   open,
   expandedThinking,
   liveTraceId,
-  onToggleOpen,
   onToggleAll,
   onToggleThinking,
   onOpenTool,
+  onOpenThinking,
 }: TraceGroupProps) {
   // Header summary keeps only measurable facts: a reasoning block carries no
   // count of its own, so only tool calls and the running state show here.
@@ -612,7 +619,7 @@ function TraceGroup({
           type="button"
           className="chat-trace-group-toggle"
           aria-expanded={open}
-          onClick={() => onToggleOpen(groupId)}
+          onClick={() => onToggleAll(groupId, !open)}
         >
           <span className={`chat-trace-chevron ${open ? 'open' : ''}`}>▸</span>
           <span className="chat-trace-group-title">过程</span>
@@ -638,6 +645,14 @@ function TraceGroup({
                 expanded={expandedThinking.has(entry.id)}
                 live={entry.id === liveTraceId}
                 onToggle={onToggleThinking}
+                onOpenDetail={() =>
+                  onOpenThinking({
+                    id: entry.id,
+                    text: entry.text,
+                    durationMs: entry.durationMs,
+                    running: entry.id === liveTraceId && entry.durationMs === undefined,
+                  })
+                }
               />
             ) : (
               <ToolTraceItem
@@ -703,7 +718,8 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
   // Trace groups start collapsed; expansion is per level and per group.
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
   // Heavy tool content opens in its own sheet; `path` selects the active file.
-  const [detail, setDetail] = useState<{ card: ToolCard; path?: string } | null>(null)
+  // Heavy trace content opens in its own sheet; inline rows stay summaries.
+  const [detail, setDetail] = useState<TraceDetailTarget | null>(null)
   // Rollback is a two-step operation: preview impact, then execute.
   const [undoTarget, setUndoTarget] = useState<{
     item: Bubble
@@ -1615,32 +1631,35 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     })
   }, [])
 
-  /** Heavy tool content lives in its own sheet, so rows only open details. */
+  /** Full tool execution lives in the card modal, never in the inline row. */
   const openToolDetail = useCallback((card: ToolCard, path?: string) => {
-    setDetail({ card, path })
+    setDetail({ kind: 'tool', card, path })
   }, [])
 
-  /** Level 1 only: open the group without touching any child detail. */
-  const toggleGroupOpen = useCallback((id: string) => {
-    setExpandedGroups((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }, [])
+  /** Reasoning detail entry for the card modal. */
+  const openThinkingDetail = useCallback(
+    (entry: { id: string; text: string; durationMs?: number; running: boolean }) => {
+      setDetail({ kind: 'thinking', ...entry })
+    },
+    [],
+  )
 
   /**
-   * Bulk control: expanding opens only the group (level 1), leaving each
-   * reasoning body collapsed; collapsing also resets the reasoning bodies.
+   * Bulk control: opening unfolds the group and every reasoning body by
+   * default; collapsing also resets the reasoning bodies.
    */
   const toggleGroupAll = useCallback(
     (groupId: string, entries: TraceEntry[], expand: boolean) => {
+      const thinkingIds = entries.flatMap((entry) => (entry.kind === 'thinking' ? [entry.id] : []))
       if (expand) {
+        setExpandedThinking((prev) => {
+          const next = new Set(prev)
+          for (const id of thinkingIds) next.add(id)
+          return next
+        })
         setExpandedGroups((prev) => new Set(prev).add(groupId))
         return
       }
-      const thinkingIds = entries.flatMap((entry) => (entry.kind === 'thinking' ? [entry.id] : []))
       setExpandedThinking((prev) => {
         const next = new Set(prev)
         for (const id of thinkingIds) next.delete(id)
@@ -2220,12 +2239,12 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
                         open={groupOpen}
                         expandedThinking={expandedThinking}
                         liveTraceId={liveTraceId}
-                        onToggleOpen={toggleGroupOpen}
                         onToggleAll={(id, expand) =>
                           toggleGroupAll(id, block.trace, expand)
                         }
                         onToggleThinking={toggleThinking}
                         onOpenTool={openToolDetail}
+                        onOpenThinking={openThinkingDetail}
                       />
                     )}
                     {item && item.text !== '' && (
@@ -2699,10 +2718,11 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
       )}
 
       {detail && (
-        <ToolDetailModal
-          key={`${detail.card.id}:${detail.path ?? ''}`}
-          card={detail.card}
-          activePath={detail.path}
+        <TraceDetailModal
+          key={
+            detail.kind === 'tool' ? `${detail.card.id}:${detail.path ?? ''}` : detail.id
+          }
+          target={detail}
           onClose={() => setDetail(null)}
         />
       )}

@@ -1924,6 +1924,17 @@ body.split-resizing {
   font-weight: 600;
 }
 
+/* Reasoning in the card modal: bigger than the 12px inline scroll body. */
+.trace-detail-thinking {
+  margin: 0;
+  padding: 2px 2px 10px;
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.85;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .tool-detail-pre {
   margin: 0;
   padding: 12px 14px;
@@ -2050,6 +2061,12 @@ body.split-resizing {
 .modal.modal-wide {
   width: min(94vw, 760px);
   max-height: 90%;
+}
+
+/* One height for every trace detail card: 3/5 of the screen, scroll inside. */
+.modal.modal-wide.trace-detail-sheet {
+  height: 60dvh;
+  max-height: 60dvh;
 }
 
 .modal-header {
@@ -4909,6 +4926,27 @@ body.split-resizing {
   gap: 1px;
   /* Matches the reasoning body so both disclosures share one inset. */
   padding: 8px 12px;
+  /* Inline mode is a summary: its file list scrolls inside this cap. */
+  max-height: 24vh;
+}
+
+/* Inline change counters; the diff body itself only lives in the modal. */
+.chat-tool-call-diff {
+  display: flex;
+  gap: 12px;
+  padding: 1px 2px 5px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-tool-call-diff .add {
+  color: var(--success);
+  font-weight: 600;
+}
+
+.chat-tool-call-diff .del {
+  color: var(--danger);
+  font-weight: 600;
 }
 
 /* One file per row; the directory truncates before the filename. */
@@ -4932,12 +4970,6 @@ body.split-resizing {
 
 .chat-tool-call-file .chat-trace-path {
   flex: 1;
-}
-
-.chat-tool-call-more {
-  padding: 2px;
-  color: var(--text-3);
-  font-size: 11px;
 }
 
 /* ---- Diff viewer ---- */

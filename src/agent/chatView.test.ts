@@ -10,6 +10,7 @@ import {
   documentRev,
   project,
   reduceEvent,
+  toolChangeStats,
   turnFileChanges,
   type ChatView,
   type Bubble,
@@ -270,6 +271,35 @@ describe('turn file changes', () => {
     expect(turnFileChanges(items, 0)).toEqual([
       { path: '/life/a.md', rev: 1, created: true, calls: 2, tools: ['fs_edit', 'fs_write'] },
     ])
+  })
+})
+
+describe('tool change stats', () => {
+  it('counts every written line of a new document', () => {
+    const card: ToolCard = {
+      ...writeCard('w1', '/life/a.md', 1, 'fs_write'),
+      args: JSON.stringify({ path: '/life/a.md', content: 'a\nb\nc' }),
+    }
+    expect(toolChangeStats(card)).toEqual({ added: 3, removed: 0 })
+  })
+
+  it('counts replaced lines of an edit', () => {
+    const card: ToolCard = {
+      ...writeCard('e1', '/life/a.md', 2),
+      args: JSON.stringify({
+        path: '/life/a.md',
+        oldString: 'a\nb',
+        newString: 'a\nc\nd',
+      }),
+    }
+    expect(toolChangeStats(card)).toEqual({ added: 2, removed: 1 })
+  })
+
+  it('ignores non-write tools and unparseable arguments', () => {
+    expect(
+      toolChangeStats({ ...writeCard('r1', '/life/a.md', 1), toolName: 'fs_read' }),
+    ).toBeNull()
+    expect(toolChangeStats({ ...writeCard('e2', '/life/a.md', 1), args: '{' })).toBeNull()
   })
 })
 

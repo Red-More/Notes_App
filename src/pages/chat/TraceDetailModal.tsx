@@ -1,20 +1,67 @@
-//! Standalone detail view for a trace node.
+//! Unified card modal for every trace node.
 //!
-//! Heavy content (diffs, file reads, arguments/results) lives here instead of
-//! the conversation flow, so the chat keeps one-line summaries.
+//! Inline disclosures only carry summaries; this sheet is the single place for
+//! full details — tool diffs/arguments/results and reasoning text — so all
+//! nodes share one shell, one height (3/5 of the screen) and one type scale.
 
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../../api'
 import { documentPath, documentRev, type ToolCard } from '../../agent/chatView'
 import { DiffBody, DiffStats, Modal } from '../../components/ui'
-import { diffLines, friendlyError } from '../../utils'
+import { diffLines, formatDuration, friendlyError } from '../../utils'
+
+export type TraceDetailTarget =
+  | { kind: 'tool'; card: ToolCard; path?: string }
+  | { kind: 'thinking'; id: string; text: string; durationMs?: number; running: boolean }
 
 interface Props {
-  card: ToolCard
-  /** File chosen from the changed-files list; defaults to the card's path. */
-  activePath?: string
+  target: TraceDetailTarget
   onClose: () => void
 }
+
+export default function TraceDetailModal({ target, onClose }: Props) {
+  if (target.kind === 'thinking') {
+    return <ThinkingDetail target={target} onClose={onClose} />
+  }
+  return <ToolDetail card={target.card} activePath={target.path} onClose={onClose} />
+}
+
+// ------------------------------------------------------------- reasoning
+
+function ThinkingDetail({
+  target,
+  onClose,
+}: {
+  target: Extract<TraceDetailTarget, { kind: 'thinking' }>
+  onClose: () => void
+}) {
+  return (
+    <Modal wide fill className="trace-detail-sheet" title="思考详情" onClose={onClose}>
+      <div className="tool-detail">
+        <header className="tool-detail-head">
+          <div className="tool-detail-title">
+            <span className="tool-detail-name">思考过程</span>
+            <span className={`tool-detail-state ${target.running ? 'running' : 'done'}`}>
+              <span className="tool-detail-dot" />
+              {target.running ? '生成中' : '已完成'}
+            </span>
+          </div>
+          {target.durationMs !== undefined && (
+            <code className="tool-detail-path">耗时 {formatDuration(target.durationMs)}</code>
+          )}
+        </header>
+        {/* Modal typography is larger than the inline scroll body. */}
+        <div className="tool-detail-scroll">
+          <pre className="trace-detail-thinking">
+            {target.text.trim() === '' ? '（无思考内容）' : target.text}
+          </pre>
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
+// ------------------------------------------------------------------ tool
 
 type BodyState =
   | { status: 'loading' }
@@ -34,7 +81,15 @@ async function readRevision(path: string, rev: number): Promise<string> {
   return result.content
 }
 
-export default function ToolDetailModal({ card, activePath, onClose }: Props) {
+function ToolDetail({
+  card,
+  activePath,
+  onClose,
+}: {
+  card: ToolCard
+  activePath?: string
+  onClose: () => void
+}) {
   const primaryPath = documentPath(card)
   const path = activePath ?? primaryPath
   // Only the primary path carries the recorded revision; any other listed file
@@ -78,7 +133,7 @@ export default function ToolDetailModal({ card, activePath, onClose }: Props) {
   const name = path ? (path.split('/').pop() ?? card.toolName) : card.toolName
   const sheetTitle = isDiff ? '变更详情' : isRead ? '文件读取' : '工具详情'
   return (
-    <Modal wide fill title={sheetTitle} onClose={onClose}>
+    <Modal wide fill className="trace-detail-sheet" title={sheetTitle} onClose={onClose}>
       <div className="tool-detail">
         {/* Fixed inspector header: L1 name + status, L2 the full file path. */}
         <header className="tool-detail-head">

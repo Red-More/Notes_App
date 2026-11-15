@@ -44,6 +44,8 @@ interface ModalProps {
   wide?: boolean
   /** Let the children own the scroll area instead of the sheet body. */
   fill?: boolean
+  /** Extra class hook for fixed-height presets or per-surface overrides. */
+  className?: string
 }
 
 /** Bottom-sheet style modal dialog. */
@@ -55,6 +57,7 @@ export function Modal({
   headerAction,
   wide = false,
   fill = false,
+  className,
 }: ModalProps) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -67,7 +70,10 @@ export function Modal({
   return (
     <OverlayPortal>
       <div className="modal-overlay" onClick={onClose}>
-        <div className={`modal ${wide ? 'modal-wide' : ''}`} onClick={(e) => e.stopPropagation()}>
+        <div
+          className={`modal ${wide ? 'modal-wide' : ''} ${className ?? ''}`}
+          onClick={(e) => e.stopPropagation()}
+        >
           <div className="modal-header">
             <span className="modal-title">{title}</span>
             {headerAction ?? (
