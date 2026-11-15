@@ -1,8 +1,9 @@
 //! 模型可见的工具：5 个 `fs_*` + 1 个技能元工具 `load_skill`。
 //!
 //! 这里不做任何路径或配额判断——真正的边界在 Rust 的 CapGate。
-//! 前端只额外挡住 `/life/.agents` 的读取，避免技能正文被 fs_* 直接翻出来；
-//! `load_skill` 只能按已启用技能的名称/id 读取正文，不暴露任意路径。
+//! 前端只额外挡住 `.lifeos` 与 `ai.policy`，这两类配置对模型永久不可见；
+//! `.agent` 是否可读由模型内部配置的 `visible` 决定，交给 Rust 判定。
+//! `load_skill` 的 scope 交由 Rust 侧按 `.lifeos` 鉴权，并拒绝已停用技能。
 
 import type { AgentTool } from '@earendil-works/pi-agent-core'
 import { StringEnum, Type } from '@earendil-works/pi-ai'
@@ -25,7 +26,8 @@ import type {
   VfsWriteReceipt,
 } from '../types'
 
-const AGENTS_PREFIX = '/life/.agents'
+const LIFEOS_DIR = '.lifeos'
+const POLICY_FILE = 'ai.policy'
 
 /**
  * Canonical English descriptors for the model-visible registry.
@@ -40,16 +42,19 @@ export const TOOL_DESCRIPTORS = {
   load_skill: 'load_skill',
 } as const
 
-/** `.agents` 只读且不对模型开放：技能正文由 loader 按需注入（M3）。 */
+/** `.lifeos` 与 `ai.policy` 永久不可见；`.agent` 的可见性由 Rust 侧配置决定。 */
 function assertReadable(path: string): void {
-  if (path === AGENTS_PREFIX || path.startsWith(`${AGENTS_PREFIX}/`)) {
-    throw new Error('该路径属于只读技能区，模型不能直接读取；请改为读取 /life 下的用户文档')
+  const segments = path.split('/').filter((segment) => segment !== '')
+  const blocked =
+    segments.includes(LIFEOS_DIR) || segments[segments.length - 1] === POLICY_FILE
+  if (blocked) {
+    throw new Error('该路径属于只读可见性配置，模型不能直接读取；请改为读取用户文档')
   }
 }
 
 /**
  * glob 的 root 与 pattern 拼起来才算最终检索范围：
- * 相对 pattern（如 .agents/*.md）必须和 root 归一化后再校验。
+ * 相对 pattern（如 .lifeos/ai.policy）必须和 root 归一化后再校验。
  */
 function assertReadableGlob(pattern: string, root?: string): void {
   const base = (root ?? '/life').replace(/\/+$/, '')
@@ -89,7 +94,7 @@ function toolErrorText(error: unknown): string {
     case 'readOnlyArea':
       return `该路径属于只读区，禁止写入：${err.path}`
     case 'permissionDenied':
-      return `该路径未授权给 AI（需要 ${err.permission ?? 'read'} 权限）：${err.path}；默认只能访问 /life/agent，请让用户在设置中授权该文件夹`
+      return `该路径未授权给 AI（需要 ${err.permission ?? 'read'} 权限）：${err.path}；默认只能访问 /life/ai_default，请让用户在设置中授权该文件夹`
     case 'conflict':
       return `版本冲突：当前 rev=${err.current}，期望 rev=${err.expect}；请重新 read 后再编辑`
     case 'noMatch':
@@ -159,9 +164,9 @@ export function createTools(
     name: 'fs_read',
     label: TOOL_DESCRIPTORS.fs_read,
     description:
-      '读取一个文件，或列出目录。文件返回正文、行数与 rev。默认只能访问自己的工作目录 /life/agent；其它目录需用户授权。修改前先 read 拿到最新 rev。',
+      '读取一个文件，或列出目录。文件返回正文、行数与 rev。默认只能访问自己的工作目录 /life/ai_default；其它目录需用户授权。修改前先 read 拿到最新 rev。',
     parameters: Type.Object({
-      path: Type.String({ description: '虚拟路径，如 /life/agent/2026-10-30.md' }),
+      path: Type.String({ description: '虚拟路径，如 /life/ai_default/2026-10-30.md' }),
       rev: Type.Optional(Type.Number({ description: '指定历史版本；省略读当前版本' })),
       startLine: Type.Optional(Type.Number({ description: '起始行（1 起）' })),
       endLine: Type.Optional(Type.Number({ description: '结束行（含）' })),
@@ -206,7 +211,7 @@ export function createTools(
     name: 'fs_write',
     label: TOOL_DESCRIPTORS.fs_write,
     description:
-      '新建一个 Markdown 文档。只能新建，不能覆盖：目标已存在会返回 alreadyExists。默认只能写自己的工作目录 /life/agent；其它目录需用户授权。追加内容请先 read 文件尾部，再用 fs_edit 锚定追加。',
+      '新建一个 Markdown 文档。只能新建，不能覆盖：目标已存在会返回 alreadyExists。默认只能写自己的工作目录 /life/ai_default；其它目录需用户授权。追加内容请先 read 文件尾部，再用 fs_edit 锚定追加。',
     parameters: Type.Object({
       path: Type.String({ description: '虚拟路径；省略 .md 会自动补' }),
       content: Type.String({ description: 'Markdown 正文（可含 frontmatter）' }),
@@ -250,7 +255,7 @@ export function createTools(
     name: 'fs_edit',
     label: TOOL_DESCRIPTORS.fs_edit,
     description:
-      '按字符串替换修改已有文档，追加新 rev。old_string 必须唯一命中；追加内容时把它设为文件末尾附近的一段原文。带上 expectRev 可在版本冲突时被拒绝。默认只能改自己的工作目录 /life/agent；其它目录需用户授权。',
+      '按字符串替换修改已有文档，追加新 rev。old_string 必须唯一命中；追加内容时把它设为文件末尾附近的一段原文。带上 expectRev 可在版本冲突时被拒绝。默认只能改自己的工作目录 /life/ai_default；其它目录需用户授权。',
     parameters: Type.Object({
       path: Type.String({ description: '虚拟路径' }),
       oldString: Type.String({ description: '要被替换的原文，必须唯一命中' }),
@@ -303,10 +308,10 @@ export function createTools(
   const glob: AgentTool = {
     name: 'fs_glob',
     label: TOOL_DESCRIPTORS.fs_glob,
-    description: '按路径模式查找文件或目录，最多 200 条。默认只能看到自己的工作目录 /life/agent；其它目录需用户授权。',
+    description: '按路径模式查找文件或目录，最多 200 条。默认只能看到自己的工作目录 /life/ai_default；其它目录需用户授权。',
     parameters: Type.Object({
       pattern: Type.String({
-        description: 'GLOB 模式：绝对路径（如 /life/agent/*.md）或相对模式（配合 root）',
+        description: 'GLOB 模式：绝对路径（如 /life/ai_default/*.md）或相对模式（配合 root）',
       }),
       root: Type.Optional(Type.String({ description: '相对模式的根目录，默认 /life（结果按授权过滤）' })),
       caseSensitive: Type.Optional(Type.Boolean({ description: '是否区分大小写' })),
@@ -339,7 +344,7 @@ export function createTools(
   const grep: AgentTool = {
     name: 'fs_grep',
     label: TOOL_DESCRIPTORS.fs_grep,
-    description: '按内容搜索，返回 path:line 与上下文片段。默认最多 50 条；默认只能搜到已授权目录（/life/agent），其它目录需用户授权。',
+    description: '按内容搜索，返回 path:line 与上下文片段。默认最多 50 条；默认只能搜到已授权目录（/life/ai_default），其它目录需用户授权。',
     parameters: Type.Object({
       pattern: Type.String({ description: '要搜索的文字' }),
       path: Type.Optional(Type.String({ description: '限定路径或目录，默认全库（结果按授权过滤）' })),
@@ -390,26 +395,34 @@ export function createTools(
     name: 'load_skill',
     label: TOOL_DESCRIPTORS.load_skill,
     description:
-      '按需读取一个已启用技能的完整指令。参数 name 使用已启用技能的 id 或名称；若系统提示词中没有技能索引，请依据用户明确给出的技能名称调用，再按正文步骤执行。',
+      '按需读取一个已启用技能的完整指令。参数 name 使用已启用技能的 id 或名称；若系统提示词中没有技能索引，请依据用户明确给出的技能名称调用。可选 path 指定当前访问的文件或目录，用于解析该目录及其父级的局部技能。',
     parameters: Type.Object({
       name: Type.String({ description: '技能索引中的 id 或名称，例如 contact-manager' }),
+      path: Type.Optional(
+        Type.String({ description: '当前访问的文件或目录；省略时使用默认工作区' }),
+      ),
     }),
     prepareArguments: (raw) => {
       const args = argsObject(raw)
-      return { name: argString(args.name) ?? '' }
+      return { name: argString(args.name) ?? '', path: argString(args.path) }
     },
     execute: async (_toolCallId, params) => {
-      const input = params as { name: string }
+      const input = params as { name: string; path?: string }
       const wanted = input.name.trim()
-      const target = skills.find(
-        (skill) => skill.enabled && (skill.id === wanted || skill.name === wanted),
-      )
-      if (!target) {
-        return toolFailure(
-          `未找到已启用的技能「${wanted}」；请只使用系统提示【技能索引】里的 id 或名称`,
+      const scope = input.path?.trim()
+      let id = wanted
+      if (!scope) {
+        const target = skills.find(
+          (skill) => skill.enabled && (skill.id === wanted || skill.name === wanted),
         )
+        if (!target) {
+          return toolFailure(
+            `未找到已启用的技能「${wanted}」；请只使用系统提示【技能索引】里的 id 或名称`,
+          )
+        }
+        id = target.id
       }
-      const outcome = await runTool(() => skillApi.read(target.id))
+      const outcome = await runTool(() => skillApi.readForAgent(id, scope))
       if (!outcome.ok) return toolFailure(outcome.text)
       const detail = outcome.value
       return {

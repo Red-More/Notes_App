@@ -110,7 +110,7 @@ describe('tool error formatting', () => {
     expect(formatError({ code: 'alreadyExists', path: '/life/a.md' })).toContain(
       'write 只能新建',
     )
-    expect(formatError({ code: 'readOnlyArea', path: '/life/.agents/x' })).toContain('只读区')
+    expect(formatError({ code: 'readOnlyArea', path: '/life/.agent/x' })).toContain('只读区')
     expect(formatError('boom')).toBe('boom')
   })
 })

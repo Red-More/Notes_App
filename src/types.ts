@@ -266,6 +266,8 @@ export interface SkillSummary {
   version: string
   enabled: boolean
   builtin: boolean
+  /** 拥有该技能 `.agent` 目录的文件夹，如 `/life` 或 `/life/notes`。 */
+  path: string
 }
 
 /** 触发后按需读取的完整技能。 */

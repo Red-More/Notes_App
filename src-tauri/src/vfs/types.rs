@@ -16,7 +16,7 @@ pub struct ReadRequest {
     pub start_line: Option<usize>,
     pub end_line: Option<usize>,
     pub include_meta: Option<bool>,
-    /// Caller identity; Agent is subject to `path_acl`, User bypasses it.
+    /// Caller identity; Agent is subject to `ai.policy`, User bypasses it.
     pub principal: Principal,
 }
 

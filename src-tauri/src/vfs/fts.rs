@@ -107,11 +107,20 @@ pub(crate) fn remove_deleted(conn: &Connection) -> rusqlite::Result<usize> {
 /// missing from the index. Returns `(removed, added)` for the startup log.
 pub(crate) fn rebuild_missing(conn: &Connection) -> rusqlite::Result<(usize, usize)> {
     let tx = conn.unchecked_transaction()?;
-    let removed = tx.execute(
+    let reserved = tx.execute(
+        "DELETE FROM fts_docs WHERE rowid IN
+             (SELECT inode FROM inodes
+              WHERE path GLOB '*/.agent/*'
+                 OR path GLOB '*/.lifeos/*'
+                 OR path GLOB '*/ai.policy')",
+        [],
+    )?;
+    let orphan = tx.execute(
         "DELETE FROM fts_docs WHERE rowid NOT IN
              (SELECT inode FROM inodes WHERE kind = 'file' AND deleted = 0)",
         [],
     )?;
+    let removed = reserved + orphan;
 
     let rows: Vec<(i64, String)> = {
         let mut stmt = tx.prepare(
@@ -119,6 +128,9 @@ pub(crate) fn rebuild_missing(conn: &Connection) -> rusqlite::Result<(usize, usi
              FROM inodes i
              JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
              WHERE i.kind = 'file' AND i.deleted = 0
+               AND i.path NOT GLOB '*/.agent/*'
+               AND i.path NOT GLOB '*/.lifeos/*'
+               AND i.path NOT GLOB '*/ai.policy'
                AND NOT EXISTS (SELECT 1 FROM fts_docs f WHERE f.rowid = i.inode)",
         )?;
         let mapped = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
@@ -144,7 +156,10 @@ pub(crate) fn rebuild_all(conn: &Connection) -> rusqlite::Result<usize> {
     const SQL: &str = "SELECT i.inode, b.content
                         FROM inodes i
                         JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
-                        WHERE i.kind = 'file' AND i.deleted = 0";
+                        WHERE i.kind = 'file' AND i.deleted = 0
+                          AND i.path NOT GLOB '*/.agent/*'
+                          AND i.path NOT GLOB '*/.lifeos/*'
+                          AND i.path NOT GLOB '*/ai.policy'";
     let mut stmt = tx.prepare(SQL)?;
     let mapped = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
     let mut indexed = 0;
@@ -162,7 +177,11 @@ pub(crate) fn rebuild_all(conn: &Connection) -> rusqlite::Result<usize> {
 pub(crate) fn stats(conn: &Connection) -> rusqlite::Result<(i64, i64)> {
     let indexed: i64 = conn.query_row("SELECT COUNT(*) FROM fts_docs", [], |r| r.get(0))?;
     let visible: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM inodes WHERE kind = 'file' AND deleted = 0",
+        "SELECT COUNT(*) FROM inodes
+         WHERE kind = 'file' AND deleted = 0
+           AND path NOT GLOB '*/.agent/*'
+           AND path NOT GLOB '*/.lifeos/*'
+           AND path NOT GLOB '*/ai.policy'",
         [],
         |r| r.get(0),
     )?;

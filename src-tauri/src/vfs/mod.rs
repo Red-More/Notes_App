@@ -11,15 +11,19 @@
 //! 再提交”的冲突。
 
 pub mod acl;
+pub mod agent_config;
 pub mod cap_gate;
 pub mod error;
 pub mod fts;
 pub mod index;
+pub mod lifeos;
 pub mod meta;
 pub mod patch;
+pub mod reserved;
 pub mod types;
 pub mod version_store;
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -43,8 +47,52 @@ const MAX_GREP_RESULTS: usize = 200;
 const MAX_CONTEXT_LINES: usize = 3;
 /// 单条 preview 的字符上限。
 const MAX_PREVIEW_CHARS: usize = 240;
-/// `.agents` 只读技能区：模型工具一律不得列出/检索其中的内容（M3 才按需注入）。
-const AGENTS_DIR: &str = "/.agents";
+
+/// SQL predicate excluding reserved visibility config from model queries.
+/// `.agent` visibility is evaluated per row because it is configurable.
+fn reserved_glob_filter(column: &str) -> String {
+    format!(
+        "{column} NOT GLOB '*/.lifeos' AND {column} NOT GLOB '*/.lifeos/*' \
+         AND {column} NOT GLOB '*/ai.policy'"
+    )
+}
+
+/// Reserved-path gate: `.lifeos` and `ai.policy` are permanently hidden;
+/// `.agent` follows its own `visible` setting. None is writable by the model.
+fn ensure_reserved_readable(
+    agent_configs: &BTreeMap<String, agent_config::AgentConfig>,
+    path: &str,
+) -> Result<(), ToolError> {
+    if reserved::has_segment(path, reserved::LIFEOS_DIR) || reserved::is_policy_file(path) {
+        return Err(ToolError::ReadOnlyArea {
+            path: path.to_string(),
+        });
+    }
+    if reserved::has_segment(path, reserved::AGENT_DIR)
+        && !agent_config::effective_visible(agent_configs, path)
+    {
+        return Err(ToolError::ReadOnlyArea {
+            path: path.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Whether one reserved entry should appear in a model-facing result.
+fn reserved_entry_visible(
+    agent_configs: &BTreeMap<String, agent_config::AgentConfig>,
+    path: &str,
+    principal: acl::Principal,
+) -> bool {
+    if reserved::has_segment(path, reserved::LIFEOS_DIR) || reserved::is_policy_file(path) {
+        return false;
+    }
+    if reserved::has_segment(path, reserved::AGENT_DIR) {
+        return principal == acl::Principal::Agent
+            && agent_config::effective_visible(agent_configs, path);
+    }
+    true
+}
 
 /// Writes carry their origin; only Agent writes are constrained by ACL.
 fn principal_from_source(source: WriteSource) -> acl::Principal {
@@ -62,6 +110,8 @@ struct GrepOptions<'a> {
     max_results: usize,
     context: usize,
     principal: acl::Principal,
+    policies: &'a acl::PolicySet,
+    agent_configs: &'a BTreeMap<String, agent_config::AgentConfig>,
 }
 
 /// VirtualFs 持有唯一数据库连接；所有方法都在这条连接上执行。
@@ -89,8 +139,14 @@ impl VirtualFs {
     /// 读文件或列目录。
     pub fn read(&self, req: ReadRequest) -> Result<ReadResult, ToolError> {
         let path = cap_gate::normalize_path(&req.path)?;
-        cap_gate::ensure_model_readable(&path)?;
-        acl::ensure_allowed(&self.conn, &path, acl::AclPermission::Read, req.principal)?;
+        let policies = acl::PolicySet::for_principal(&self.conn, req.principal)?;
+        let agent_configs = if req.principal == acl::Principal::Agent {
+            let configs = agent_config::load_all(&self.conn)?;
+            ensure_reserved_readable(&configs, &path)?;
+            configs
+        } else {
+            BTreeMap::new()
+        };
         let row: Option<(i64, String, i64, Option<String>)> = self
             .conn
             .query_row(
@@ -103,11 +159,20 @@ impl VirtualFs {
             )
             .optional()?;
         let Some((inode, kind, head_rev, doc_kind)) = row else {
+            // Keep "exists but denied" and "does not exist" indistinguishable.
+            policies.ensure(&path, false, acl::AclPermission::Read, req.principal)?;
             return Err(ToolError::NotFound { path });
         };
+        let is_dir = kind == "directory";
+        policies.ensure(
+            &path,
+            is_dir,
+            acl::AclPermission::Read,
+            req.principal,
+        )?;
 
-        if kind == "directory" {
-            let entries = self.list_dir(&path)?;
+        if is_dir {
+            let entries = self.list_dir(&path, &policies, &agent_configs, req.principal)?;
             return Ok(ReadResult::Dir { entries });
         }
 
@@ -164,10 +229,91 @@ impl VirtualFs {
         self.write_inner(req, true)
     }
 
-    /// 技能安装专用写入口：仍走同一套事务/版本维护，但允许写 `.agents`。
+    /// 技能安装专用写入口：仍走同一套事务/版本维护，但允许写 `.agent`。
     /// 调用方（`skills` 模块）负责把目标路径限制在技能目录内。
     pub(crate) fn write_skill(&mut self, req: WriteRequest) -> Result<WriteReceipt, ToolError> {
         self.write_inner(req, false)
+    }
+
+    /// 保留配置区专用写入口（用户侧）：只写 `inodes` + `blobs`。
+    ///
+    /// 配置不是文档：不写 `meta`、不建版本链、不进 FTS，避免出现在笔记列表
+    /// 与搜索结果里。调用方（`directory_config`）负责校验 JSON 与权限字段。
+    pub(crate) fn write_config(
+        &mut self,
+        path: &str,
+        content: String,
+    ) -> Result<WriteReceipt, ToolError> {
+        let path = cap_gate::normalize_path(path)?;
+        let owner = reserved::owner_of_config(&path, reserved::AGENT_DIR, reserved::CONFIG_FILE)
+            .or_else(|| {
+                reserved::owner_of_config(&path, reserved::LIFEOS_DIR, reserved::POLICY_FILE)
+            })
+            .ok_or_else(|| {
+                ToolError::invalid("配置写入仅限 .agent/.meta.json 与 .lifeos/ai.policy")
+            })?;
+        if content.len() > MAX_FILE_BYTES {
+            return Err(ToolError::ContentTooLarge {
+                limit: MAX_FILE_BYTES,
+                actual: content.len(),
+            });
+        }
+
+        let tx = self.conn.transaction()?;
+        let kind: Option<String> = tx
+            .query_row(
+                "SELECT kind FROM inodes WHERE path = ?1 AND deleted = 0",
+                params![owner],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if kind.as_deref() != Some("directory") {
+            return Err(ToolError::NotFound { path: owner });
+        }
+
+        let now_str = now(&tx)?;
+        let existing: Option<(i64, i64)> = tx
+            .query_row(
+                "SELECT inode, head_rev FROM inodes WHERE path = ?1 AND kind = 'file'",
+                params![path],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let (bytes, rev) = match existing {
+            Some((inode, head)) => {
+                let next = head + 1;
+                tx.execute(
+                    "INSERT INTO blobs (inode, rev, content, source, created_at)
+                     VALUES (?1, ?2, ?3, 'user', ?4)",
+                    params![inode, next, content, now_str],
+                )?;
+                tx.execute(
+                    "UPDATE inodes SET head_rev = ?1, size = ?2, mtime = ?3,
+                            deleted = 0, deleted_at = NULL
+                     WHERE inode = ?4",
+                    params![next, content.len() as i64, now_str, inode],
+                )?;
+                (content.len(), next)
+            }
+            None => {
+                ensure_parents(&tx, &path, &now_str)?;
+                tx.execute(
+                    "INSERT INTO inodes (path, kind, head_rev, size, ctime, mtime)
+                     VALUES (?1, 'file', 1, ?2, ?3, ?3)",
+                    params![path, content.len() as i64, now_str],
+                )?;
+                let inode = tx.last_insert_rowid();
+                tx.execute(
+                    "INSERT INTO blobs (inode, rev, content, source, created_at)
+                     VALUES (?1, 1, ?2, 'user', ?3)",
+                    params![inode, content, now_str],
+                )?;
+                (content.len(), 1)
+            }
+        };
+        tx.commit()?;
+
+        Ok(WriteReceipt { path, rev, bytes })
     }
 
     fn write_inner(
@@ -180,12 +326,9 @@ impl VirtualFs {
         if enforce_agents {
             cap_gate::ensure_writable(&path)?;
         }
-        acl::ensure_allowed(
-            &self.conn,
-            &path,
-            acl::AclPermission::Write,
-            principal_from_source(req.source),
-        )?;
+        let principal = principal_from_source(req.source);
+        let policies = acl::PolicySet::for_principal(&self.conn, principal)?;
+        policies.ensure(&path, false, acl::AclPermission::Write, principal)?;
 
         let raw = req.content;
         if raw.len() > MAX_FILE_BYTES {
@@ -203,7 +346,15 @@ impl VirtualFs {
                 |r| r.get(0),
             )
             .optional()?;
-        if existing.is_some() {
+        if let Some(kind) = existing {
+            // Re-authorize with the detected scope so a denied directory cannot
+            // be probed through an `alreadyExists` response.
+            policies.ensure(
+                &path,
+                kind == "directory",
+                acl::AclPermission::Write,
+                principal,
+            )?;
             return Err(ToolError::AlreadyExists { path });
         }
 
@@ -248,10 +399,14 @@ impl VirtualFs {
              VALUES (?1, 1, ?2, ?3, ?4)",
             params![inode, content, req.source.as_str(), now_str],
         )?;
+        // Reserved config documents (skills) stay out of the document mirror:
+        // no meta row, no cross index, no FTS. Their version chain is kept.
         let parts = meta::parse_document(&content);
-        meta::upsert_parts(&tx, inode, &path, &parts)?;
-        index::refresh_parts(&tx, inode, &path, &parts)?;
-        fts::index_document(&tx, inode, &content)?;
+        if !reserved::is_reserved_path(&path) {
+            meta::upsert_parts(&tx, inode, &path, &parts)?;
+            index::refresh_parts(&tx, inode, &path, &parts)?;
+            fts::index_document(&tx, inode, &content)?;
+        }
         let title = parts
             .title
             .clone()
@@ -280,7 +435,7 @@ impl VirtualFs {
         self.edit_inner(req, true)
     }
 
-    /// 技能更新专用编辑入口：允许写 `.agents`，其余校验不变。
+    /// 技能更新专用编辑入口：允许写 `.agent`，其余校验不变。
     pub(crate) fn edit_skill(&mut self, req: EditRequest) -> Result<EditReceipt, ToolError> {
         self.edit_inner(req, false)
     }
@@ -294,12 +449,9 @@ impl VirtualFs {
         if enforce_agents {
             cap_gate::ensure_writable(&path)?;
         }
-        acl::ensure_allowed(
-            &self.conn,
-            &path,
-            acl::AclPermission::Write,
-            principal_from_source(req.source),
-        )?;
+        let principal = principal_from_source(req.source);
+        let policies = acl::PolicySet::for_principal(&self.conn, principal)?;
+        policies.ensure(&path, false, acl::AclPermission::Write, principal)?;
         if req.old_string.is_empty() {
             return Err(ToolError::invalid("old_string 不能为空"));
         }
@@ -320,6 +472,9 @@ impl VirtualFs {
             return Err(ToolError::NotFound { path });
         };
         if file_kind != "file" {
+            // Re-authorize the directory itself so a denied folder cannot be
+            // confirmed through an `isDirectory` response.
+            policies.ensure(&path, true, acl::AclPermission::Write, principal)?;
             return Err(ToolError::IsDirectory { path });
         }
         if let Some(expect) = req.expect_rev {
@@ -395,22 +550,15 @@ impl VirtualFs {
                 },
             )?
         } else {
-            // Non-versioned documents only keep the head blob; advance it in place.
-            let next = current + 1;
-            tx.execute(
-                "UPDATE blobs SET rev = ?1, content = ?2, source = ?3, created_at = ?4
-                 WHERE inode = ?5 AND rev = ?6",
-                params![next, replaced, req.source.as_str(), now_str, inode, current],
-            )?;
-            tx.execute(
-                "UPDATE inodes SET head_rev = ?1, size = ?2, mtime = ?3 WHERE inode = ?4",
-                params![next, replaced.len() as i64, now_str, inode],
-            )?;
-            next
+            advance_head(&tx, inode, current, &replaced, req.source, &now_str)?
         };
-        meta::upsert_parts(&tx, inode, &path, &parts)?;
-        index::refresh_parts(&tx, inode, &path, &parts)?;
-        fts::index_document(&tx, inode, &replaced)?;
+        // Reserved config documents (skills) skip the document mirror but keep
+        // their version chain so skill edits remain auditable.
+        if !reserved::is_reserved_path(&path) {
+            meta::upsert_parts(&tx, inode, &path, &parts)?;
+            index::refresh_parts(&tx, inode, &path, &parts)?;
+            fts::index_document(&tx, inode, &replaced)?;
+        }
         tx.commit()?;
 
         Ok(EditReceipt {
@@ -427,9 +575,10 @@ impl VirtualFs {
     pub fn glob(&self, req: GlobRequest) -> Result<Vec<GlobEntry>, ToolError> {
         let root = cap_gate::normalize_path(req.root.as_deref().unwrap_or(ROOT))?;
         let principal = req.principal;
+        let policies = acl::PolicySet::for_principal(&self.conn, principal)?;
         // 显式指定的根目录必须整体可见；省略 root 时按全库扫描，由结果逐条过滤。
         if req.root.is_some() {
-            acl::ensure_allowed(&self.conn, &root, acl::AclPermission::Read, principal)?;
+            policies.ensure(&root, true, acl::AclPermission::Read, principal)?;
         }
         let raw_pattern = req.pattern.trim();
         let full_pattern = if raw_pattern.starts_with('/') {
@@ -439,41 +588,52 @@ impl VirtualFs {
             format!("{root}/{pattern}")
         };
         let case_sensitive = req.case_sensitive.unwrap_or(true);
-        // `.agents` 只读区排除：相对 pattern（如 .agents/*.md）一样到不了这里。
-        let agents_pattern = format!("{ROOT}{AGENTS_DIR}/*");
-        let agents_exact = format!("{ROOT}{AGENTS_DIR}");
+        // `.lifeos` 与 `ai.policy` 永久隐藏；`.agent` 逐条按内部 visible 过滤。
+        let reserved_filter = reserved_glob_filter("path");
 
         let sql = if case_sensitive {
-            "SELECT path, kind, mtime, head_rev FROM inodes
+            format!(
+                "SELECT path, kind, mtime, head_rev FROM inodes
                  WHERE deleted = 0 AND path GLOB ?1
-                   AND path NOT GLOB ?2 AND path != ?3
-                 ORDER BY path ASC LIMIT ?4"
+                   AND {reserved_filter}
+                 ORDER BY path ASC LIMIT ?2"
+            )
         } else {
-            "SELECT path, kind, mtime, head_rev FROM inodes
+            format!(
+                "SELECT path, kind, mtime, head_rev FROM inodes
                  WHERE deleted = 0 AND LOWER(path) GLOB LOWER(?1)
-                   AND path NOT GLOB ?2 AND path != ?3
-                 ORDER BY path ASC LIMIT ?4"
+                   AND {reserved_filter}
+                 ORDER BY path ASC LIMIT ?2"
+            )
         };
-        let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map(
-            params![full_pattern, agents_pattern, agents_exact, MAX_GLOB_RESULTS],
-            |r| {
-                Ok(GlobEntry {
-                    path: r.get(0)?,
-                    kind: r.get(1)?,
-                    mtime: r.get(2)?,
-                    head_rev: r.get(3)?,
-                })
-            },
-        )?;
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![full_pattern, MAX_GLOB_RESULTS], |r| {
+            Ok(GlobEntry {
+                path: r.get(0)?,
+                kind: r.get(1)?,
+                mtime: r.get(2)?,
+                head_rev: r.get(3)?,
+            })
+        })?;
         let mut entries = Vec::new();
         for row in rows {
             entries.push(row?);
         }
         // 逐条过滤：结果可能跨目录，不能只在入口判一次。
+        let agent_configs = if principal == acl::Principal::Agent {
+            agent_config::load_all(&self.conn)?
+        } else {
+            BTreeMap::new()
+        };
         entries.retain(|entry| {
-            acl::ensure_allowed(&self.conn, &entry.path, acl::AclPermission::Read, principal)
-                .is_ok()
+            let is_dir = entry.kind == "directory";
+            reserved_entry_visible(&agent_configs, &entry.path, principal)
+                && policies.allows_as(
+                    &entry.path,
+                    is_dir,
+                    acl::AclPermission::Read,
+                    principal,
+                )
         });
         Ok(entries)
     }
@@ -483,9 +643,26 @@ impl VirtualFs {
     pub fn grep(&self, req: GrepRequest) -> Result<GrepResponse, ToolError> {
         let target = cap_gate::normalize_path(req.path.as_deref().unwrap_or(ROOT))?;
         let principal = req.principal;
+        let policies = acl::PolicySet::for_principal(&self.conn, principal)?;
+        let agent_configs = if principal == acl::Principal::Agent {
+            agent_config::load_all(&self.conn)?
+        } else {
+            BTreeMap::new()
+        };
+        let scope = match self.resolve_grep_scope(&target) {
+            Ok(scope) => scope,
+            Err(error) => {
+                // Keep "exists but denied" and "does not exist" indistinguishable.
+                if req.path.is_some() {
+                    policies.ensure(&target, false, acl::AclPermission::Read, principal)?;
+                }
+                return Err(error);
+            }
+        };
         // 显式指定的检索范围必须整体可见；省略 path 时按全库扫描，由命中逐条过滤。
         if req.path.is_some() {
-            acl::ensure_allowed(&self.conn, &target, acl::AclPermission::Read, principal)?;
+            let is_dir = !matches!(scope, GrepScope::File(_));
+            policies.ensure(&target, is_dir, acl::AclPermission::Read, principal)?;
         }
         let pattern = req.pattern.trim().to_string();
         if pattern.is_empty() {
@@ -496,7 +673,6 @@ impl VirtualFs {
             .unwrap_or(DEFAULT_GREP_RESULTS)
             .clamp(1, MAX_GREP_RESULTS);
         let context = req.context_lines.unwrap_or(0).min(MAX_CONTEXT_LINES);
-        let scope = self.resolve_grep_scope(&target)?;
         let needle = pattern.to_lowercase();
         let doc_type = req
             .doc_type
@@ -511,6 +687,8 @@ impl VirtualFs {
             max_results,
             context,
             principal,
+            policies: &policies,
+            agent_configs: &agent_configs,
         };
         if let Some(match_expr) = fts::match_query(&pattern) {
             // 索引缺失/损坏时静默回退，不让一次检索因为 FTS 状态而失败。
@@ -561,10 +739,8 @@ impl VirtualFs {
         match_expr: &str,
         options: &GrepOptions<'_>,
     ) -> Result<Vec<GrepHit>, ToolError> {
-        // `.agents` 只读区排除：即便调用方省略 path（默认全库检索）也到不了这里。
-        let agents_pattern = format!("{ROOT}{AGENTS_DIR}/*");
-        let agents_exact = format!("{ROOT}{AGENTS_DIR}");
-        let mut sql = String::from(
+        let reserved_filter = reserved_glob_filter("i.path");
+        let mut sql = format!(
             "SELECT i.path, i.head_rev, b.content
              FROM fts_docs
              JOIN inodes i ON i.inode = fts_docs.rowid
@@ -572,13 +748,9 @@ impl VirtualFs {
              LEFT JOIN meta m ON m.inode = i.inode
              WHERE fts_docs MATCH ?
                AND i.deleted = 0 AND i.kind = 'file'
-               AND i.path NOT GLOB ? AND i.path != ?",
+               AND {reserved_filter}"
         );
-        let mut args: Vec<SqlValue> = vec![
-            SqlValue::Text(match_expr.to_string()),
-            SqlValue::Text(agents_pattern),
-            SqlValue::Text(agents_exact),
-        ];
+        let mut args: Vec<SqlValue> = vec![SqlValue::Text(match_expr.to_string())];
         push_grep_scope(&mut sql, &mut args, options.scope);
         if let Some(kind) = options.doc_type {
             sql.push_str(" AND COALESCE(m.kind, '') = ?");
@@ -595,53 +767,22 @@ impl VirtualFs {
             ))
         })?;
 
-        let mut hits = Vec::new();
-        for row in rows {
-            let (path, rev, content) = row?;
-            // 逐条按 ACL 过滤，避免命中数被未授权文档占满。
-            if acl::ensure_allowed(
-                &self.conn,
-                &path,
-                acl::AclPermission::Read,
-                options.principal,
-            )
-            .is_err()
-            {
-                continue;
-            }
-            if scan_document(
-                &content,
-                &path,
-                rev,
-                options.needle,
-                options.context,
-                options.max_results,
-                &mut hits,
-            ) {
-                break;
-            }
-        }
-        Ok(hits)
+        collect_hits(rows, options)
     }
 
     /// LIKE 回退检索：索引不可用或未命中时仍保证可搜到。
     fn grep_like(&self, options: &GrepOptions<'_>) -> Result<Vec<GrepHit>, ToolError> {
-        let agents_pattern = format!("{ROOT}{AGENTS_DIR}/*");
-        let agents_exact = format!("{ROOT}{AGENTS_DIR}");
-        let mut sql = String::from(
+        let reserved_filter = reserved_glob_filter("i.path");
+        let mut sql = format!(
             "SELECT i.path, i.head_rev, b.content
              FROM inodes i
              JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
              LEFT JOIN meta m ON m.inode = i.inode
              WHERE i.deleted = 0 AND i.kind = 'file'
                AND instr(lower(b.content), lower(?)) > 0
-               AND i.path NOT GLOB ? AND i.path != ?",
+               AND {reserved_filter}"
         );
-        let mut args: Vec<SqlValue> = vec![
-            SqlValue::Text(options.needle.to_string()),
-            SqlValue::Text(agents_pattern),
-            SqlValue::Text(agents_exact),
-        ];
+        let mut args: Vec<SqlValue> = vec![SqlValue::Text(options.needle.to_string())];
         push_grep_scope(&mut sql, &mut args, options.scope);
         if let Some(kind) = options.doc_type {
             sql.push_str(" AND COALESCE(m.kind, '') = ?");
@@ -658,37 +799,17 @@ impl VirtualFs {
             ))
         })?;
 
-        let mut hits = Vec::new();
-        for row in rows {
-            let (path, rev, content) = row?;
-            // 逐条按 ACL 过滤，避免命中数被未授权文档占满。
-            if acl::ensure_allowed(
-                &self.conn,
-                &path,
-                acl::AclPermission::Read,
-                options.principal,
-            )
-            .is_err()
-            {
-                continue;
-            }
-            if scan_document(
-                &content,
-                &path,
-                rev,
-                options.needle,
-                options.context,
-                options.max_results,
-                &mut hits,
-            ) {
-                break;
-            }
-        }
-        Ok(hits)
+        collect_hits(rows, options)
     }
 
     /// 列举目录的直接子项；结果的 kind 区分 directory/file。
-    fn list_dir(&self, dir: &str) -> Result<Vec<DirEntry>, ToolError> {
+    fn list_dir(
+        &self,
+        dir: &str,
+        policies: &acl::PolicySet,
+        agent_configs: &BTreeMap<String, agent_config::AgentConfig>,
+        principal: acl::Principal,
+    ) -> Result<Vec<DirEntry>, ToolError> {
         let prefix = format!("{dir}/");
         let like_pattern = format!("{}%", cap_gate::escape_like(&prefix));
         let mut stmt = self.conn.prepare(
@@ -711,6 +832,16 @@ impl VirtualFs {
         for row in rows {
             entries.push(row?);
         }
+        entries.retain(|entry| {
+            let is_dir = entry.kind == "directory";
+            reserved_entry_visible(agent_configs, &entry.path, principal)
+                && policies.allows_as(
+                    &entry.path,
+                    is_dir,
+                    acl::AclPermission::Read,
+                    principal,
+                )
+        });
         Ok(entries)
     }
 
@@ -740,6 +871,41 @@ enum GrepScope {
     Root,
     File(String),
     Dir(String),
+}
+
+/// Consume candidate rows (`path`, `rev`, `content`) shared by both search
+/// paths: hidden or denied documents are skipped so the result cap is never
+/// spent on them. Stops as soon as the caller's result limit is reached.
+fn collect_hits<I>(rows: I, options: &GrepOptions<'_>) -> Result<Vec<GrepHit>, ToolError>
+where
+    I: Iterator<Item = rusqlite::Result<(String, i64, String)>>,
+{
+    let mut hits = Vec::new();
+    for row in rows {
+        let (path, rev, content) = row?;
+        // 逐条过滤，避免命中数被未授权或隐藏文档占满。
+        if !reserved_entry_visible(options.agent_configs, &path, options.principal) {
+            continue;
+        }
+        if !options
+            .policies
+            .allows_as(&path, false, acl::AclPermission::Read, options.principal)
+        {
+            continue;
+        }
+        if scan_document(
+            &content,
+            &path,
+            rev,
+            options.needle,
+            options.context,
+            options.max_results,
+            &mut hits,
+        ) {
+            break;
+        }
+    }
+    Ok(hits)
 }
 
 /// 把范围条件追加到 SQL 与参数列表；两个检索路径共用同一套语义。
@@ -807,6 +973,31 @@ fn with_md_extension(path: String) -> String {
     } else {
         format!("{path}.md")
     }
+}
+
+/// Move a non-versioned head blob forward and update the inode metadata.
+///
+/// Used by regular non-versioned documents and by reserved config documents
+/// (skills), which never build a version chain.
+fn advance_head(
+    conn: &Connection,
+    inode: i64,
+    current: i64,
+    content: &str,
+    source: WriteSource,
+    now: &str,
+) -> rusqlite::Result<i64> {
+    let next = current + 1;
+    conn.execute(
+        "UPDATE blobs SET rev = ?1, content = ?2, source = ?3, created_at = ?4
+         WHERE inode = ?5 AND rev = ?6",
+        params![next, content, source.as_str(), now, inode, current],
+    )?;
+    conn.execute(
+        "UPDATE inodes SET head_rev = ?1, size = ?2, mtime = ?3 WHERE inode = ?4",
+        params![next, content.len() as i64, now, inode],
+    )?;
+    Ok(next)
 }
 
 /// 取父目录的虚拟路径；顶层文件回退到 `/life`。

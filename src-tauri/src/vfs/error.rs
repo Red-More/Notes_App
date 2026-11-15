@@ -23,7 +23,7 @@ pub enum ToolError {
     AlreadyExists { path: String },
     /// create_parents=false 且父目录缺失。
     ParentMissing { path: String },
-    /// `/life/.agents/` 为只读区，禁止 write/edit。
+    /// `.agent` / `.lifeos` / `ai.policy` 为保留配置区，禁止模型读写。
     ReadOnlyArea { path: String },
     /// Agent 访问未授权路径（默认拒绝，需用户显式放行）。
     PermissionDenied { path: String, permission: String },

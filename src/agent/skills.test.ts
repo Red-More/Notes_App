@@ -12,6 +12,7 @@ function skill(partial: Partial<SkillSummary> & Pick<SkillSummary, 'id' | 'name'
     version: partial.version ?? '1.0',
     enabled: partial.enabled ?? true,
     builtin: partial.builtin ?? false,
+    path: partial.path ?? '/life',
   }
 }
 

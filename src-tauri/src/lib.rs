@@ -2,6 +2,7 @@ mod agent;
 mod assets;
 mod commands;
 mod db;
+mod directory_config;
 mod docs;
 mod mcp;
 mod skills;
@@ -53,11 +54,15 @@ pub fn run() {
                 Err(e) => log::warn!("search index stats failed: {e}"),
             }
             // 首发不预置任何技能：`skills_installed = []`，全部由用户导入。
-            let vault = VirtualFs::new(conn);
+            let mut vault = VirtualFs::new(conn);
             // Agent runs never auto-resume: rows left executing become
             // `interrupted` and the UI offers an explicit "continue" action.
             if let Err(e) = agent::runs::recover(vault.conn()) {
                 log::warn!("agent run recovery failed: {e}");
+            }
+            // 默认配置：`.agent` 模型配置 + `.lifeos` 可见性（幂等，不覆盖用户修改）。
+            if let Err(e) = directory_config::ensure_defaults(&mut vault) {
+                log::warn!("default directory config failed: {e}");
             }
             // Agent 工作区：模型可读写，但草稿不会自动加载。
             if let Err(e) = skills::ensure_workspace(&vault) {
@@ -131,6 +136,7 @@ pub fn run() {
             commands::index::search_reindex,
             commands::skill::skill_list,
             commands::skill::skill_read,
+            commands::skill::agent_skill_read,
             commands::skill::skill_save,
             commands::skill::skill_set_enabled,
             commands::skill::skill_delete,
@@ -139,6 +145,11 @@ pub fn run() {
             commands::skill::skill_draft_read,
             commands::skill::skill_draft_promote,
             commands::skill::skill_draft_delete,
+            commands::dir_config::lifeos_list,
+            commands::dir_config::lifeos_get,
+            commands::dir_config::lifeos_save,
+            commands::dir_config::agent_config_get,
+            commands::dir_config::agent_config_save,
             commands::agent::chat_list,
             commands::agent::chat_create,
             commands::agent::chat_rename,

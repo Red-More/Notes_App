@@ -21,22 +21,65 @@ fn test_vfs() -> VirtualFs {
     let mut conn = rusqlite::Connection::open_in_memory().expect("open in-memory life.db");
     db::wal::configure(&conn).expect("apply wal pragmas");
     db::schema::create(&mut conn).expect("create the final schema");
-    // Fixtures exercise the legacy permissive layout, so grant the whole VFS to
-    // the Agent here. ACL-specific tests revoke this row first.
-    conn.execute_batch(
-        "INSERT INTO path_acl (path_prefix, permission, principal, created_at) VALUES
-         ('/life', 'allow-read', NULL, datetime('now','localtime')),
-         ('/life', 'allow-write', NULL, datetime('now','localtime'));",
+    let vfs = VirtualFs::new(conn);
+    // Match the production defaults: the workspace is visible even when the
+    // root config later revokes everything else.
+    seed_visibility(&vfs, "/life/ai_default", true, true);
+    // Fixtures exercise a permissive layout, so grant the whole VFS here.
+    // Visibility-specific tests revoke this root grant first.
+    seed_visibility(&vfs, "/life", true, true);
+    vfs
+}
+
+/// Write one `ai.policy` without going through the VFS command layer.
+fn seed_visibility(vfs: &VirtualFs, dir: &str, read: bool, write: bool) {
+    seed_policy(
+        vfs,
+        &format!("{dir}/.lifeos/ai.policy"),
+        &format!(
+            r#"{{"version":1,"read":"{}","write":"{}"}}"#,
+            decision(read),
+            decision(write)
+        ),
+    );
+}
+
+fn decision(allow: bool) -> &'static str {
+    if allow {
+        "allow"
+    } else {
+        "deny"
+    }
+}
+
+fn seed_policy(vfs: &VirtualFs, config_path: &str, body: &str) {
+    let conn = vfs.conn();
+    let config_dir = config_path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("/life");
+    conn.execute(
+        "INSERT OR IGNORE INTO inodes (path, kind, head_rev, size, ctime, mtime)
+         VALUES (?1, 'directory', 0, 0, datetime('now','localtime'), datetime('now','localtime'))",
+        params![config_dir],
     )
-    .expect("seed permissive test acl");
-    VirtualFs::new(conn)
+    .expect("seed policy directory");
+    conn.execute(
+        "INSERT OR IGNORE INTO inodes (path, kind, head_rev, size, ctime, mtime)
+         VALUES (?1, 'file', 1, 0, datetime('now','localtime'), datetime('now','localtime'))",
+        params![config_path],
+    )
+    .expect("seed policy file");
+    conn.execute(
+        "INSERT INTO blobs (inode, rev, content, source, created_at)
+         SELECT inode, 1, ?1, 'user', datetime('now','localtime')
+         FROM inodes WHERE path = ?2
+         ON CONFLICT(inode, rev) DO UPDATE SET content = excluded.content",
+        params![body, config_path],
+    )
+    .expect("seed policy content");
 }
 
 /// Restore default-deny for Agent-facing assertions.
 fn revoke_agent_acl(vfs: &VirtualFs) {
-    vfs.conn()
-        .execute("DELETE FROM path_acl WHERE path_prefix = '/life'", [])
-        .expect("revoke permissive acl");
+    seed_visibility(vfs, "/life", false, false);
 }
 
 #[test]
@@ -44,19 +87,20 @@ fn acl_default_denies_and_allows_agent_workspace() {
     let mut vfs = test_vfs();
     revoke_agent_acl(&vfs);
 
-    // The seeded allow rule on /life/agent grants read and write to the Agent.
+    // The built-in default grants read/write to /life/ai_default.
     write_file(
         &mut vfs,
-        "/life/agent/scratch",
+        "/life/ai_default/scratch",
         "工作草稿",
         WriteSource::Agent,
     );
-    match read_file(&vfs, "/life/agent/scratch.md") {
+    match read_file(&vfs, "/life/ai_default/scratch.md") {
         ReadResult::File { content, .. } => assert!(content.contains("工作草稿")),
         ReadResult::Dir { .. } => panic!("expected a file"),
     }
 
-    // No matching rule means deny by default.
+    // No explicit visibility means deny for every other folder.
+    write_file(&mut vfs, "/life/notes/secret", "hidden", WriteSource::User);
     let denied = vfs
         .read(ReadRequest {
             path: "/life/notes/secret.md".into(),
@@ -87,7 +131,7 @@ fn acl_user_principal_bypasses_rules() {
 }
 
 #[test]
-fn acl_longest_prefix_wins_and_deny_has_priority() {
+fn acl_nearest_directory_config_wins() {
     let mut vfs = test_vfs();
     revoke_agent_acl(&vfs);
     write_file(&mut vfs, "/life/notes/public", "ok", WriteSource::User);
@@ -97,13 +141,8 @@ fn acl_longest_prefix_wins_and_deny_has_priority() {
         "hidden",
         WriteSource::User,
     );
-    vfs.conn()
-        .execute_batch(
-            "INSERT INTO path_acl (path_prefix, permission, principal, created_at) VALUES
-             ('/life/notes', 'allow-read', NULL, datetime('now','localtime')),
-             ('/life/notes/private', 'deny', NULL, datetime('now','localtime'));",
-        )
-        .unwrap();
+    seed_visibility(&vfs, "/life/notes", true, false);
+    seed_visibility(&vfs, "/life/notes/private", false, false);
 
     assert!(vfs
         .read(ReadRequest {
@@ -127,31 +166,30 @@ fn acl_longest_prefix_wins_and_deny_has_priority() {
         .unwrap_err();
     assert!(matches!(denied, ToolError::PermissionDenied { .. }));
 
-    // At the same prefix length, deny overrides allow.
-    vfs.conn()
-        .execute(
-            "INSERT INTO path_acl (path_prefix, permission, principal, created_at)
-             VALUES ('/life/notes', 'deny', NULL, datetime('now','localtime'))",
-            [],
-        )
-        .unwrap();
+    // A deeper explicit grant overrides the parent revocation.
+    seed_visibility(&vfs, "/life/notes/private", true, false);
     assert!(vfs
         .read(ReadRequest {
-            path: "/life/notes/public.md".into(),
+            path: "/life/notes/private/secret.md".into(),
             rev: None,
             start_line: None,
             end_line: None,
             include_meta: None,
             principal: Principal::Agent,
         })
-        .is_err());
+        .is_ok());
 }
 
 #[test]
 fn acl_filters_glob_and_grep_results() {
     let mut vfs = test_vfs();
     write_file(&mut vfs, "/life/notes/public", "needle", WriteSource::User);
-    write_file(&mut vfs, "/life/agent/private", "needle", WriteSource::User);
+    write_file(
+        &mut vfs,
+        "/life/ai_default/private",
+        "needle",
+        WriteSource::User,
+    );
     revoke_agent_acl(&vfs);
 
     let hits = vfs
@@ -167,11 +205,11 @@ fn acl_filters_glob_and_grep_results() {
     assert!(hits
         .hits
         .iter()
-        .all(|hit| hit.path.starts_with("/life/agent/")));
+        .all(|hit| hit.path.starts_with("/life/ai_default/")));
     assert!(hits
         .hits
         .iter()
-        .any(|hit| hit.path == "/life/agent/private.md"));
+        .any(|hit| hit.path == "/life/ai_default/private.md"));
 
     let entries = vfs
         .glob(GlobRequest {
@@ -183,10 +221,10 @@ fn acl_filters_glob_and_grep_results() {
         .unwrap();
     assert!(entries
         .iter()
-        .all(|entry| entry.path.starts_with("/life/agent/")));
+        .all(|entry| entry.path.starts_with("/life/ai_default/")));
     assert!(entries
         .iter()
-        .any(|entry| entry.path == "/life/agent/private.md"));
+        .any(|entry| entry.path == "/life/ai_default/private.md"));
 
     // The user principal still sees the full result set (UI search keeps working).
     let user_hits = vfs
@@ -203,6 +241,395 @@ fn acl_filters_glob_and_grep_results() {
         .hits
         .iter()
         .any(|hit| hit.path == "/life/notes/public.md"));
+}
+
+#[test]
+fn visibility_list_excludes_reserved_subtrees() {
+    let vfs = test_vfs();
+    let listed = crate::directory_config::list_visibility(&vfs).expect("list visibility");
+
+    // `/life/.agent/skills` and `/life/.lifeos` are real directories in the
+    // schema but must never be configurable from the settings page.
+    assert!(listed
+        .iter()
+        .all(|view| !view.path.starts_with("/life/.agent")));
+    assert!(listed
+        .iter()
+        .all(|view| !view.path.starts_with("/life/.lifeos")));
+    assert!(listed.iter().any(|view| view.path == "/life/ai_default"));
+}
+
+#[test]
+fn agent_cannot_read_denied_folder_agent_even_when_visible() {
+    let vfs = test_vfs();
+    seed_policy(
+        &vfs,
+        "/life/.agent/.meta.json",
+        r#"{"version":1,"visible":true}"#,
+    );
+    seed_policy(
+        &vfs,
+        "/life/notes/.agent/skills/demo/SKILL.md",
+        "---\nname: demo\ndescription: scoped\n---\nsecret",
+    );
+    revoke_agent_acl(&vfs);
+
+    let denied = agent_read(&vfs, "/life/notes/.agent/skills/demo/SKILL.md").unwrap_err();
+    assert!(matches!(denied, ToolError::PermissionDenied { .. }));
+
+    // The global config root is the model's own home: root deny must not hide it.
+    seed_policy(
+        &vfs,
+        "/life/.agent/skills/global/SKILL.md",
+        "---\nname: global\ndescription: global\n---\nbody",
+    );
+    assert!(agent_read(&vfs, "/life/.agent/skills/global/SKILL.md").is_ok());
+}
+
+#[test]
+fn agent_skill_read_enforces_scope_acl_and_enabled_state() {
+    let mut vfs = test_vfs();
+    seed_policy(
+        &vfs,
+        "/life/notes/.agent/skills/demo/SKILL.md",
+        "---\nname: 局部技能\ndescription: scoped\n---\n局部正文",
+    );
+    seed_policy(
+        &vfs,
+        "/life/ai_default/.agent/skills/demo/SKILL.md",
+        "---\nname: 工作区技能\ndescription: workspace\n---\n工作区正文",
+    );
+    seed_visibility(&vfs, "/life/notes", false, false);
+
+    // The model-supplied scope is authorized like any other VFS path.
+    let denied = skills::read_for_agent(&vfs, "demo", Some("/life/notes")).unwrap_err();
+    assert!(matches!(denied, ToolError::PermissionDenied { .. }));
+
+    let allowed = skills::read_for_agent(&vfs, "demo", Some("/life/ai_default")).unwrap();
+    assert!(allowed.body.contains("工作区正文"));
+
+    // A file scope resolves to its parent folder.
+    write_file(&mut vfs, "/life/ai_default/daily", "text", WriteSource::User);
+    let via_file =
+        skills::read_for_agent(&vfs, "demo", Some("/life/ai_default/daily.md")).unwrap();
+    assert!(via_file.body.contains("工作区正文"));
+
+    skills::set_enabled(&vfs, "demo", false).unwrap();
+    let disabled = skills::read_for_agent(&vfs, "demo", Some("/life/ai_default")).unwrap_err();
+    assert!(matches!(disabled, ToolError::InvalidArgument { .. }));
+}
+
+#[test]
+fn skill_documents_stay_out_of_the_document_mirror() {
+    let mut vfs = test_vfs();
+    let path = "/life/.agent/skills/demo/SKILL.md";
+    vfs.write_skill(WriteRequest {
+        path: path.into(),
+        content: "---\nname: demo\ndescription: demo\n---\nbody".into(),
+        create_parents: Some(true),
+        auto_frontmatter: Some(false),
+        source: WriteSource::User,
+    })
+    .unwrap();
+    vfs.edit_skill(EditRequest {
+        path: path.into(),
+        old_string: "body".into(),
+        new_string: "body2".into(),
+        replace_all: None,
+        expect_rev: None,
+        source: WriteSource::User,
+    })
+    .unwrap();
+
+    let count = |table: &str| -> i64 {
+        vfs.conn()
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {table} WHERE inode IN
+                     (SELECT inode FROM inodes WHERE path GLOB '*/.agent/*')"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    for table in ["meta", "index_entries"] {
+        assert_eq!(count(table), 0, "{table} must stay empty for skills");
+    }
+    let fts: i64 = vfs
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM fts_docs WHERE rowid IN
+             (SELECT inode FROM inodes WHERE path GLOB '*/.agent/*')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(fts, 0, "fts_docs must stay empty for skills");
+}
+
+#[test]
+fn acl_hides_existence_inside_denied_folders() {
+    let mut vfs = test_vfs();
+    write_file(&mut vfs, "/life/notes/secret", "hidden", WriteSource::User);
+    seed_visibility(&vfs, "/life/notes", false, false);
+
+    // Missing paths inside a denied folder must not fall through to NotFound.
+    let missing = agent_read(&vfs, "/life/notes/ghost.md").unwrap_err();
+    assert!(matches!(missing, ToolError::PermissionDenied { .. }));
+
+    // Writing to a denied directory must deny instead of alreadyExists. The
+    // directory name carries an extension so fs_write does not append `.md`.
+    write_file(
+        &mut vfs,
+        "/life/archive.v1/inside",
+        "x",
+        WriteSource::User,
+    );
+    seed_visibility(&vfs, "/life/archive.v1", false, false);
+    let dir_write = agent_write(&mut vfs, "/life/archive.v1").unwrap_err();
+    assert!(matches!(dir_write, ToolError::PermissionDenied { .. }));
+
+    // Editing the denied directory must deny instead of isDirectory.
+    let dir_edit = vfs
+        .edit(EditRequest {
+            path: "/life/archive.v1".into(),
+            old_string: "a".into(),
+            new_string: "b".into(),
+            replace_all: None,
+            expect_rev: None,
+            source: WriteSource::Agent,
+        })
+        .unwrap_err();
+    assert!(matches!(dir_edit, ToolError::PermissionDenied { .. }));
+
+    // Grep with a missing path in a denied folder follows the same rule.
+    let grep_missing = vfs
+        .grep(GrepRequest {
+            pattern: "hidden".into(),
+            path: Some("/life/notes/ghost.md".into()),
+            max_results: Some(5),
+            context_lines: None,
+            doc_type: None,
+            principal: Principal::Agent,
+        })
+        .unwrap_err();
+    assert!(matches!(grep_missing, ToolError::PermissionDenied { .. }));
+}
+
+#[test]
+fn agent_config_rejects_reserved_scopes() {
+    let mut vfs = test_vfs();
+    let denied = crate::directory_config::save_agent_config(
+        &mut vfs,
+        "/life/.agent",
+        crate::directory_config::AgentConfigInput {
+            visible: Some(true),
+            rules: None,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(denied, ToolError::InvalidArgument { .. }));
+}
+
+fn agent_read(vfs: &VirtualFs, path: &str) -> Result<ReadResult, ToolError> {
+    vfs.read(ReadRequest {
+        path: path.into(),
+        rev: None,
+        start_line: None,
+        end_line: None,
+        include_meta: None,
+        principal: Principal::Agent,
+    })
+}
+
+fn agent_write(vfs: &mut VirtualFs, path: &str) -> Result<WriteReceipt, ToolError> {
+    vfs.write(WriteRequest {
+        path: path.into(),
+        content: "agent body".into(),
+        create_parents: Some(true),
+        auto_frontmatter: Some(false),
+        source: WriteSource::Agent,
+    })
+}
+
+#[test]
+fn acl_policy_walks_up_and_child_overrides_parent() {
+    let mut vfs = test_vfs();
+    revoke_agent_acl(&vfs);
+    write_file(&mut vfs, "/life/notes/a", "a", WriteSource::User);
+    write_file(&mut vfs, "/life/notes/sub/b", "b", WriteSource::User);
+
+    seed_visibility(&vfs, "/life/notes", true, false);
+    assert!(agent_read(&vfs, "/life/notes/a.md").is_ok());
+    // The child inherits the parent's allow.
+    assert!(agent_read(&vfs, "/life/notes/sub/b.md").is_ok());
+
+    // A child deny overrides the parent allow without affecting the parent.
+    seed_visibility(&vfs, "/life/notes/sub", false, false);
+    assert!(agent_read(&vfs, "/life/notes/sub/b.md").is_err());
+    assert!(agent_read(&vfs, "/life/notes/a.md").is_ok());
+
+    // A deeper allow wins again.
+    seed_visibility(&vfs, "/life/notes/sub", true, false);
+    assert!(agent_read(&vfs, "/life/notes/sub/b.md").is_ok());
+}
+
+#[test]
+fn acl_policy_silent_fields_inherit_and_no_declaration_denies() {
+    let mut vfs = test_vfs();
+    revoke_agent_acl(&vfs);
+    write_file(&mut vfs, "/life/notes/a", "a", WriteSource::User);
+
+    seed_policy(&vfs, "/life/.lifeos/ai.policy", r#"{"read":"allow"}"#);
+    seed_policy(
+        &vfs,
+        "/life/notes/.lifeos/ai.policy",
+        r#"{"write":"deny"}"#,
+    );
+    // `read` is silent at the child level, so the root allow is inherited.
+    assert!(agent_read(&vfs, "/life/notes/a.md").is_ok());
+    // `write` is explicitly denied.
+    assert!(agent_write(&mut vfs, "/life/notes/new").is_err());
+
+    // No policy declares the operation anywhere: default deny.
+    seed_policy(&vfs, "/life/.lifeos/ai.policy", "{}");
+    seed_policy(&vfs, "/life/notes/.lifeos/ai.policy", "{}");
+    assert!(agent_read(&vfs, "/life/notes/a.md").is_err());
+}
+
+#[test]
+fn acl_policy_malformed_file_is_treated_as_absent() {
+    let mut vfs = test_vfs();
+    revoke_agent_acl(&vfs);
+    write_file(&mut vfs, "/life/notes/a", "a", WriteSource::User);
+
+    seed_policy(&vfs, "/life/.lifeos/ai.policy", r#"{"read":"allow"}"#);
+    seed_policy(&vfs, "/life/notes/.lifeos/ai.policy", "{not json");
+    // Malformed child behaves like a missing file and the root allow applies.
+    assert!(agent_read(&vfs, "/life/notes/a.md").is_ok());
+
+    seed_policy(&vfs, "/life/.lifeos/ai.policy", "{}");
+    assert!(agent_read(&vfs, "/life/notes/a.md").is_err());
+}
+
+#[test]
+fn acl_hidden_policy_wins_over_root_policy_file() {
+    let mut vfs = test_vfs();
+    revoke_agent_acl(&vfs);
+    write_file(&mut vfs, "/life/notes/a", "a", WriteSource::User);
+
+    seed_policy(&vfs, "/life/notes/.lifeos/ai.policy", r#"{"read":"deny"}"#);
+    seed_policy(&vfs, "/life/notes/ai.policy", r#"{"read":"allow"}"#);
+    assert!(agent_read(&vfs, "/life/notes/a.md").is_err());
+}
+
+#[test]
+fn acl_root_policy_file_works_without_hidden_file() {
+    let mut vfs = test_vfs();
+    revoke_agent_acl(&vfs);
+    write_file(&mut vfs, "/life/notes/a", "a", WriteSource::User);
+    seed_policy(&vfs, "/life/notes/ai.policy", r#"{"read":"allow"}"#);
+    assert!(agent_read(&vfs, "/life/notes/a.md").is_ok());
+}
+
+#[test]
+fn acl_directory_and_file_targets_use_expected_scope() {
+    let mut vfs = test_vfs();
+    revoke_agent_acl(&vfs);
+    write_file(&mut vfs, "/life/notes/a", "a", WriteSource::User);
+    seed_policy(
+        &vfs,
+        "/life/notes/ai.policy",
+        r#"{"read":"allow","write":"deny"}"#,
+    );
+
+    // A directory authorizes itself; a file authorizes its parent.
+    assert!(agent_read(&vfs, "/life/notes").is_ok());
+    assert!(agent_read(&vfs, "/life/notes/a.md").is_ok());
+    assert!(agent_write(&mut vfs, "/life/notes/new").is_err());
+}
+
+#[test]
+fn reserved_policy_paths_are_model_invisible() {
+    let mut vfs = test_vfs();
+    write_file(&mut vfs, "/life/notes/a", "needle", WriteSource::User);
+    seed_policy(
+        &vfs,
+        "/life/notes/.lifeos/ai.policy",
+        r#"{"read":"allow"}"#,
+    );
+    seed_policy(
+        &vfs,
+        "/life/notes/ai.policy",
+        r#"{"read":"allow","secret":"policy-secret"}"#,
+    );
+
+    assert!(matches!(
+        agent_read(&vfs, "/life/notes/ai.policy"),
+        Err(ToolError::ReadOnlyArea { .. })
+    ));
+    assert!(matches!(
+        agent_read(&vfs, "/life/notes/.lifeos/ai.policy"),
+        Err(ToolError::ReadOnlyArea { .. })
+    ));
+    assert!(matches!(
+        agent_write(&mut vfs, "/life/notes/ai.policy"),
+        Err(ToolError::ReadOnlyArea { .. })
+    ));
+
+    let entries = vfs
+        .glob(GlobRequest {
+            pattern: "/life/notes/*".into(),
+            root: None,
+            case_sensitive: None,
+            principal: Principal::Agent,
+        })
+        .unwrap();
+    assert!(entries
+        .iter()
+        .all(|entry| !entry.path.ends_with("ai.policy") && !entry.path.contains("/.lifeos")));
+
+    // Even if a policy file were indexed, grep must never return it.
+    let inode: i64 = vfs
+        .conn()
+        .query_row(
+            "SELECT inode FROM inodes WHERE path = '/life/notes/ai.policy'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    crate::vfs::fts::index_document(
+        vfs.conn(),
+        inode,
+        r#"{"read":"allow","secret":"policy-secret"}"#,
+    )
+    .unwrap();
+    let hits = vfs
+        .grep(GrepRequest {
+            pattern: "policy-secret".into(),
+            path: None,
+            max_results: Some(50),
+            context_lines: None,
+            doc_type: None,
+            principal: Principal::Agent,
+        })
+        .unwrap();
+    assert!(hits.hits.is_empty());
+}
+
+#[test]
+fn path_acl_table_is_not_created() {
+    let vfs = test_vfs();
+    let count: i64 = vfs
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'path_acl'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
 }
 
 #[test]
@@ -511,7 +938,15 @@ fn cap_gate_rejects_unsafe_paths() {
     );
 
     assert!(matches!(
-        cap_gate::ensure_writable("/life/.agents/skills/a.md"),
+        cap_gate::ensure_writable("/life/.agent/skills/a.md"),
+        Err(ToolError::ReadOnlyArea { .. })
+    ));
+    assert!(matches!(
+        cap_gate::ensure_writable("/life/.lifeos/ai.policy"),
+        Err(ToolError::ReadOnlyArea { .. })
+    ));
+    assert!(matches!(
+        cap_gate::ensure_writable("/life/notes/ai.policy"),
         Err(ToolError::ReadOnlyArea { .. })
     ));
     assert!(cap_gate::ensure_writable("/life/notes/a.md").is_ok());
@@ -2884,7 +3319,7 @@ fn skill_input(name: &str, description: &str, triggers: &[&str], body: &str) -> 
 fn skill_file_count(vfs: &VirtualFs) -> i64 {
     vfs.conn()
         .query_row(
-            "SELECT COUNT(*) FROM inodes WHERE kind = 'file' AND path GLOB '/life/.agents/skills/*/SKILL.md'",
+            "SELECT COUNT(*) FROM inodes WHERE kind = 'file' AND path GLOB '/life/.agent/skills/*/SKILL.md'",
             [],
             |row| row.get(0),
         )
@@ -2914,11 +3349,11 @@ fn invalid_skill_documents_are_skipped_not_fatal() {
         .unwrap();
     };
     write(
-        "/life/.agents/skills/broken/SKILL.md",
+        "/life/.agent/skills/broken/SKILL.md",
         "没有 frontmatter 的正文",
     );
     write(
-        "/life/.agents/skills/no-desc/SKILL.md",
+        "/life/.agent/skills/no-desc/SKILL.md",
         "---\nname: \"缺描述\"\ntriggers: [\"x\"]\n---\n\n正文",
     );
 
@@ -2931,7 +3366,7 @@ fn invalid_skill_documents_are_skipped_not_fatal() {
 fn skill_block_list_triggers_are_parsed() {
     let mut vfs = test_vfs();
     vfs.write_skill(WriteRequest {
-        path: "/life/.agents/skills/block-triggers/SKILL.md".into(),
+        path: "/life/.agent/skills/block-triggers/SKILL.md".into(),
         content: "---\nname: \"块状触发\"\ndescription: \"验证 YAML 块状列表\"\ntriggers:\n  - capture\n  - idea\n  - note this\n---\n\n正文".into(),
         create_parents: Some(true),
         auto_frontmatter: Some(false),
@@ -2994,7 +3429,7 @@ fn skill_crud_enable_and_delete() {
     let inode: i64 = vfs
         .conn()
         .query_row(
-            "SELECT inode FROM inodes WHERE path = '/life/.agents/skills/自定义复盘/SKILL.md'",
+            "SELECT inode FROM inodes WHERE path = '/life/.agent/skills/自定义复盘/SKILL.md'",
             [],
             |row| row.get(0),
         )
@@ -3027,7 +3462,7 @@ fn malicious_skill_is_only_text_and_agents_stay_read_only() {
     let mut vfs = test_vfs();
     assert!(matches!(
         vfs.write(WriteRequest {
-            path: "/life/.agents/skills/evil/SKILL.md".into(),
+            path: "/life/.agent/skills/evil/SKILL.md".into(),
             content: "x".into(),
             create_parents: Some(true),
             auto_frontmatter: Some(false),
@@ -3037,7 +3472,7 @@ fn malicious_skill_is_only_text_and_agents_stay_read_only() {
     ));
     assert!(matches!(
         vfs.edit(EditRequest {
-            path: "/life/.agents/skills/evil/SKILL.md".into(),
+            path: "/life/.agent/skills/evil/SKILL.md".into(),
             old_string: "x".into(),
             new_string: "y".into(),
             replace_all: None,
@@ -3048,7 +3483,7 @@ fn malicious_skill_is_only_text_and_agents_stay_read_only() {
     ));
     assert!(matches!(
         vfs.read(ReadRequest {
-            path: "/life/.agents/skills/evil/SKILL.md".into(),
+            path: "/life/.agent/skills/evil/SKILL.md".into(),
             rev: None,
             start_line: None,
             end_line: None,

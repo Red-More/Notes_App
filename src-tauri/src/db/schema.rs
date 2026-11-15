@@ -27,9 +27,10 @@ const DEFAULT_DIRS: &[&str] = &[
     "/life/notes",
     "/life/todos",
     "/life/contacts",
-    "/life/agent",
-    "/life/.agents",
-    "/life/.agents/skills",
+    "/life/ai_default",
+    "/life/.agent",
+    "/life/.agent/skills",
+    "/life/.lifeos",
 ];
 
 /// Chinese display titles seeded into `meta` for the system folders.
@@ -38,15 +39,17 @@ const DEFAULT_DIR_TITLES: &[(&str, &str)] = &[
     ("/life/diary", "日记"),
     ("/life/todos", "待办"),
     ("/life/contacts", "联系人"),
-    ("/life/agent", "AI 工作区"),
+    ("/life/ai_default", "AI 工作区"),
 ];
 
-/// Default ACL for the Agent principal. Everything else stays default-deny.
-const ACL_SEEDS: &[(&str, &str)] = &[
-    ("/life/agent", "allow-read"),
-    ("/life/agent", "allow-write"),
-    ("/life/.agents", "allow-read"),
-    ("/life/.agents", "allow-write"),
+/// Pre-release path renames applied once per database.
+///
+/// `.agents` became `.agent` (model config) and the old `agent` workspace
+/// became `ai_default`. Both are pure path migrations: inode ids, history and
+/// search rows stay attached to the moved nodes.
+const LEGACY_RENAMES: &[(&str, &str)] = &[
+    ("/life/.agents", "/life/.agent"),
+    ("/life/agent", "/life/ai_default"),
 ];
 
 /// Tables that must exist when `user_version` already matches.
@@ -153,16 +156,6 @@ CREATE TABLE index_entries (
     FOREIGN KEY (inode) REFERENCES inodes(inode) ON DELETE CASCADE
 );
 CREATE INDEX idx_index_lookup ON index_entries(dimension, value, inode);
-
--- Reserved for path-level permissions; CapGate does not enforce rules yet.
-CREATE TABLE path_acl (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    path_prefix TEXT NOT NULL,
-    permission  TEXT NOT NULL,                -- allow-read | allow-write | deny
-    principal   TEXT,
-    created_at  TEXT NOT NULL
-);
-CREATE INDEX idx_acl_prefix ON path_acl(path_prefix);
 
 -- Agent conversations. `last_message_at` stays NULL until the first message
 -- commits; the chat list only shows conversations with a non-NULL value.
@@ -323,7 +316,6 @@ pub fn create(conn: &mut Connection) -> rusqlite::Result<()> {
             params![*path, *title],
         )?;
     }
-    seed_acl(&tx)?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()
 }
@@ -372,10 +364,15 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Idempotently ensure the system folders, display titles and default ACL rows.
-/// Called on startup so databases created before `/life/agent` existed are healed
-/// without any destructive migration.
+/// Idempotently ensure the system folders, display titles and path renames.
+/// Called on startup so databases created before the `.agent` / `ai_default`
+/// layout are healed without any destructive migration.
 pub fn ensure_default_dirs(conn: &Connection) -> rusqlite::Result<()> {
+    for (old, new) in LEGACY_RENAMES {
+        rename_path_prefix(conn, old, new)?;
+    }
+    // Legacy ACL table: visibility is now resolved from ai.policy files only.
+    conn.execute("DROP TABLE IF EXISTS path_acl", [])?;
     for path in DEFAULT_DIRS {
         conn.execute(
             "INSERT OR IGNORE INTO inodes (path, kind, head_rev, size, ctime, mtime)
@@ -391,21 +388,32 @@ pub fn ensure_default_dirs(conn: &Connection) -> rusqlite::Result<()> {
             params![*path, *title],
         )?;
     }
-    seed_acl(conn)
+    Ok(())
 }
 
-/// Insert the default allow rules without duplicating existing ones.
-fn seed_acl(conn: &Connection) -> rusqlite::Result<()> {
-    for (prefix, permission) in ACL_SEEDS {
-        conn.execute(
-            "INSERT INTO path_acl (path_prefix, permission, principal, created_at)
-             SELECT ?1, ?2, NULL, datetime('now','localtime')
-             WHERE NOT EXISTS (
-                 SELECT 1 FROM path_acl WHERE path_prefix = ?1 AND permission = ?2
-             )",
-            params![*prefix, *permission],
+/// Move one directory subtree from `old` to `new` when the old path exists and
+/// the target does not. Inode ids, history and search rows stay attached.
+fn rename_path_prefix(conn: &Connection, old: &str, new: &str) -> rusqlite::Result<()> {
+    let exists = |path: &str| -> rusqlite::Result<bool> {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM inodes WHERE path = ?1",
+            params![path],
+            |row| row.get(0),
         )?;
+        Ok(count > 0)
+    };
+    if !exists(old)? || exists(new)? {
+        return Ok(());
     }
+    conn.execute(
+        "UPDATE inodes SET path = ?1 WHERE path = ?2",
+        params![new, old],
+    )?;
+    conn.execute(
+        "UPDATE inodes SET path = ?1 || substr(path, length(?2) + 1)
+         WHERE path LIKE ?3",
+        params![new, old, format!("{old}/%")],
+    )?;
     Ok(())
 }
 

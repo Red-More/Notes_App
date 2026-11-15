@@ -103,7 +103,7 @@ export function describeToolError(error: unknown): string {
     case 'readOnlyArea':
       return `${path} 属于只读区，禁止写入`
     case 'permissionDenied':
-      return `该路径未授权给 AI（需要 ${String(value.permission ?? 'read')} 权限）：${path}；默认只能访问 /life/agent，请让用户在设置中授权该文件夹`
+      return `该路径未授权给 AI（需要 ${String(value.permission ?? 'read')} 权限）：${path}；默认只能访问 /life/ai_default，请让用户在设置中授权该文件夹`
     case 'contentTooLarge':
       return `内容过大：上限 ${String(value.limit)} 字节`
     case 'parentMissing':

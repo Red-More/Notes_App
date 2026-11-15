@@ -101,6 +101,20 @@ fn split_multi(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// Drop mirror rows (cross index + meta) for reserved config documents. Older
+/// builds indexed skills before the `.agent` exclusion existed. Version rows
+/// are kept: skill edits stay auditable even though skills are not documents.
+fn prune_reserved(conn: &Connection) -> rusqlite::Result<()> {
+    const RESERVED: &str = "SELECT inode FROM inodes
+              WHERE path GLOB '*/.agent/*'
+                 OR path GLOB '*/.lifeos/*'
+                 OR path GLOB '*/ai.policy'";
+    for table in ["index_entries", "meta"] {
+        conn.execute(&format!("DELETE FROM {table} WHERE inode IN ({RESERVED})"), [])?;
+    }
+    Ok(())
+}
+
 fn date_part(value: &str) -> &str {
     value.get(0..10).unwrap_or(value)
 }
@@ -108,12 +122,16 @@ fn date_part(value: &str) -> &str {
 /// 为还没有索引行的历史文件补建索引（启动时调用一次）。
 /// 只处理 `index_entries` 为空的 inode，正常启动成本接近零。
 pub fn rebuild_missing(conn: &Connection) -> rusqlite::Result<()> {
+    prune_reserved(conn)?;
     let rows: Vec<(i64, String, String)> = {
         let mut stmt = conn.prepare(
             "SELECT i.inode, i.path, b.content
              FROM inodes i
              JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
              WHERE i.kind = 'file' AND i.deleted = 0
+               AND i.path NOT GLOB '*/.agent/*'
+               AND i.path NOT GLOB '*/.lifeos/*'
+               AND i.path NOT GLOB '*/ai.policy'
                AND NOT EXISTS (SELECT 1 FROM index_entries e WHERE e.inode = i.inode)",
         )?;
         let mapped = stmt.query_map([], |r| {

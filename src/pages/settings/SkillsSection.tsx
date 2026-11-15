@@ -398,7 +398,7 @@ export default function SkillsSection() {
               </div>
             ))}
             <p className="settings-note">
-              草稿位于 /life/agent/skills-drafts，模型可读写；载入后写入 /life/.agents/skills，草稿保留。
+              草稿位于 /life/ai_default/skills-drafts，模型可读写；载入后写入 /life/.agent/skills，草稿保留。
             </p>
           </div>
         </>

@@ -1,17 +1,17 @@
 //! CapGate：VirtualFs 的路径与参数守门层。
 //!
 //! 所有带路径的文件工具入口都会先走这里：把用户/模型给的路径规范化为 `/life/...`，
-//! 拒绝 `..`、绝对路径越界、控制字符与超长路径；写入时额外拒绝只读区
-//! `/life/.agents/`。真正的数据库操作永远只拿到规范化后的路径。
+//! 拒绝 `..`、绝对路径越界、控制字符与超长路径；写入时额外拒绝任何
+//! `.agent` / `.lifeos` 配置目录。真正的数据库操作永远只拿到规范化后的路径。
 
 use super::error::ToolError;
+use super::reserved;
 
 /// 虚拟文件系统根路径。
 pub const ROOT: &str = "/life";
 
 const MAX_PATH_CHARS: usize = 1024;
 const MAX_SEGMENT_CHARS: usize = 255;
-const READ_ONLY_PREFIX: &str = "/life/.agents";
 
 /// 把任意输入路径规范化成 `/life/...`。
 ///
@@ -90,20 +90,10 @@ pub fn normalize_path(raw: &str) -> Result<String, ToolError> {
     Ok(path)
 }
 
-/// 判断路径是否允许被 write/edit 修改。
-/// `.agents` 只允许用户经 UI 管理，模型工具不能写技能目录。
+/// 判断路径是否允许被 Agent 的 write/edit 修改。
+/// `.agent` 与 `.lifeos` 都属于保留配置区，只能由用户通过专用命令维护。
 pub fn ensure_writable(path: &str) -> Result<(), ToolError> {
-    if path == READ_ONLY_PREFIX || path.starts_with("/life/.agents/") {
-        return Err(ToolError::ReadOnlyArea {
-            path: path.to_string(),
-        });
-    }
-    Ok(())
-}
-
-/// `.agents` 对模型的文件工具完全不可见：技能正文只能由 `load_skill` 专用命令读取。
-pub fn ensure_model_readable(path: &str) -> Result<(), ToolError> {
-    if path == READ_ONLY_PREFIX || path.starts_with("/life/.agents/") {
+    if reserved::is_reserved_path(path) {
         return Err(ToolError::ReadOnlyArea {
             path: path.to_string(),
         });

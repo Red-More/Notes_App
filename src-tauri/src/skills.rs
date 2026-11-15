@@ -1,11 +1,14 @@
-//! 技能系统（M3）：技能是 `.agents/skills/<id>/SKILL.md` 文档，只进 Prompt。
+//! 技能系统（M3）：技能是 `.agent/skills/<id>/SKILL.md` 文档，只进 Prompt。
 //!
 //! 边界：
 //! - 技能不注册工具、不执行代码；新增能力 = 新增一份 SKILL.md。
-//! - 模型工具不能读写 `.agents`；本模块通过 `VirtualFs::write_skill/edit_skill`
-//!   这条专用入口维护技能文档，仍复用同一套事务、版本与索引。
-//! - 初始 Prompt 只含摘要（name/description/triggers），正文按触发按需读取。
+//! - `.agent` 是模型内部配置区；模型工具不能读写，本模块通过
+//!   `VirtualFs::write_skill/edit_skill` 这条专用入口维护技能文档。
+//! - 任意目录都可以有 `.agent/skills`：父级技能对子目录生效，子目录同名技能
+//!   覆盖父级；解析只看祖先链，不扫描兄弟目录。
+//! - 初始 Prompt 只含摘要（name/description/triggers），正文按需读取。
 
+use std::collections::BTreeMap;
 use std::io::{Cursor, Read};
 
 use base64::engine::general_purpose::STANDARD;
@@ -14,18 +17,19 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::vfs::acl::{AclPermission, PolicySet, Principal};
+use crate::vfs::cap_gate::{self, ROOT};
 use crate::vfs::error::ToolError;
 use crate::vfs::meta;
+use crate::vfs::reserved;
 use crate::vfs::types::{EditRequest, WriteRequest, WriteSource};
 use crate::vfs::VirtualFs;
 
-const SKILLS_ROOT: &str = "/life/.agents/skills";
 const SKILL_FILE: &str = "SKILL.md";
 const DISABLED_KEY: &str = "skills.disabled";
 /// Agent 工作区：模型可读写，但其中的草稿不会被自动加载。
-const AGENT_ROOT: &str = "/life/agent";
-const DRAFT_ROOT: &str = "/life/agent/skills-drafts";
-const RULES_ROOT: &str = "/life/agent/rules";
+const AGENT_ROOT: &str = "/life/ai_default";
+const DRAFT_ROOT: &str = "/life/ai_default/skills-drafts";
 /// 触发词数量与单项长度上限，与前端 `parseTriggerInput` 保持一致。
 const MAX_TRIGGERS: usize = 10;
 const MAX_TRIGGER_CHARS: usize = 40;
@@ -47,6 +51,8 @@ pub struct SkillSummary {
     pub version: String,
     pub enabled: bool,
     pub builtin: bool,
+    /// Directory that owns the `.agent` folder, e.g. `/life` or `/life/notes`.
+    pub path: String,
 }
 
 /// 按需读取的完整技能。
@@ -75,12 +81,20 @@ pub struct SkillInput {
     pub body: String,
 }
 
+fn skill_path_for(owner: &str, id: &str) -> String {
+    format!("{owner}/.agent/skills/{id}/{SKILL_FILE}")
+}
+
+fn skill_dir_for(owner: &str, id: &str) -> String {
+    format!("{owner}/.agent/skills/{id}")
+}
+
 fn skill_dir(id: &str) -> String {
-    format!("{SKILLS_ROOT}/{id}")
+    skill_dir_for("/life", id)
 }
 
 fn skill_path(id: &str) -> String {
-    format!("{SKILLS_ROOT}/{id}/{SKILL_FILE}")
+    skill_path_for("/life", id)
 }
 
 fn draft_dir(id: &str) -> String {
@@ -126,7 +140,7 @@ fn id_from_name(name: &str) -> String {
 }
 
 /// 解析 SKILL.md；缺少 name/description 视为非法技能，由调用方跳过。
-fn parse_skill(id: &str, content: &str) -> Option<(String, SkillSummary)> {
+fn parse_skill(id: &str, owner: &str, content: &str) -> Option<(String, SkillSummary)> {
     let parts = meta::parse_document(content);
     let name = meta::field_string(&parts.fields, "name")
         .or_else(|| parts.title.clone())
@@ -147,6 +161,7 @@ fn parse_skill(id: &str, content: &str) -> Option<(String, SkillSummary)> {
         enabled: true,
         // The app ships no preset skills: every skill is user-installed.
         builtin: false,
+        path: owner.to_string(),
     };
     Some((parts.body, summary))
 }
@@ -321,7 +336,7 @@ fn skill_rows(conn: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
          FROM inodes i
          JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
          WHERE i.kind = 'file' AND i.deleted = 0
-           AND i.path GLOB '/life/.agents/skills/*/SKILL.md'
+           AND i.path GLOB '*/.agent/skills/*/SKILL.md'
          ORDER BY i.path ASC",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -336,15 +351,173 @@ fn skill_rows(conn: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
     Ok(result)
 }
 
-fn id_from_path(path: &str) -> Option<String> {
-    let rest = path
-        .strip_prefix(SKILLS_ROOT)?
-        .strip_prefix('/')?
-        .strip_suffix(&format!("/{SKILL_FILE}"))?;
-    if rest.is_empty() || rest.contains('/') {
+/// Split a scoped skill path into `(owner directory, skill id)`.
+fn parse_skill_path(path: &str) -> Option<(String, String)> {
+    let rest = path.strip_suffix(&format!("/{SKILL_FILE}"))?;
+    let marker = "/.agent/skills/";
+    let index = rest.find(marker)?;
+    let owner = &rest[..index];
+    let id = &rest[index + marker.len()..];
+    if !owner.starts_with("/life") || id.is_empty() || id.contains('/') {
         return None;
     }
-    Some(rest.to_string())
+    Some((owner.to_string(), id.to_string()))
+}
+
+/// Normalize a scope path; invalid input falls back to the default workspace.
+fn normalize_scope(scope: &str) -> String {
+    crate::vfs::cap_gate::normalize_path(scope)
+        .unwrap_or_else(|_| AGENT_ROOT.to_string())
+}
+
+/// List skills effective for one directory scope.
+///
+/// Only the ancestor chain is scanned, never siblings or descendants. A
+/// deeper `.agent/skills` with the same id overrides its ancestors.
+pub fn list_for_scope(vfs: &VirtualFs, scope: &str) -> Result<Vec<SkillSummary>, ToolError> {
+    let disabled = disabled_ids(vfs.conn())?;
+    let scope = normalize_scope(scope);
+    let rows = skill_rows(vfs.conn())?;
+    let mut merged: BTreeMap<String, SkillSummary> = BTreeMap::new();
+    for dir in reserved::lineage(&scope) {
+        for (path, content) in &rows {
+            let Some((owner, id)) = parse_skill_path(path) else {
+                continue;
+            };
+            if owner != dir {
+                continue;
+            }
+            match parse_skill(&id, &owner, content) {
+                Some((_, mut summary)) => {
+                    summary.enabled = !disabled.iter().any(|item| item == &id);
+                    merged.insert(id, summary);
+                }
+                None => log::warn!("skip invalid skill document: {path}"),
+            }
+        }
+    }
+    let mut skills: Vec<SkillSummary> = merged.into_values().collect();
+    skills.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(skills)
+}
+
+/// List skills effective for the default workspace.
+pub fn list(vfs: &VirtualFs) -> Result<Vec<SkillSummary>, ToolError> {
+    list_for_scope(vfs, AGENT_ROOT)
+}
+
+/// 读取技能正文（按需注入用）；默认作用域为 Agent 工作区。
+pub fn read(vfs: &VirtualFs, id: &str) -> Result<SkillDetail, ToolError> {
+    read_for_scope(vfs, id, AGENT_ROOT)
+}
+
+/// 读取作用域内生效的技能：从最深祖先向上查找，未命中再回退到全局。
+pub fn read_for_scope(vfs: &VirtualFs, id: &str, scope: &str) -> Result<SkillDetail, ToolError> {
+    let id = validate_id(id)?;
+    let scope = normalize_scope(scope);
+    let mut found: Option<(String, String)> = None;
+    for dir in reserved::lineage(&scope).into_iter().rev() {
+        let path = skill_path_for(&dir, &id);
+        if let Some(content) = read_skill_content(vfs.conn(), &path)? {
+            found = Some((dir, content));
+            break;
+        }
+    }
+    let Some((owner, content)) = found else {
+        return Err(ToolError::NotFound {
+            path: skill_path(&id),
+        });
+    };
+    let Some((body, mut summary)) = parse_skill(&id, &owner, &content) else {
+        return Err(ToolError::invalid(format!("技能 {id} 的 frontmatter 非法")));
+    };
+    summary.enabled = !disabled_ids(vfs.conn())?.iter().any(|item| item == &id);
+    Ok(SkillDetail { summary, body })
+}
+
+/// Agent-facing skill read used by the `load_skill` tool.
+///
+/// The scope comes from the model, so it must be authorized against `.lifeos`:
+/// a denied folder contributes no skills, and disabled skills are rejected.
+/// `.agent` visibility is intentionally not required here — `load_skill` is a
+/// dedicated channel, not a general `.agent` browser.
+pub fn read_for_agent(
+    vfs: &VirtualFs,
+    id: &str,
+    scope: Option<&str>,
+) -> Result<SkillDetail, ToolError> {
+    let id = validate_id(id)?;
+    let (scope, explicit_scope) = match scope {
+        Some(raw) => (resolve_skill_scope(vfs.conn(), raw)?, true),
+        None => (AGENT_ROOT.to_string(), false),
+    };
+    let principal = Principal::Agent;
+    let policies = PolicySet::for_principal(vfs.conn(), principal)?;
+    // Only a model-supplied scope needs its own authorization; the default
+    // workspace is trusted and may still fall back to global skills.
+    if explicit_scope && !policies.allows_as(&scope, true, AclPermission::Read, principal) {
+        return Err(ToolError::PermissionDenied {
+            path: scope,
+            permission: "read".into(),
+        });
+    }
+    let disabled = disabled_ids(vfs.conn())?;
+    for owner in reserved::lineage(&scope).into_iter().rev() {
+        // Global skills live directly under `/life/.agent`; keep them available
+        // even when the root policy denies the rest of the VFS.
+        if owner != ROOT && !policies.allows_as(&owner, true, AclPermission::Read, principal) {
+            continue;
+        }
+        let path = skill_path_for(&owner, &id);
+        let Some(content) = read_skill_content(vfs.conn(), &path)? else {
+            continue;
+        };
+        if disabled.iter().any(|item| item == &id) {
+            return Err(ToolError::invalid(format!("技能 {id} 已停用，不能使用")));
+        }
+        let Some((body, mut summary)) = parse_skill(&id, &owner, &content) else {
+            return Err(ToolError::invalid(format!("技能 {id} 的 frontmatter 非法")));
+        };
+        summary.enabled = true;
+        return Ok(SkillDetail { summary, body });
+    }
+    Err(ToolError::NotFound {
+        path: skill_path(&id),
+    })
+}
+
+/// Resolve a model-provided scope: an existing directory is used as-is, a file
+/// uses its parent folder. Missing paths are rejected instead of falling back.
+fn resolve_skill_scope(conn: &Connection, raw: &str) -> Result<String, ToolError> {
+    let path = cap_gate::normalize_path(raw)?;
+    let kind: Option<String> = conn
+        .query_row(
+            "SELECT kind FROM inodes WHERE path = ?1 AND deleted = 0",
+            params![path],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match kind.as_deref() {
+        Some("directory") => Ok(path),
+        Some("file") => Ok(path
+            .rsplit_once('/')
+            .map(|(dir, _)| dir.to_string())
+            .unwrap_or_else(|| ROOT.to_string())),
+        _ => Err(ToolError::NotFound { path }),
+    }
+}
+
+fn read_skill_content(conn: &Connection, path: &str) -> Result<Option<String>, ToolError> {
+    conn.query_row(
+        "SELECT COALESCE(b.content, '')
+         FROM inodes i
+         JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
+         WHERE i.path = ?1 AND i.kind = 'file' AND i.deleted = 0",
+        params![path],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(ToolError::from)
 }
 
 fn draft_rows(conn: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
@@ -353,7 +526,7 @@ fn draft_rows(conn: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
          FROM inodes i
          JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
          WHERE i.kind = 'file' AND i.deleted = 0
-           AND i.path GLOB '/life/agent/skills-drafts/*/SKILL.md'
+           AND i.path GLOB '/life/ai_default/skills-drafts/*/SKILL.md'
          ORDER BY i.path ASC",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -377,52 +550,6 @@ fn id_from_draft_path(path: &str) -> Option<String> {
         return None;
     }
     Some(rest.to_string())
-}
-
-/// 列出全部技能（含禁用项）；非法 SKILL.md 只记录告警并跳过。
-pub fn list(vfs: &VirtualFs) -> Result<Vec<SkillSummary>, ToolError> {
-    let disabled = disabled_ids(vfs.conn())?;
-    let mut skills = Vec::new();
-    for (path, content) in skill_rows(vfs.conn())? {
-        let Some(id) = id_from_path(&path) else {
-            continue;
-        };
-        match parse_skill(&id, &content) {
-            Some((_, mut summary)) => {
-                summary.enabled = !disabled.iter().any(|item| item == &id);
-                skills.push(summary);
-            }
-            None => log::warn!("skip invalid skill document: {path}"),
-        }
-    }
-    skills.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(skills)
-}
-
-/// 读取技能正文（按需注入用）。
-pub fn read(vfs: &VirtualFs, id: &str) -> Result<SkillDetail, ToolError> {
-    let id = validate_id(id)?;
-    let content: Option<String> = vfs
-        .conn()
-        .query_row(
-            "SELECT COALESCE(b.content, '')
-             FROM inodes i
-             JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
-             WHERE i.path = ?1 AND i.kind = 'file' AND i.deleted = 0",
-            params![skill_path(&id)],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(content) = content else {
-        return Err(ToolError::NotFound {
-            path: skill_path(&id),
-        });
-    };
-    let Some((body, mut summary)) = parse_skill(&id, &content) else {
-        return Err(ToolError::invalid(format!("技能 {id} 的 frontmatter 非法")));
-    };
-    summary.enabled = !disabled_ids(vfs.conn())?.iter().any(|item| item == &id);
-    Ok(SkillDetail { summary, body })
 }
 
 /// 新建或更新技能；更新时整文件替换并追加新 rev。
@@ -525,7 +652,7 @@ pub fn import_package(
             "技能包「{filename}」根目录缺少 SKILL.md（不支持嵌套目录）"
         ))
     })?;
-    let Some((body, summary)) = parse_skill("import", &content) else {
+    let Some((body, summary)) = parse_skill("import", "/life", &content) else {
         return Err(ToolError::invalid(
             "SKILL.md 的 frontmatter 缺少 name 或 description",
         ));
@@ -548,7 +675,7 @@ pub fn import_package(
 /// 创建 Agent 工作区目录（幂等）。草稿目录不会被技能 loader 自动加载。
 pub fn ensure_workspace(vfs: &VirtualFs) -> Result<(), ToolError> {
     let conn = vfs.conn();
-    for path in [AGENT_ROOT, DRAFT_ROOT, RULES_ROOT] {
+    for path in [AGENT_ROOT, DRAFT_ROOT] {
         conn.execute(
             "INSERT OR IGNORE INTO inodes (path, kind, head_rev, size, ctime, mtime)
              VALUES (?1, 'directory', 0, 0, datetime('now','localtime'), datetime('now','localtime'))",
@@ -570,7 +697,7 @@ pub fn list_drafts(vfs: &VirtualFs) -> Result<Vec<SkillSummary>, ToolError> {
         let Some(id) = id_from_draft_path(&path) else {
             continue;
         };
-        match parse_skill(&id, &content) {
+        match parse_skill(&id, AGENT_ROOT, &content) {
             Some((_, mut summary)) => {
                 summary.builtin = false;
                 summary.enabled = true;
@@ -602,7 +729,7 @@ pub fn read_draft(vfs: &VirtualFs, id: &str) -> Result<SkillDetail, ToolError> {
             path: draft_path(&id),
         });
     };
-    let Some((body, mut summary)) = parse_skill(&id, &content) else {
+    let Some((body, mut summary)) = parse_skill(&id, AGENT_ROOT, &content) else {
         return Err(ToolError::invalid(format!("草稿 {id} 的 frontmatter 非法")));
     };
     summary.builtin = false;
@@ -610,7 +737,7 @@ pub fn read_draft(vfs: &VirtualFs, id: &str) -> Result<SkillDetail, ToolError> {
     Ok(SkillDetail { summary, body })
 }
 
-/// 用户审核后把草稿载入 `.agents/skills`；草稿本身保留在工作区。
+/// 用户审核后把草稿载入 `.agent/skills`；草稿本身保留在工作区。
 pub fn promote_draft(vfs: &mut VirtualFs, id: &str) -> Result<SkillSummary, ToolError> {
     let id = validate_id(id)?;
     let detail = read_draft(vfs, &id)?;
@@ -675,11 +802,15 @@ fn validate_input(input: &SkillInput) -> Result<(), ToolError> {
 }
 
 /// 启用/停用技能；状态存 `settings.skills.disabled`。
+///
+/// 技能可以在任意祖先目录定义，因此存在性检查覆盖所有作用域。
 pub fn set_enabled(vfs: &VirtualFs, id: &str, enabled: bool) -> Result<(), ToolError> {
     let id = validate_id(id)?;
+    let pattern = format!("*/.agent/skills/{id}/{SKILL_FILE}");
     let exists: i64 = vfs.conn().query_row(
-        "SELECT COUNT(*) FROM inodes WHERE path = ?1 AND kind = 'file' AND deleted = 0",
-        params![skill_path(&id)],
+        "SELECT COUNT(*) FROM inodes
+         WHERE path GLOB ?1 AND kind = 'file' AND deleted = 0",
+        params![pattern],
         |row| row.get(0),
     )?;
     if exists == 0 {

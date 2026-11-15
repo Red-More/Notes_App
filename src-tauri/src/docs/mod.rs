@@ -465,7 +465,7 @@ pub fn move_many(
     Ok(())
 }
 
-/// Restrict to a recursive virtual-directory scope such as `/life/agent`.
+/// Restrict to a recursive virtual-directory scope such as `/life/ai_default`.
 /// The prefix is validated so a caller cannot widen the query to arbitrary paths.
 fn push_root_filter(
     sql: &mut String,

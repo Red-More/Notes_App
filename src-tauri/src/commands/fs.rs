@@ -132,7 +132,7 @@ pub fn user_read(
 }
 
 /// 界面搜索（用户面：身份固定为 User，绕过 Agent 文件夹 ACL）。
-/// `path` 可选，用于把检索范围限定到某个虚拟目录（如 `/life/agent`）。
+/// `path` 可选，用于把检索范围限定到某个虚拟目录（如 `/life/ai_default`）。
 #[tauri::command]
 pub fn user_search(
     state: State<'_, VfsState>,

@@ -1,17 +1,23 @@
-//! 路径权限（ACL）。
+//! Path permissions (ACL) driven by `ai.policy` files.
 //!
-//! 规则存放在 `path_acl`：`path_prefix / permission(allow-read|allow-write|deny)
-//! / principal`。只有 Agent 受约束，用户界面调用以 `Principal::User` 直接放行，
-//! 因此界面行为与改动前保持一致。
+//! Only the Agent principal is constrained; user-facing commands use
+//! `Principal::User` and bypass the policy, so UI behaviour is unchanged.
 //!
-//! 判定规则：
-//! - 无匹配行 → 拒绝（默认拒绝）；
-//! - 取最长匹配前缀；同一长度为 `deny` 优先于 allow；
-//! - 最长前缀没有授予所需权限 → 拒绝（不会回退到更短前缀）。
+//! Resolution: starting at the target folder (its parent for a file), walk
+//! upwards. The first valid policy that explicitly declares the operation
+//! decides. Silence continues upward; malformed files are treated as absent;
+//! reaching the root without a decision denies.
+//!
+//! This module never reads `.agent`: visibility and model configuration are
+//! independent systems.
+
+use std::collections::BTreeMap;
 
 use rusqlite::Connection;
 
 use super::error::ToolError;
+use super::lifeos::{self, Decision, DirectoryPolicy, PolicyPermission};
+use super::reserved;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AclPermission {
@@ -27,74 +33,126 @@ impl AclPermission {
         }
     }
 
-    fn granted_by(self, permission: &str) -> bool {
+    fn policy(self) -> PolicyPermission {
         match self {
-            Self::Read => permission == "allow-read",
-            Self::Write => permission == "allow-write",
+            Self::Read => PolicyPermission::Read,
+            Self::Write => PolicyPermission::Write,
         }
     }
 }
 
-/// 调用方身份。只有 Agent 受 `path_acl` 约束，User 一律放行。
+/// Caller identity. Only the Agent is subject to directory policies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Principal {
     User,
     Agent,
 }
 
-/// 统一的访问判定钩子。
-pub fn ensure_allowed(
-    conn: &Connection,
-    path: &str,
-    permission: AclPermission,
-    principal: Principal,
-) -> Result<(), ToolError> {
-    if principal == Principal::User {
-        return Ok(());
-    }
-
-    let mut stmt = conn.prepare("SELECT path_prefix, permission FROM path_acl")?;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
-
-    let mut best_len = 0usize;
-    let mut best_deny = false;
-    let mut best_allow = false;
-    for row in rows {
-        let (prefix, rule) = row?;
-        if !prefix_covers(&prefix, path) {
-            continue;
-        }
-        match prefix.len().cmp(&best_len) {
-            std::cmp::Ordering::Less => continue,
-            std::cmp::Ordering::Greater => {
-                best_len = prefix.len();
-                best_deny = false;
-                best_allow = false;
-            }
-            std::cmp::Ordering::Equal => {}
-        }
-        if rule == "deny" {
-            best_deny = true;
-        } else if permission.granted_by(&rule) {
-            best_allow = true;
-        }
-    }
-
-    if best_deny || !best_allow {
-        return Err(ToolError::PermissionDenied {
-            path: path.to_string(),
-            permission: permission.label().to_string(),
-        });
-    }
-    Ok(())
+/// A parsed snapshot of every `ai.policy`, loaded once per operation.
+///
+/// `glob`/`grep` check many candidate paths; resolving each one against the
+/// in-memory map avoids repeated SQLite reads and JSON parsing.
+pub struct PolicySet {
+    configs: BTreeMap<String, DirectoryPolicy>,
 }
 
-/// `prefix` 是否覆盖 `path`：精确相等，或以 `prefix + "/"` 开头。
-fn prefix_covers(prefix: &str, path: &str) -> bool {
-    path == prefix
-        || path
-            .strip_prefix(prefix)
-            .is_some_and(|rest| rest.starts_with('/'))
+impl PolicySet {
+    fn load(conn: &Connection) -> Result<Self, ToolError> {
+        Ok(Self {
+            configs: lifeos::load_all(conn)?,
+        })
+    }
+
+    /// Load only what the principal needs. User operations bypass the policy,
+    /// so they receive an empty snapshot instead of scanning the config table
+    /// on every read/write. Reserved-path hiding does not depend on `configs`.
+    pub fn for_principal(conn: &Connection, principal: Principal) -> Result<Self, ToolError> {
+        match principal {
+            Principal::User => Ok(Self {
+                configs: BTreeMap::new(),
+            }),
+            Principal::Agent => Self::load(conn),
+        }
+    }
+
+    /// Unified access hook used by every VFS entry point.
+    ///
+    /// `is_dir` selects the starting folder: a directory authorizes itself,
+    /// a file authorizes against its parent folder.
+    pub fn ensure(
+        &self,
+        target: &str,
+        is_dir: bool,
+        permission: AclPermission,
+        principal: Principal,
+    ) -> Result<(), ToolError> {
+        if principal == Principal::User {
+            return Ok(());
+        }
+        if self.allows(target, is_dir, permission) {
+            return Ok(());
+        }
+        Err(ToolError::PermissionDenied {
+            path: target.to_string(),
+            permission: permission.label().to_string(),
+        })
+    }
+
+    pub fn allows(&self, target: &str, is_dir: bool, permission: AclPermission) -> bool {
+        // Root listing is the only built-in exception: the directory itself is
+        // servable so the model can discover its workspace, but every entry is
+        // still authorized individually before it reaches the result.
+        if target == super::cap_gate::ROOT && is_dir && permission == AclPermission::Read {
+            return true;
+        }
+        // `.lifeos` and `ai.policy` never grant visibility, regardless of config.
+        if reserved::is_policy_file(target)
+            || reserved::has_segment(target, reserved::LIFEOS_DIR)
+        {
+            return false;
+        }
+        // `.agent` is model-internal config, but it still belongs to a folder:
+        // a denied folder must not expose its `.agent` even when `visible` is on.
+        // The global `/life/.agent` tree is the model's own config home, so it
+        // stays reachable like the root listing exception above.
+        if reserved::has_segment(target, reserved::AGENT_DIR) {
+            let Some(owner) = reserved::agent_owner(target) else {
+                return false;
+            };
+            if owner == super::cap_gate::ROOT {
+                return true;
+            }
+            return lifeos::resolve(&self.configs, owner, permission.policy()) == Decision::Allow;
+        }
+        let scope = scope_dir(target, is_dir);
+        lifeos::resolve(&self.configs, scope, permission.policy()) == Decision::Allow
+    }
+
+    /// Principal-aware filter for result sets. User calls bypass the policy,
+    /// but reserved config files stay hidden for every principal.
+    pub fn allows_as(
+        &self,
+        target: &str,
+        is_dir: bool,
+        permission: AclPermission,
+        principal: Principal,
+    ) -> bool {
+        if reserved::is_policy_file(target)
+            || reserved::has_segment(target, reserved::LIFEOS_DIR)
+        {
+            return false;
+        }
+        principal == Principal::User || self.allows(target, is_dir, permission)
+    }
+}
+
+/// Folder that owns the permission decision for a target path.
+fn scope_dir(target: &str, is_dir: bool) -> &str {
+    if is_dir {
+        return target;
+    }
+    match target.rfind('/') {
+        Some(0) | None => super::cap_gate::ROOT,
+        Some(index) => &target[..index],
+    }
 }

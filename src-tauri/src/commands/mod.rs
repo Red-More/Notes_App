@@ -6,6 +6,7 @@
 
 pub mod agent;
 pub mod assets;
+pub mod dir_config;
 pub mod doc;
 pub mod export;
 pub mod folder;

@@ -15,18 +15,45 @@ pub struct SkillImportInput {
     pub data: String,
 }
 
-/// 列出全部技能（含禁用项），只返回摘要。
+/// 列出技能（含禁用项）；`scope` 省略时使用默认工作区。
 #[tauri::command]
-pub fn skill_list(state: State<'_, VfsState>) -> Result<Vec<SkillSummary>, ToolError> {
+pub fn skill_list(
+    state: State<'_, VfsState>,
+    scope: Option<String>,
+) -> Result<Vec<SkillSummary>, ToolError> {
     let vfs = crate::lock(&state.0);
-    skills::list(&vfs)
+    match scope.as_deref() {
+        Some(path) => skills::list_for_scope(&vfs, path),
+        None => skills::list(&vfs),
+    }
 }
 
-/// 读取单个技能的完整正文，用于触发后的按需注入。
+/// 读取单个技能的完整正文；`scope` 决定父目录技能覆盖顺序。
 #[tauri::command]
-pub fn skill_read(state: State<'_, VfsState>, id: String) -> Result<SkillDetail, ToolError> {
+pub fn skill_read(
+    state: State<'_, VfsState>,
+    id: String,
+    scope: Option<String>,
+) -> Result<SkillDetail, ToolError> {
     let vfs = crate::lock(&state.0);
-    skills::read(&vfs, &id)
+    match scope.as_deref() {
+        Some(path) => skills::read_for_scope(&vfs, &id, path),
+        None => skills::read(&vfs, &id),
+    }
+}
+
+/// Agent 侧按作用域读取技能（`load_skill` 工具专用）。
+///
+/// `scope` 来自模型，因此这里强制走 `.lifeos` 鉴权并拒绝已停用技能；
+/// 用户设置页仍走 `skill_read`，可直接预览任意技能。
+#[tauri::command]
+pub fn agent_skill_read(
+    state: State<'_, VfsState>,
+    id: String,
+    scope: Option<String>,
+) -> Result<SkillDetail, ToolError> {
+    let vfs = crate::lock(&state.0);
+    skills::read_for_agent(&vfs, &id, scope.as_deref())
 }
 
 /// 新建或更新技能；id 为空时按名称生成。
@@ -67,7 +94,7 @@ pub fn skill_import(
     skills::import_package(&mut vfs, &input.filename, &input.data)
 }
 
-/// 列出 `/life/agent/skills-drafts` 中等待用户审核的草稿。
+/// 列出 `/life/ai_default/skills-drafts` 中等待用户审核的草稿。
 #[tauri::command]
 pub fn skill_draft_list(state: State<'_, VfsState>) -> Result<Vec<SkillSummary>, ToolError> {
     let vfs = crate::lock(&state.0);
@@ -81,7 +108,7 @@ pub fn skill_draft_read(state: State<'_, VfsState>, id: String) -> Result<SkillD
     skills::read_draft(&vfs, &id)
 }
 
-/// 用户审核后把草稿载入 `.agents/skills`。
+/// 用户审核后把草稿载入 `.agent/skills`。
 #[tauri::command]
 pub fn skill_draft_promote(
     state: State<'_, VfsState>,

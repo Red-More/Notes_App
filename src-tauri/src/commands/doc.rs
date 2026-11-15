@@ -16,7 +16,7 @@ pub fn doc_list(
     state: State<'_, VfsState>,
     kind: Option<String>,
     folder_id: Option<i64>,
-    // Recursive virtual-directory scope, e.g. `/life/agent`.
+    // Recursive virtual-directory scope, e.g. `/life/ai_default`.
     root: Option<String>,
     unclassified: Option<bool>,
     search: Option<String>,

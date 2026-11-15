@@ -45,7 +45,7 @@ export type NoteSort = 'updated' | 'created' | 'title'
 export type DocListParams = {
   kind?: string
   folderId?: number
-  /** Recursive virtual-directory scope, e.g. `/life/agent`. */
+  /** Recursive virtual-directory scope, e.g. `/life/ai_default`. */
   root?: string
   unclassified?: boolean
   search?: string
@@ -699,8 +699,10 @@ export const mcpApi = {
  * 技能管理 API（M3）。技能的读写只通过专用命令，模型工具无法触达 `.agents`。
  */
 export const skillApi = {
-  list: () => invoke<SkillSummary[]>('skill_list'),
-  read: (id: string) => invoke<SkillDetail>('skill_read', { id }),
+  list: (scope?: string) => invoke<SkillSummary[]>('skill_list', { scope }),
+  read: (id: string, scope?: string) => invoke<SkillDetail>('skill_read', { id, scope }),
+  readForAgent: (id: string, scope?: string) =>
+    invoke<SkillDetail>('agent_skill_read', { id, scope }),
   save: (input: SkillInput) => invoke<SkillSummary>('skill_save', { input }),
   setEnabled: (id: string, enabled: boolean) =>
     invoke<void>('skill_set_enabled', { id, enabled }),

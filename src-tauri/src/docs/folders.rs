@@ -23,8 +23,7 @@ fn system_dir_label(path: &str) -> Option<&'static str> {
         "/life/diary" => Some("日记"),
         "/life/todos" => Some("待办"),
         "/life/contacts" => Some("联系人"),
-        "/life/agent" => Some("AI 工作区"),
-        "/life/.agents" => Some("Agent 配置"),
+        "/life/ai_default" => Some("AI 工作区"),
         _ => None,
     }
 }
@@ -49,6 +48,8 @@ pub fn root_dirs(vfs: &VirtualFs) -> Result<Vec<RootDir>, ToolError> {
            AND i.path LIKE ?1 ESCAPE '\\'
            AND instr(substr(i.path, length(?2) + 1), '/') = 0
            AND i.path != ?2
+           AND i.path NOT GLOB '*/.agent'
+           AND i.path NOT GLOB '*/.lifeos'
          ORDER BY i.path",
     )?;
     let rows = stmt.query_map(params![format!("{}%", cap_gate::escape_like(&prefix)), prefix], |r| {
@@ -71,7 +72,7 @@ pub fn root_dirs(vfs: &VirtualFs) -> Result<Vec<RootDir>, ToolError> {
     dirs.sort_by_key(|d| {
         let rank = if d.path == "/life/notes" {
             0
-        } else if matches!(d.path.as_str(), "/life/diary" | "/life/todos" | "/life/contacts" | "/life/agent" | "/life/.agents")
+        } else if matches!(d.path.as_str(), "/life/diary" | "/life/todos" | "/life/contacts" | "/life/ai_default")
         {
             1
         } else {
@@ -89,7 +90,7 @@ fn default_display_name(path: &str) -> Option<&'static str> {
         "/life/diary" => Some("日记"),
         "/life/todos" => Some("待办"),
         "/life/contacts" => Some("联系人"),
-        "/life/agent" => Some("AI 工作区"),
+        "/life/ai_default" => Some("AI 工作区"),
         _ => None,
     }
 }
@@ -142,6 +143,8 @@ pub fn list(
          WHERE i.kind = 'directory' AND i.deleted = 0
            AND i.path LIKE ?1 ESCAPE '\\'
            AND instr(substr(i.path, length(?2) + 1), '/') = 0
+           AND i.path NOT GLOB '*/.agent'
+           AND i.path NOT GLOB '*/.lifeos'
          ORDER BY i.pinned DESC, i.ctime ASC, i.inode ASC",
     )?;
     let rows = stmt.query_map(params![like, scope_prefix], |r| {
@@ -444,7 +447,9 @@ fn has_child_dirs(conn: &Connection, dir: &str) -> Result<bool, ToolError> {
         "SELECT COUNT(*) FROM inodes
          WHERE kind = 'directory' AND deleted = 0
            AND path LIKE ?1 ESCAPE '\\'
-           AND instr(substr(path, length(?2) + 1), '/') = 0",
+           AND instr(substr(path, length(?2) + 1), '/') = 0
+           AND path NOT GLOB '*/.agent'
+           AND path NOT GLOB '*/.lifeos'",
         params![format!("{}%", cap_gate::escape_like(&prefix)), prefix],
         |r| r.get(0),
     )?;
@@ -584,7 +589,9 @@ fn count_files_under(conn: &Connection, dir: &str) -> Result<i64, ToolError> {
     let like = format!("{}%", cap_gate::escape_like(&format!("{dir}/")));
     Ok(conn.query_row(
         "SELECT COUNT(*) FROM inodes
-         WHERE kind = 'file' AND deleted = 0 AND path LIKE ?1 ESCAPE '\\'",
+         WHERE kind = 'file' AND deleted = 0 AND path LIKE ?1 ESCAPE '\\'
+           AND path NOT GLOB '*/.agent/*' AND path NOT GLOB '*/.lifeos/*'
+           AND path NOT GLOB '*/ai.policy'",
         params![like],
         |r| r.get(0),
     )?)
@@ -597,7 +604,10 @@ fn count_direct_files(conn: &Connection, dir: &str) -> Result<i64, ToolError> {
         "SELECT COUNT(*) FROM inodes
          WHERE kind = 'file' AND deleted = 0
            AND path LIKE ?1 ESCAPE '\\'
-           AND instr(substr(path, length(?2) + 1), '/') = 0",
+           AND instr(substr(path, length(?2) + 1), '/') = 0
+           AND path NOT GLOB '*/.agent/*'
+           AND path NOT GLOB '*/.lifeos/*'
+           AND path NOT GLOB '*/ai.policy'",
         params![like, prefix],
         |r| r.get(0),
     )?)
