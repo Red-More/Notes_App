@@ -9,8 +9,13 @@ import { assetDataUrl } from '../../assets'
 import { clearDraft, loadDraft, saveDraft } from '../../chatDraft'
 import type { AgentProfile } from '../../agent/runtime'
 import { profileFromSettings } from '../../agent/runtime'
-import { AgentRuntime } from '../../agent/AgentRuntime'
-import type { QueueEntry, QueueEntryMode } from '../../agent/AgentRuntime'
+import type {
+  AgentRuntime,
+  QueueEntry,
+  QueueEntryMode,
+  RuntimeSnapshot,
+} from '../../agent/AgentRuntime'
+import { RuntimePool, SessionClosedError } from '../../agent/RuntimePool'
 import { createRuntimeDeps } from '../../agent/runtimeDeps'
 import {
   documentPaths,
@@ -749,8 +754,26 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
   const modelPopoverRef = useRef<HTMLDivElement>(null)
   const convTriggerRef = useRef<HTMLButtonElement>(null)
 
-  // The runtime owns the Agent, the run status, the queue and write ordering.
-  const runtime = useMemo(() => new AgentRuntime({ deps: createRuntimeDeps() }), [])
+  // Session isolation: one runtime per conversation. Only the active session
+  // is rendered; the others keep generating and persisting in the background,
+  // so switching transcripts can never abort a live answer.
+  const pool = useMemo(
+    () =>
+      new RuntimePool(createRuntimeDeps(), {
+        onAdopted: (adopted) => {
+          setConversations((prev) =>
+            prev.some((item) => item.id === adopted.id) ? prev : [adopted, ...prev],
+          )
+        },
+      }),
+    [],
+  )
+  const [runtime, setRuntime] = useState<AgentRuntime>(() => pool.initial())
+  // Mirrors `runtime` synchronously: a late snapshot from the previous session
+  // must not overwrite the transcript that is on screen now.
+  const activeRuntimeRef = useRef(runtime)
+  // Bumped per switch so a slow open cannot land after a newer one finished.
+  const switchSeq = useRef(0)
   const conversationRef = useRef<ChatConversation | null>(null)
   // Mirror of `online` for the snapshot listener (avoids re-subscribing).
   const onlineRef = useRef(navigator.onLine)
@@ -1067,56 +1090,72 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     }
   }, [])
 
-  // The runtime owns every transcript mutation; the page renders its snapshot.
-  useEffect(
-    () =>
-      runtime.subscribe((snapshot) => {
-        setItems(snapshot.items)
-        setStreaming(snapshot.status !== 'idle')
-        setQueueItems(snapshot.queueItems)
-        setStepCount(snapshot.stepCount)
-        setInterrupted(snapshot.interrupted)
-        // The picker and the expanded panel never outlive their trigger.
-        if (snapshot.status === 'idle') setModeMenuOpen(false)
-        if (snapshot.queueItems.length === 0) setQueueExpanded(false)
-        // First queue item ever: explain the two modes once, then stop nagging.
-        if (snapshot.queueItems.length > 0 && !guideShownRef.current) {
-          guideShownRef.current = true
-          try {
-            if (localStorage.getItem(QUEUE_GUIDE_KEY) !== '1') setQueueGuide(true)
-          } catch {
-            setQueueGuide(true)
-          }
+  // The active runtime owns every transcript mutation; the page renders it.
+  const applySnapshot = useCallback((snapshot: RuntimeSnapshot) => {
+    setItems(snapshot.items)
+    setStreaming(snapshot.status !== 'idle')
+    setQueueItems(snapshot.queueItems)
+    setStepCount(snapshot.stepCount)
+    setInterrupted(snapshot.interrupted)
+    // The picker and the expanded panel never outlive their trigger.
+    if (snapshot.status === 'idle') setModeMenuOpen(false)
+    if (snapshot.queueItems.length === 0) setQueueExpanded(false)
+    // First queue item ever: explain the two modes once, then stop nagging.
+    if (snapshot.queueItems.length > 0 && !guideShownRef.current) {
+      guideShownRef.current = true
+      try {
+        if (localStorage.getItem(QUEUE_GUIDE_KEY) !== '1') setQueueGuide(true)
+      } catch {
+        setQueueGuide(true)
+      }
+    }
+    // The first message of a draft adopts the conversation the backend
+    // created atomically with it; mirror it into the list and page state.
+    if (snapshot.conversation) {
+      const adopted = snapshot.conversation
+      if (conversationRef.current?.id !== adopted.id) {
+        conversationRef.current = adopted
+        setConversation(adopted)
+      }
+      setConversations((prev) => {
+        const existing = prev.find((item) => item.id === adopted.id)
+        if (
+          existing &&
+          existing.title === adopted.title &&
+          existing.updatedAt === adopted.updatedAt
+        ) {
+          return prev
         }
-        // The first message of a draft adopts the conversation the backend
-        // created atomically with it; mirror it into the list and page state.
-        if (snapshot.conversation) {
-          const adopted = snapshot.conversation
-          if (conversationRef.current?.id !== adopted.id) {
-            conversationRef.current = adopted
-            setConversation(adopted)
-          }
-          setConversations((prev) => {
-            const existing = prev.find((item) => item.id === adopted.id)
-            if (
-              existing &&
-              existing.title === adopted.title &&
-              existing.updatedAt === adopted.updatedAt
-            ) {
-              return prev
-            }
-            return [adopted, ...prev.filter((item) => item.id !== adopted.id)]
-          })
-        }
-        if (snapshot.error) {
-          setNetworkIssue(
-            snapshot.error.code === 'network' ||
-              snapshot.error.code === 'timeout' ||
-              snapshot.error.code === 'rate_limited',
-          )
-        }
-      }),
-    [runtime],
+        return [adopted, ...prev.filter((item) => item.id !== adopted.id)]
+      })
+    }
+    if (snapshot.error) {
+      setNetworkIssue(
+        snapshot.error.code === 'network' ||
+          snapshot.error.code === 'timeout' ||
+          snapshot.error.code === 'rate_limited',
+      )
+    }
+  }, [])
+
+  useEffect(() => {
+    // `showRuntime` already paints the first frame; here we only follow events.
+    activeRuntimeRef.current = runtime
+    return runtime.subscribe((snapshot) => {
+      // A session switched away from must not paint over the current one.
+      if (activeRuntimeRef.current !== runtime) return
+      applySnapshot(snapshot)
+    })
+  }, [runtime, applySnapshot])
+
+  /** Point the page at a session; other sessions keep their runs untouched. */
+  const showRuntime = useCallback(
+    (next: AgentRuntime) => {
+      activeRuntimeRef.current = next
+      setRuntime(next)
+      applySnapshot(next.snapshot())
+    },
+    [applySnapshot],
   )
 
   // Follow the answer only after the DOM committed and only while the reader
@@ -1204,6 +1243,7 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
       setContextOpenId(null)
       restoreDraft(String(conv.id))
       setLoading(true)
+      const token = (switchSeq.current += 1)
       try {
         // 优先使用会话记录里的模型条目；该条目被删除后回退到当前激活模型。
         const current = settingsRef.current
@@ -1211,23 +1251,29 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
           ? profileFromSettings(current, conv.provider, conv.model)
           : null
         const profile = baseProfile ? await withCapabilities(baseProfile) : null
+        if (token !== switchSeq.current) return true
         if (profile) setContextWindow(profile.contextWindow ?? 128000)
-        // Loading the transcript, building the Agent and closing out a previous
-        // run all happen inside the runtime.
-        await runtime.open(conv, profile)
-        setItems(runtime.snapshot().items)
+        // The pool attaches to a live session instead of rebuilding it, so a
+        // generation still running in this conversation is never aborted.
+        const next = await pool.open(conv, profile)
+        if (token !== switchSeq.current) return true
+        showRuntime(next)
         return true
       } catch (e) {
+        // Deleted or torn down while loading: nothing to show, nothing to say.
+        if (e instanceof SessionClosedError) return false
         toast(friendlyError(e))
         return false
       } finally {
-        setLoading(false)
-        stickToBottom.current = true
-        scrollToBottom(true)
-        setScrollBottomVisible(false)
+        if (token === switchSeq.current) {
+          setLoading(false)
+          stickToBottom.current = true
+          scrollToBottom(true)
+          setScrollBottomVisible(false)
+        }
       }
     },
-    [restoreDraft, runtime, scrollToBottom],
+    [restoreDraft, pool, showRuntime, scrollToBottom],
   )
 
   /** Prepare an unsaved chat: no conversation row is written until send. */
@@ -1241,17 +1287,23 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     setContextOpenId(null)
     restoreDraft('new')
     setLoading(true)
+    const token = (switchSeq.current += 1)
     try {
       const current = settingsRef.current
       const target = current ? profileFromSettings(current, undefined, undefined) : null
       const profile = target ? await withCapabilities(target) : null
+      if (token !== switchSeq.current) return
       if (profile) setContextWindow(profile.contextWindow ?? 128000)
-      await runtime.openDraft(profile)
-      setItems(runtime.snapshot().items)
+      const next = await pool.openDraft(profile)
+      if (token !== switchSeq.current) return
+      showRuntime(next)
+    } catch (e) {
+      // Deleted or torn down while loading: nothing to show, nothing to say.
+      if (!(e instanceof SessionClosedError)) throw e
     } finally {
-      setLoading(false)
+      if (token === switchSeq.current) setLoading(false)
     }
-  }, [restoreDraft, runtime])
+  }, [restoreDraft, pool, showRuntime])
 
   /** Switch the active model in place; an open conversation is rebound too. */
   const switchModel = useCallback(
@@ -1359,8 +1411,8 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     void bootstrap()
   }, [bootstrap])
 
-  // 页面被编辑器/文件夹浮层替换时会卸载：runtime 会先等取消收尾落库再退订。
-  useEffect(() => () => void runtime.dispose(), [runtime])
+  // 页面被编辑器/文件夹浮层替换时会卸载：会话池会先等取消收尾落库再退订。
+  useEffect(() => () => void pool.disposeAll(), [pool])
 
   // 页面激活时刷新配置；模型变化则重建 Agent（历史保持）。
   // 只依赖 isActive：effect 内写回 settings 的新对象不会再触发自身，避免无限 IPC 循环。
@@ -1376,9 +1428,11 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
         // Rebuild on every activation so per-model capability edits are applied.
         const conv = conversationRef.current
         if (!next.activeId && next.models.length === 0) {
-          await runtime.dispose()
+          await pool.disposeAll()
           return
         }
+        // A live session is re-attached by the pool, never rebuilt, so coming
+        // back to the chat page no longer cancels a running answer.
         if (conv) await openConversation(conv)
         else await openDraft()
       } catch (e) {
@@ -1388,7 +1442,7 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     return () => {
       disposed = true
     }
-  }, [isActive, openConversation, openDraft, runtime])
+  }, [isActive, openConversation, openDraft, pool])
 
   const ensureTitle = useCallback(async (text: string) => {
     const conv = conversationRef.current
@@ -1759,6 +1813,9 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
   const removeConversation = useCallback(
     async (id: number) => {
       try {
+        // Deleting is an explicit stop: close out the run (persisting its
+        // partial answer) before the conversation rows disappear.
+        await pool.close(id)
         await chatApi.remove(id)
         const rest = conversations.filter((c) => c.id !== id)
         setConversations(rest)
@@ -1770,7 +1827,7 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
         toast(friendlyError(e))
       }
     },
-    [conversations, openConversation, openDraft],
+    [conversations, openConversation, openDraft, pool],
   )
 
   const saveRename = useCallback(async () => {
