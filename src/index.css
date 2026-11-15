@@ -4524,10 +4524,12 @@ body.split-resizing {
   animation: pop-in 0.15s ease;
 }
 
+/* Floating "back to bottom": pinned to the transcript viewport's bottom-right,
+   above the composer/queue bar, and clear of the left minimap rail. */
 .chat-scroll-bottom {
   position: absolute;
-  right: 18px;
-  bottom: calc(var(--tabbar-height) + var(--nav-clearance) + 62px);
+  right: calc(14px + env(safe-area-inset-right, 0px));
+  bottom: 14px;
   width: 36px;
   height: 36px;
   border-radius: 50%;
@@ -4537,7 +4539,9 @@ body.split-resizing {
   box-shadow: var(--shadow);
   font-size: 18px;
   line-height: 1;
-  z-index: 2;
+  /* Above messages, the rail (4/6), the tabbar (30) and the composer edge;
+     popover layers (55+) still win. */
+  z-index: 40;
 }
 
 /* ---- Agent trace groups ---- */

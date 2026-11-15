@@ -813,6 +813,14 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
     el.scrollTop = el.scrollHeight
   }, [])
 
+  /** The floating button glides along the smooth scroll; motion prefs win. */
+  const scrollToBottomSmooth = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    el.scrollTo({ top: el.scrollHeight, behavior: reduce ? 'auto' : 'smooth' })
+  }, [])
+
   /** The current turn is the last one whose bubble passed the top line. */
   const syncActiveTurn = useCallback(() => {
     const el = scrollRef.current
@@ -2385,18 +2393,20 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
             </div>
           </div>
         )}
-      </div>
 
-      {scrollBottomVisible && (
-        <button
-          type="button"
-          className="chat-scroll-bottom"
-          aria-label="回到底部"
-          onClick={() => scrollToBottom(true)}
-        >
-          ↓
-        </button>
-      )}
+        {/* Anchored to the transcript viewport: the composer, queue bar and
+            tabbar live outside it, so they can never cover the button. */}
+        {scrollBottomVisible && (
+          <button
+            type="button"
+            className="chat-scroll-bottom"
+            aria-label="回到底部"
+            onClick={scrollToBottomSmooth}
+          >
+            ↓
+          </button>
+        )}
+      </div>
 
       <div className={`chat-composer ${expanded ? 'expanded' : ''}`}>
         <QueueStatusBar
