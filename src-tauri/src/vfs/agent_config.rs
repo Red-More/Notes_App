@@ -60,7 +60,7 @@ pub fn load_all(conn: &Connection) -> Result<BTreeMap<String, AgentConfig>, Tool
         "SELECT i.path, COALESCE(b.content, '')
          FROM inodes i
          JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
-         WHERE i.kind = 'file' AND i.deleted = 0
+         WHERE i.kind = 'file' AND i.status = 'active'
            AND i.path GLOB ?1",
     )?;
     let rows = stmt.query_map([pattern], |row| {

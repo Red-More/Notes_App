@@ -3,14 +3,25 @@
 //! 文档模型规定每个 Markdown 文件头部可带 `--- ... ---`。本模块负责：
 //! - 把任意 frontmatter 解析成 `DocumentParts`（kind/title/时间戳 + 通用字段 + 正文）；
 //! - 把结构化字段重新组装成 Markdown；
-//! - 把 kind/title/status/due/tags 同步到 `meta` 表，其余字段进 `meta.extra` JSON。
+//! - 为列表/搜索提供「从正文推导 kind/title」的纯函数。
+//!
+//! Frontmatter 只存在于 Markdown 正文里（YAML），数据库不建镜像表：
+//! 基础属性（id/路径/时间/哈希/状态）在 `inodes`，frontmatter 随文件走。
+//!
+//! # Ownership
+//!
+//! Only `created_at` and `updated_at` are system-owned: they are validated and
+//! rewritten on every write (`created_at` from `inodes.ctime`, `updated_at`
+//! from the clock). Every other key, including `kind`, `title`, `tags` and any
+//! user-defined field, is owned by the user: the system neither validates nor
+//! rewrites it. [`DocumentParts::fields`] is the pass-through view reserved for
+//! the future tag system; no field schema is enforced today.
 //!
 //! 不引入 YAML 依赖：只支持单行 `key: value`、引号字符串、布尔/数字与内联数组，
-//! 足以覆盖当前全部文档类型，同时保持 `extra` 可扩展。
+//! 足以覆盖当前全部文档类型，同时保持字段可扩展。
 
 use std::collections::BTreeMap;
 
-use rusqlite::{params, Connection};
 use serde_json::Value;
 
 /// 解析后的文档结构。
@@ -23,6 +34,9 @@ pub struct DocumentParts {
     /// 规范化后的逗号分隔标签（合并 tags 数组与单值 tag 字段）。
     pub tags: Option<String>,
     /// frontmatter 中除 kind/title/created_at/updated_at 外的全部字段。
+    ///
+    /// User-owned pass-through data: used verbatim by the UI/Agent and reserved
+    /// as the storage of the future tag system (no schema is enforced).
     pub fields: BTreeMap<String, Value>,
     /// 正文（不含 frontmatter）。
     pub body: String,
@@ -97,12 +111,10 @@ pub fn parse_document(content: &str) -> DocumentParts {
     parts
 }
 
-/// 文件是否已经带有可解析的 frontmatter。
-pub fn has_frontmatter(content: &str) -> bool {
-    parse_document(content).has_frontmatter
-}
-
 /// 把结构化字段组装成 Markdown。`body` 是纯正文。
+///
+/// Creation only: every key here comes from user input (title/kind/fields), so
+/// re-rendering an existing document must use [`rewrite_document`] instead.
 pub fn compose(
     kind: &str,
     title: &str,
@@ -133,11 +145,206 @@ pub fn compose(
     out
 }
 
-/// 自动补 frontmatter（仅给 `fs_write` 的通用路径使用）。
-pub fn prepend(path: &str, content: &str, now: &str) -> String {
-    let kind = infer_kind(path);
-    let title = infer_title(path, content);
-    compose(kind, &title, now, now, &BTreeMap::new(), content)
+/// Whether a key is a system-owned date (`created` / `updated` are accepted as
+/// aliases so user variants are normalized instead of duplicated).
+fn is_date_key(key: &str) -> bool {
+    matches!(key, "created_at" | "created" | "updated_at" | "updated")
+}
+
+/// Refresh the two system-owned dates and leave every other byte intact.
+pub fn sync_system_dates(content: &str, created_at: &str, updated_at: &str) -> String {
+    rewrite_document(content, None, &BTreeMap::new(), created_at, updated_at)
+}
+
+/// Rewrite selected frontmatter keys and/or the body while preserving every
+/// other line (comments, ordering, quoting, unknown keys and the body).
+///
+/// `updates` are user-owned attributes: `Value::Null` removes the key, any
+/// other value replaces only that line. The two system-owned dates always come
+/// from the arguments, so a caller edit to them never takes effect.
+///
+/// This single-writer entry point is where the future tag system will hook in:
+/// user fields already round-trip untouched, so adding a schema later does not
+/// change storage.
+pub fn rewrite_document(
+    content: &str,
+    body: Option<&str>,
+    updates: &BTreeMap<String, Value>,
+    created_at: &str,
+    updated_at: &str,
+) -> String {
+    let updates: BTreeMap<String, Value> = updates
+        .iter()
+        .filter(|(key, _)| is_safe_key(key) && !is_date_key(key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+
+    match split_frontmatter(content) {
+        Some(block) => {
+            let header = render_header(&block.lines, &updates, created_at, updated_at);
+            let mut out = String::with_capacity(content.len() + 96);
+            out.push_str(block.bom);
+            out.push_str(block.open);
+            for line in header {
+                out.push_str(&line);
+                out.push_str(block.eol);
+            }
+            out.push_str(block.close);
+            let Some(new_body) = body else {
+                out.push_str(block.rest);
+                return out;
+            };
+            if !block.close.ends_with('\n') {
+                out.push_str(block.eol);
+            }
+            // Keep the blank line that separates the closing fence from the body.
+            if block.rest.starts_with("\r\n") {
+                out.push_str("\r\n");
+            } else if block.rest.starts_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(new_body);
+            out
+        }
+        None => {
+            // No frontmatter yet: create one holding only the system dates plus
+            // the caller's explicit updates. The original content is the body.
+            let bom = if content.starts_with('\u{feff}') { "\u{feff}" } else { "" };
+            let source = content.strip_prefix('\u{feff}').unwrap_or(content);
+            let new_body = body.unwrap_or(source);
+            let header = render_header(&[], &updates, created_at, updated_at);
+            let mut out = String::with_capacity(content.len() + 96);
+            out.push_str(bom);
+            out.push_str("---\n");
+            for line in header {
+                out.push_str(&line);
+                out.push('\n');
+            }
+            out.push_str("---\n");
+            if !new_body.is_empty() {
+                out.push('\n');
+                out.push_str(new_body);
+            }
+            out
+        }
+    }
+}
+
+/// Line-oriented view of an existing `--- ... ---` block. Every slice borrows
+/// the original document so untouched lines can be replayed byte-for-byte.
+struct FrontmatterBlock<'a> {
+    /// Leading BOM, emptied when the document has none.
+    bom: &'a str,
+    /// Opening fence line (including its line ending).
+    open: &'a str,
+    /// Line ending used for rewritten lines.
+    eol: &'a str,
+    /// Raw header lines (including their line endings).
+    lines: Vec<&'a str>,
+    /// Closing fence line (including its line ending).
+    close: &'a str,
+    /// Everything after the closing fence line.
+    rest: &'a str,
+}
+
+fn split_frontmatter(content: &str) -> Option<FrontmatterBlock<'_>> {
+    let (bom, text) = match content.strip_prefix('\u{feff}') {
+        Some(rest) => ("\u{feff}", rest),
+        None => ("", content),
+    };
+    let mut lines = text.split_inclusive('\n');
+    let open = lines.next()?;
+    if open.trim_end_matches(['\r', '\n']).trim() != "---" {
+        return None;
+    }
+    let eol = if open.ends_with("\r\n") { "\r\n" } else { "\n" };
+    let mut offset = open.len();
+    let mut header = Vec::new();
+    for line in lines {
+        offset += line.len();
+        if line.trim_end_matches(['\r', '\n']).trim() == "---" {
+            return Some(FrontmatterBlock {
+                bom,
+                open,
+                eol,
+                lines: header,
+                close: line,
+                rest: &text[offset..],
+            });
+        }
+        header.push(line);
+    }
+    None
+}
+
+/// Render the header lines that must be written: untouched lines are replayed,
+/// user updates replace only their own key, and the system dates are always
+/// emitted (once, canonical key name).
+fn render_header(
+    lines: &[&str],
+    updates: &BTreeMap<String, Value>,
+    created_at: &str,
+    updated_at: &str,
+) -> Vec<String> {
+    let mut rendered = Vec::with_capacity(lines.len() + 2 + updates.len());
+    let mut applied: Vec<&str> = Vec::new();
+    let mut created = false;
+    let mut updated = false;
+    for line in lines {
+        let text = line.trim_end_matches(['\r', '\n']);
+        match header_key(text) {
+            Some(key) if key == "created_at" || key == "created" => {
+                if !created {
+                    rendered.push(format!("created_at: {}", yaml_scalar(created_at)));
+                    created = true;
+                }
+            }
+            Some(key) if key == "updated_at" || key == "updated" => {
+                if !updated {
+                    rendered.push(format!("updated_at: {}", yaml_scalar(updated_at)));
+                    updated = true;
+                }
+            }
+            Some(key) => {
+                applied.push(key);
+                match updates.get(key) {
+                    Some(Value::Null) => {}
+                    Some(value) => rendered.push(format!("{key}: {}", yaml_value(value))),
+                    None => rendered.push(text.to_string()),
+                }
+            }
+            None => rendered.push(text.to_string()),
+        }
+    }
+    if !created {
+        rendered.push(format!("created_at: {}", yaml_scalar(created_at)));
+    }
+    if !updated {
+        rendered.push(format!("updated_at: {}", yaml_scalar(updated_at)));
+    }
+    for (key, value) in updates {
+        if value.is_null() || applied.contains(&key.as_str()) {
+            continue;
+        }
+        rendered.push(format!("{key}: {}", yaml_value(value)));
+    }
+    rendered
+}
+
+/// Top-level `key:` of a frontmatter line. Comments, blank lines and nested
+/// (indented) keys return `None`, so they are never mistaken for user fields.
+fn header_key(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    let nested = line.starts_with(' ') || line.starts_with('\t');
+    if trimmed.is_empty() || trimmed.starts_with('#') || nested {
+        return None;
+    }
+    let key = trimmed.split_once(':')?.0.trim();
+    if is_safe_key(key) {
+        Some(key)
+    } else {
+        None
+    }
 }
 
 /// 基于路径与正文推断文档类型，作为 frontmatter 缺省值。
@@ -158,50 +365,64 @@ pub fn is_versioned(kind: &str) -> bool {
     matches!(kind, "note" | "diary")
 }
 
-/// Same as the previous whole-document entry point but reuses an already
-/// parsed document, so callers that also refresh other mirrors can parse the
-/// rewritten markdown only once.
-pub fn upsert_parts(
-    conn: &Connection,
-    inode: i64,
-    path: &str,
-    parts: &DocumentParts,
-) -> rusqlite::Result<()> {
-    let kind = parts
-        .kind
-        .clone()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| infer_kind(path).to_string());
-    let title = parts
+/// Extensions stored and rendered as Markdown; everything else is raw text.
+///
+/// Callers must use the **persisted** `inodes.ext`: a base name may contain dots
+/// (a contact is `Dr. Smith-c_ab12.md`), so splitting the path would mislead.
+pub fn is_markdown_ext(ext: &str) -> bool {
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "md" | "markdown" | "mdown" | "mkd" | "mkdn" | "mdx"
+    )
+}
+
+/// File name without its persisted extension.
+///
+/// The stored extension decides the split, so an extension-less `v1.2` keeps its
+/// dot while `archive.tar.gz` loses all three segments. This is the same rule as
+/// `docs::util::stem`, so the title never disagrees with the file name.
+pub fn path_stem(path: &str, ext: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    if ext.is_empty() {
+        return name.to_string();
+    }
+    let suffix_len = ext.len() + 1;
+    if name.len() > suffix_len {
+        let (base, suffix) = name.split_at(name.len() - suffix_len);
+        if suffix.starts_with('.') && suffix[1..].eq_ignore_ascii_case(ext) {
+            return base.to_string();
+        }
+    }
+    name.to_string()
+}
+
+/// Document title derived from frontmatter, falling back to the file name.
+pub fn doc_title(parts: &DocumentParts, path: &str, ext: &str) -> String {
+    parts
         .title
         .clone()
-        .unwrap_or_else(|| infer_title(path, &parts.body));
-    // Todo files may store completion as Markdown checkboxes (Agent edits) or
-    // as a `completed` field (UI toggle). Frontmatter wins; otherwise derive
-    // the status from the body so `meta.status` stays in sync either way.
-    let status = status_from_fields(&parts.fields).or_else(|| {
-        if kind == "todo" {
-            status_from_checkboxes(&parts.body)
-        } else {
-            None
-        }
-    });
-    let due = field_string(&parts.fields, "dueDate").or_else(|| field_string(&parts.fields, "due"));
-    let extra = serde_json::to_string(&parts.fields).unwrap_or_else(|_| "{}".to_string());
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| infer_title(path, "", ext))
+}
 
-    conn.execute(
-        "INSERT INTO meta (inode, kind, title, status, due, tags, extra)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT(inode) DO UPDATE SET
-             kind = excluded.kind,
-             title = excluded.title,
-             status = excluded.status,
-             due = excluded.due,
-             tags = excluded.tags,
-             extra = excluded.extra",
-        params![inode, kind, title, status, due, parts.tags, extra],
-    )?;
-    Ok(())
+/// Document kind derived from frontmatter, falling back to the path root.
+pub fn doc_kind(parts: &DocumentParts, path: &str) -> String {
+    parts
+        .kind
+        .clone()
+        .filter(|kind| !kind.is_empty())
+        .unwrap_or_else(|| infer_kind(path).to_string())
+}
+
+/// Derived todo status: the frontmatter field wins, otherwise the first
+/// Markdown checkbox in the body decides.
+pub fn doc_status(parts: &DocumentParts) -> Option<String> {
+    status_from_fields(&parts.fields).or_else(|| status_from_checkboxes(&parts.body))
+}
+
+/// Due date written by the UI (`dueDate`) or by an Agent (`due`).
+pub fn doc_due(parts: &DocumentParts) -> Option<String> {
+    field_string(&parts.fields, "dueDate").or_else(|| field_string(&parts.fields, "due"))
 }
 
 /// 从字段 map 里取字符串值（数字/布尔会转成字符串）。
@@ -307,7 +528,11 @@ fn status_from_checkboxes(body: &str) -> Option<String> {
 }
 
 /// 标题优先取正文第一个 Markdown 标题，否则退回文件名（不含扩展名）。
-fn infer_title(path: &str, content: &str) -> String {
+///
+/// The *persisted* extension decides the split: a document without one keeps
+/// every dot of its name (`v1.2` stays `v1.2`), while `archive.tar.gz` loses the
+/// whole multi-part extension.
+fn infer_title(path: &str, content: &str, ext: &str) -> String {
     for line in content.lines() {
         let line = line.trim();
         if let Some(heading) = line.strip_prefix('#') {
@@ -317,12 +542,12 @@ fn infer_title(path: &str, content: &str) -> String {
             }
         }
     }
-    std::path::Path::new(path)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .filter(|stem| !stem.is_empty())
-        .unwrap_or("未命名")
-        .to_string()
+    let stem = path_stem(path, ext);
+    if stem.is_empty() {
+        "未命名".to_string()
+    } else {
+        stem
+    }
 }
 
 fn non_empty_string(value: &Value) -> Option<String> {
@@ -357,8 +582,7 @@ fn is_safe_key(key: &str) -> bool {
     !key.is_empty()
         && key
             .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
-}
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))}
 
 fn parse_value(raw: &str) -> Value {
     let raw = raw.trim();
@@ -448,4 +672,27 @@ fn unescape_double(value: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path_stem;
+
+    #[test]
+    fn stem_uses_the_persisted_extension() {
+        // A multi-part extension is removed whole.
+        assert_eq!(path_stem("/life/notes/archive.tar.gz", "tar.gz"), "archive");
+        assert_eq!(path_stem("/life/notes/report.md", "md"), "report");
+        // Case of the stored extension does not matter.
+        assert_eq!(path_stem("/life/notes/report.MD", "md"), "report");
+        // No extension: every dot belongs to the name.
+        assert_eq!(path_stem("/life/notes/v1.2", ""), "v1.2");
+        // A suffix that is not the stored extension stays in the name.
+        assert_eq!(path_stem("/life/notes/notes.2026", "md"), "notes.2026");
+        // A contact keeps the dots of its name and only loses `.md`.
+        assert_eq!(
+            path_stem("/life/contacts/Dr. Smith-c_ab12.md", "md"),
+            "Dr. Smith-c_ab12"
+        );
+    }
 }

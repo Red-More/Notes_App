@@ -335,7 +335,7 @@ fn skill_rows(conn: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
         "SELECT i.path, COALESCE(b.content, '')
          FROM inodes i
          JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
-         WHERE i.kind = 'file' AND i.deleted = 0
+         WHERE i.kind = 'file' AND i.status = 'active'
            AND i.path GLOB '*/.agent/skills/*/SKILL.md'
          ORDER BY i.path ASC",
     )?;
@@ -492,7 +492,7 @@ fn resolve_skill_scope(conn: &Connection, raw: &str) -> Result<String, ToolError
     let path = cap_gate::normalize_path(raw)?;
     let kind: Option<String> = conn
         .query_row(
-            "SELECT kind FROM inodes WHERE path = ?1 AND deleted = 0",
+            "SELECT kind FROM inodes WHERE path = ?1 AND status = 'active'",
             params![path],
             |row| row.get(0),
         )
@@ -512,7 +512,7 @@ fn read_skill_content(conn: &Connection, path: &str) -> Result<Option<String>, T
         "SELECT COALESCE(b.content, '')
          FROM inodes i
          JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
-         WHERE i.path = ?1 AND i.kind = 'file' AND i.deleted = 0",
+         WHERE i.path = ?1 AND i.kind = 'file' AND i.status = 'active'",
         params![path],
         |row| row.get(0),
     )
@@ -525,7 +525,7 @@ fn draft_rows(conn: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
         "SELECT i.path, COALESCE(b.content, '')
          FROM inodes i
          JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
-         WHERE i.kind = 'file' AND i.deleted = 0
+         WHERE i.kind = 'file' AND i.status = 'active'
            AND i.path GLOB '/life/ai_default/skills-drafts/*/SKILL.md'
          ORDER BY i.path ASC",
     )?;
@@ -571,7 +571,7 @@ pub fn save(vfs: &mut VirtualFs, input: SkillInput) -> Result<SkillSummary, Tool
             "SELECT COALESCE(b.content, ''), i.head_rev
              FROM inodes i
              JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
-             WHERE i.path = ?1 AND i.kind = 'file' AND i.deleted = 0",
+             WHERE i.path = ?1 AND i.kind = 'file' AND i.status = 'active'",
             params![path],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -593,7 +593,6 @@ pub fn save(vfs: &mut VirtualFs, input: SkillInput) -> Result<SkillSummary, Tool
                 path: path.clone(),
                 content,
                 create_parents: Some(true),
-                auto_frontmatter: Some(false),
                 source: WriteSource::User,
             })?;
         }
@@ -682,8 +681,8 @@ pub fn ensure_workspace(vfs: &VirtualFs) -> Result<(), ToolError> {
             params![path],
         )?;
         conn.execute(
-            "UPDATE inodes SET deleted = 0, deleted_at = NULL
-             WHERE path = ?1 AND kind = 'directory' AND deleted = 1",
+            "UPDATE inodes SET status = 'active', deleted_at = NULL
+             WHERE path = ?1 AND kind = 'directory' AND status = 'deleted'",
             params![path],
         )?;
     }
@@ -719,7 +718,7 @@ pub fn read_draft(vfs: &VirtualFs, id: &str) -> Result<SkillDetail, ToolError> {
             "SELECT COALESCE(b.content, '')
              FROM inodes i
              JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
-             WHERE i.path = ?1 AND i.kind = 'file' AND i.deleted = 0",
+             WHERE i.path = ?1 AND i.kind = 'file' AND i.status = 'active'",
             params![draft_path(&id)],
             |row| row.get(0),
         )
@@ -809,7 +808,7 @@ pub fn set_enabled(vfs: &VirtualFs, id: &str, enabled: bool) -> Result<(), ToolE
     let pattern = format!("*/.agent/skills/{id}/{SKILL_FILE}");
     let exists: i64 = vfs.conn().query_row(
         "SELECT COUNT(*) FROM inodes
-         WHERE path GLOB ?1 AND kind = 'file' AND deleted = 0",
+         WHERE path GLOB ?1 AND kind = 'file' AND status = 'active'",
         params![pattern],
         |row| row.get(0),
     )?;

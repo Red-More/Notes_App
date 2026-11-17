@@ -99,7 +99,7 @@ fn ensure_file<T: Serialize>(
     config: &T,
 ) -> Result<(), ToolError> {
     let exists: i64 = vfs.conn().query_row(
-        "SELECT COUNT(*) FROM inodes WHERE path = ?1 AND kind = 'file' AND deleted = 0",
+        "SELECT COUNT(*) FROM inodes WHERE path = ?1 AND kind = 'file' AND status = 'active'",
         params![path],
         |row| row.get(0),
     )?;
@@ -119,8 +119,8 @@ pub fn list_visibility(vfs: &VirtualFs) -> Result<Vec<VisibilityView>, ToolError
     let mut stmt = conn.prepare(
         "SELECT i.path, COALESCE(m.title, '')
          FROM inodes i
-         LEFT JOIN meta m ON m.inode = i.inode
-         WHERE i.kind = 'directory' AND i.deleted = 0
+         LEFT JOIN dir_titles m ON m.inode = i.inode
+         WHERE i.kind = 'directory' AND i.status = 'active'
            AND i.path NOT GLOB '*/.agent' AND i.path NOT GLOB '*/.agent/*'
            AND i.path NOT GLOB '*/.lifeos' AND i.path NOT GLOB '*/.lifeos/*'
          ORDER BY i.path ASC",
@@ -263,7 +263,7 @@ fn normalize_scope(raw: &str) -> Result<String, ToolError> {
 fn ensure_directory(conn: &Connection, path: &str) -> Result<(), ToolError> {
     let kind: Option<String> = conn
         .query_row(
-            "SELECT kind FROM inodes WHERE path = ?1 AND deleted = 0",
+            "SELECT kind FROM inodes WHERE path = ?1 AND status = 'active'",
             params![path],
             |row| row.get(0),
         )
@@ -280,8 +280,8 @@ fn folder_title(conn: &Connection, path: &str) -> Result<String, ToolError> {
     Ok(conn
         .query_row(
             "SELECT COALESCE(m.title, '')
-             FROM inodes i LEFT JOIN meta m ON m.inode = i.inode
-             WHERE i.path = ?1 AND i.kind = 'directory' AND i.deleted = 0",
+             FROM inodes i LEFT JOIN dir_titles m ON m.inode = i.inode
+             WHERE i.path = ?1 AND i.kind = 'directory' AND i.status = 'active'",
             params![path],
             |row| row.get::<_, String>(0),
         )

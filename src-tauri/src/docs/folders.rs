@@ -1,6 +1,6 @@
 //! 文件夹：`/life/notes` 下的目录即文件夹。
 //!
-//! 显示名存 `meta.title`，路径由安全 slug 生成并保持稳定；重命名只改显示名，
+//! 显示名存 `dir_titles`，路径由安全 slug 生成并保持稳定；重命名只改显示名，
 //! 不移动文件，因此笔记 id / rev 都不会受影响。
 //! `list` 只返回笔记文件夹（`/life/notes` 的直接子目录）；日记、待办等系统
 //! 目录属于固定页签，不在文件夹管理范围内。
@@ -14,7 +14,7 @@ use crate::vfs::error::ToolError;
 use crate::vfs::{cap_gate, reserved, VirtualFs};
 
 use super::types::{Folder, FolderCrumb, FolderStats};
-use super::util::{basename, now, parent_dir, safe_segment, unique_dir_path, unique_file_path};
+use super::util::{basename, now, parent_dir, safe_segment, stem, unique_dir_path, unique_file_path};
 
 const MAX_FOLDER_NAME_CHARS: usize = 50;
 
@@ -45,8 +45,8 @@ pub fn root_dirs(vfs: &VirtualFs) -> Result<Vec<RootDir>, ToolError> {
     let mut stmt = conn.prepare(
         "SELECT i.path, COALESCE(m.title, '')
          FROM inodes i
-         LEFT JOIN meta m ON m.inode = i.inode
-         WHERE i.kind = 'directory' AND i.deleted = 0
+         LEFT JOIN dir_titles m ON m.inode = i.inode
+         WHERE i.kind = 'directory' AND i.status = 'active'
            AND i.path LIKE ?1 ESCAPE '\\'
            AND instr(substr(i.path, length(?2) + 1), '/') = 0
            AND i.path != ?2
@@ -85,7 +85,7 @@ pub fn root_dirs(vfs: &VirtualFs) -> Result<Vec<RootDir>, ToolError> {
     Ok(dirs)
 }
 
-/// Chinese fallback for system folders whose `meta.title` is missing.
+/// Chinese fallback for system folders whose `dir_titles` row is missing.
 fn default_display_name(path: &str) -> Option<&'static str> {
     match path {
         "/life/notes" => Some("默认"),
@@ -152,7 +152,7 @@ pub fn list_scoped(
     let sql = format!(
         "SELECT i.inode, i.path, i.pinned, i.ctime
          FROM inodes i
-         WHERE i.kind = 'directory' AND i.deleted = 0
+         WHERE i.kind = 'directory' AND i.status = 'active'
            AND i.path LIKE ?1 ESCAPE '\\'
            AND instr(substr(i.path, length(?2) + 1), '/') = 0{system_filter}
          ORDER BY i.pinned DESC, i.ctime ASC, i.inode ASC"
@@ -280,7 +280,7 @@ pub fn create_scoped(
     }
 
     let tx = vfs.conn_mut().transaction()?;
-    let segment = safe_segment(&name, "folder");
+    let segment = safe_segment(&name, "folder", false);
     let path = unique_dir_path(&tx, &parent_path, &segment)?;
     let now = now(&tx)?;
     tx.execute(
@@ -290,8 +290,7 @@ pub fn create_scoped(
     )?;
     let id = tx.last_insert_rowid();
     tx.execute(
-        "INSERT INTO meta (inode, kind, title, status, due, tags, extra)
-         VALUES (?1, 'folder', ?2, NULL, NULL, NULL, '{}')",
+        "INSERT INTO dir_titles (inode, title) VALUES (?1, ?2)",
         params![id, name],
     )?;
     tx.commit()?;
@@ -308,7 +307,7 @@ pub fn create_scoped(
     })
 }
 
-/// 重命名真实文件夹（仅改 meta.title）。
+/// 重命名真实文件夹（仅改 dir_titles）。
 pub fn rename(vfs: &mut VirtualFs, id: i64, name: &str) -> Result<(), ToolError> {
     let name = validate_name(name)?;
     let conn = vfs.conn();
@@ -325,7 +324,7 @@ pub fn rename(vfs: &mut VirtualFs, id: i64, name: &str) -> Result<(), ToolError>
     Ok(())
 }
 
-/// 重命名默认文件夹（`/life/notes` 的 meta.title）。
+/// 重命名默认文件夹（`/life/notes` 的 dir_titles）。
 pub fn rename_default(vfs: &mut VirtualFs, name: &str) -> Result<(), ToolError> {
     let name = validate_name(name)?;
     ensure_notes_root(vfs.conn())?;
@@ -360,12 +359,12 @@ pub fn delete(vfs: &mut VirtualFs, id: i64) -> Result<(), ToolError> {
         let tx = vfs.conn_mut().transaction()?;
         // Recursive delete: every document in the subtree returns to the default
         // root, then the whole directory subtree is removed in one statement.
-        let files: Vec<String> = {
+        let files: Vec<(String, String)> = {
             let mut stmt = tx.prepare(
-                "SELECT path FROM inodes
-                 WHERE kind = 'file' AND deleted = 0 AND path LIKE ?1 ESCAPE '\\'",
+                "SELECT path, ext FROM inodes
+                 WHERE kind = 'file' AND status = 'active' AND path LIKE ?1 ESCAPE '\\'",
             )?;
-            let rows = stmt.query_map(params![like], |r| r.get::<_, String>(0))?;
+            let rows = stmt.query_map(params![like], |r| Ok((r.get(0)?, r.get(1)?)))?;
             let mut files = Vec::new();
             for row in rows {
                 files.push(row?);
@@ -373,9 +372,9 @@ pub fn delete(vfs: &mut VirtualFs, id: i64) -> Result<(), ToolError> {
             files
         };
 
-        for file in files {
-            let stem = basename(&file).to_string();
-            let new_path = unique_file_path(&tx, NOTES_ROOT, &stem)?;
+        for (file, ext) in files {
+            let base = stem(&file, &ext).to_string();
+            let new_path = unique_file_path(&tx, NOTES_ROOT, &base, &ext)?;
             tx.execute(
                 "UPDATE inodes SET path = ?1, mtime = datetime('now','localtime')
                  WHERE path = ?2 AND kind = 'file'",
@@ -399,7 +398,7 @@ pub fn delete(vfs: &mut VirtualFs, id: i64) -> Result<(), ToolError> {
     let file_ids: Vec<i64> = {
         let mut stmt = tx.prepare(
             "SELECT inode FROM inodes
-             WHERE kind = 'file' AND deleted = 0 AND path LIKE ?1 ESCAPE '\\'",
+             WHERE kind = 'file' AND status = 'active' AND path LIKE ?1 ESCAPE '\\'",
         )?;
         let rows = stmt.query_map(params![like], |r| r.get::<_, i64>(0))?;
         let mut ids = Vec::new();
@@ -410,8 +409,8 @@ pub fn delete(vfs: &mut VirtualFs, id: i64) -> Result<(), ToolError> {
     };
     for id in &file_ids {
         tx.execute(
-            "UPDATE inodes SET deleted = 1, deleted_at = ?1, mtime = ?1
-             WHERE inode = ?2 AND kind = 'file' AND deleted = 0",
+            "UPDATE inodes SET status = 'deleted', deleted_at = ?1, mtime = ?1
+             WHERE inode = ?2 AND kind = 'file' AND status = 'active'",
             params![now, id],
         )?;
         // Trash content must not be searchable; the index row returns on restore.
@@ -473,7 +472,7 @@ pub fn path(
         let row: Option<i64> = conn
             .query_row(
                 "SELECT inode FROM inodes
-                 WHERE path = ?1 AND kind = 'directory' AND deleted = 0",
+                 WHERE path = ?1 AND kind = 'directory' AND status = 'active'",
                 params![current],
                 |r| r.get(0),
             )
@@ -503,7 +502,7 @@ fn resolve_root(
     }
     let kind: Option<String> = conn
         .query_row(
-            "SELECT kind FROM inodes WHERE path = ?1 AND deleted = 0",
+            "SELECT kind FROM inodes WHERE path = ?1 AND status = 'active'",
             params![path],
             |r| r.get(0),
         )
@@ -576,7 +575,7 @@ fn has_child_dirs(conn: &Connection, dir: &str, include_system: bool) -> Result<
     };
     let sql = format!(
         "SELECT COUNT(*) FROM inodes
-         WHERE kind = 'directory' AND deleted = 0
+         WHERE kind = 'directory' AND status = 'active'
            AND path LIKE ?1 ESCAPE '\\'
            AND instr(substr(path, length(?2) + 1), '/') = 0{system_filter}"
     );
@@ -604,8 +603,8 @@ fn validate_name(name: &str) -> Result<String, ToolError> {
 fn folder_title(conn: &Connection, path: &str) -> Result<Option<String>, ToolError> {
     Ok(conn
         .query_row(
-            "SELECT m.title FROM inodes i LEFT JOIN meta m ON m.inode = i.inode
-             WHERE i.path = ?1 AND i.kind = 'directory' AND i.deleted = 0",
+            "SELECT m.title FROM inodes i LEFT JOIN dir_titles m ON m.inode = i.inode
+             WHERE i.path = ?1 AND i.kind = 'directory' AND i.status = 'active'",
             params![path],
             |r| r.get::<_, Option<String>>(0),
         )
@@ -630,8 +629,8 @@ fn folder_name_exists(
     let prefix = format!("{parent}/");
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM inodes i
-         JOIN meta m ON m.inode = i.inode
-         WHERE i.kind = 'directory' AND i.deleted = 0
+         JOIN dir_titles m ON m.inode = i.inode
+         WHERE i.kind = 'directory' AND i.status = 'active'
            AND i.path LIKE ?1 ESCAPE '\\'
            AND instr(substr(i.path, length(?2) + 1), '/') = 0
            AND m.title = ?3
@@ -649,7 +648,7 @@ fn folder_name_exists(
 
 fn folder_id_by_path(conn: &Connection, path: &str) -> Result<Option<i64>, ToolError> {
     conn.query_row(
-        "SELECT inode FROM inodes WHERE path = ?1 AND kind = 'directory' AND deleted = 0",
+        "SELECT inode FROM inodes WHERE path = ?1 AND kind = 'directory' AND status = 'active'",
         params![path],
         |r| r.get(0),
     )
@@ -662,7 +661,7 @@ fn folder_id_by_path(conn: &Connection, path: &str) -> Result<Option<i64>, ToolE
 fn directory_path_by_id(conn: &Connection, id: i64) -> Result<String, ToolError> {
     let row: Option<(String, String)> = conn
         .query_row(
-            "SELECT kind, path FROM inodes WHERE inode = ?1 AND deleted = 0",
+            "SELECT kind, path FROM inodes WHERE inode = ?1 AND status = 'active'",
             params![id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -690,9 +689,8 @@ fn ensure_manageable(path: &str) -> Result<(), ToolError> {
 
 fn upsert_title(conn: &Connection, id: i64, name: &str) -> Result<(), ToolError> {
     conn.execute(
-        "INSERT INTO meta (inode, kind, title, status, due, tags, extra)
-         VALUES (?1, 'folder', ?2, NULL, NULL, NULL, '{}')
-         ON CONFLICT(inode) DO UPDATE SET title = excluded.title, kind = 'folder'",
+        "INSERT INTO dir_titles (inode, title) VALUES (?1, ?2)
+         ON CONFLICT(inode) DO UPDATE SET title = excluded.title",
         params![id, name],
     )?;
     Ok(())
@@ -703,7 +701,7 @@ fn count_files_under(conn: &Connection, dir: &str) -> Result<i64, ToolError> {
     let reserved_filter = reserved_file_filter(dir);
     let sql = format!(
         "SELECT COUNT(*) FROM inodes
-         WHERE kind = 'file' AND deleted = 0 AND path LIKE ?1 ESCAPE '\\'{reserved_filter}"
+         WHERE kind = 'file' AND status = 'active' AND path LIKE ?1 ESCAPE '\\'{reserved_filter}"
     );
     Ok(conn.query_row(&sql, params![like], |r| r.get(0))?)
 }
@@ -714,7 +712,7 @@ fn count_direct_files(conn: &Connection, dir: &str) -> Result<i64, ToolError> {
     let reserved_filter = reserved_file_filter(dir);
     let sql = format!(
         "SELECT COUNT(*) FROM inodes
-         WHERE kind = 'file' AND deleted = 0
+         WHERE kind = 'file' AND status = 'active'
            AND path LIKE ?1 ESCAPE '\\'
            AND instr(substr(path, length(?2) + 1), '/') = 0{reserved_filter}"
     );

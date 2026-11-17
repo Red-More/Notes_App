@@ -15,7 +15,7 @@
 use rusqlite::{params, Connection};
 
 /// Version stamped on databases created by this module.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// Virtual file system root, kept in sync with `vfs::cap_gate::ROOT`.
 const ROOT: &str = "/life";
@@ -33,7 +33,7 @@ const DEFAULT_DIRS: &[&str] = &[
     "/life/.lifeos",
 ];
 
-/// Chinese display titles seeded into `meta` for the system folders.
+/// Chinese display titles seeded into `dir_titles` for the system folders.
 const DEFAULT_DIR_TITLES: &[(&str, &str)] = &[
     ("/life/notes", "默认"),
     ("/life/diary", "日记"),
@@ -62,22 +62,28 @@ const REQUIRED_TABLES: &[&str] = &["inodes", "version_bases"];
 /// Full DDL for a brand-new database. Every table, index and the FTS5
 /// definition lives here exactly once.
 const SCHEMA: &str = "
--- Filesystem namespace: one inode per path, directories included.
+-- Base file layer: one row per path, files and directories alike.
+--
+-- This table is system-maintained only: file id, path, type, extension, size,
+-- content hash, lifecycle status and timestamps. Frontmatter never lives here.
 CREATE TABLE inodes (
-    inode      INTEGER PRIMARY KEY,
+    inode      INTEGER PRIMARY KEY,           -- file id
     path       TEXT NOT NULL UNIQUE,          -- normalized /life/... path
     kind       TEXT NOT NULL CHECK (kind IN ('directory', 'file')),
+    ext        TEXT NOT NULL DEFAULT '',      -- case preserved; '' = no extension
     head_rev   INTEGER NOT NULL DEFAULT 0,    -- current revision pointer
     size       INTEGER NOT NULL DEFAULT 0,
+    hash       TEXT,                          -- RESERVED: sha256 of the head body
+    status     TEXT NOT NULL DEFAULT 'active'
+               CHECK (status IN ('active', 'archived', 'deleted')),
+    pinned     INTEGER NOT NULL DEFAULT 0,    -- user-level flag, not frontmatter
     ctime      TEXT NOT NULL,
     mtime      TEXT NOT NULL,
-    deleted    INTEGER NOT NULL DEFAULT 0,    -- soft delete, restorable
-    pinned     INTEGER NOT NULL DEFAULT 0,
-    deleted_at TEXT                           -- NULL while visible
+    deleted_at TEXT                           -- NULL unless status = 'deleted'
 );
 CREATE INDEX idx_inode_path ON inodes(path);
-CREATE INDEX idx_inode_kind ON inodes(kind, deleted);
-CREATE INDEX idx_inode_pinned ON inodes(kind, deleted, pinned);
+CREATE INDEX idx_inode_kind ON inodes(kind, status);
+CREATE INDEX idx_inode_pinned ON inodes(kind, status, pinned);
 
 -- Live head body. Autosave rewrites this one row in place; history lives
 -- below in version_bases / version_diffs.
@@ -91,19 +97,16 @@ CREATE TABLE blobs (
     FOREIGN KEY (inode) REFERENCES inodes(inode) ON DELETE CASCADE
 );
 
--- Frontmatter mirror, refreshed together with blobs.
-CREATE TABLE meta (
-    inode  INTEGER PRIMARY KEY,
-    kind   TEXT,
-    title  TEXT,
-    status TEXT,
-    due    TEXT,
-    tags   TEXT,                              -- normalized comma list
-    extra  TEXT,                              -- JSON bag per document type
+-- Markdown frontmatter is NOT mirrored here: it is part of the file body and
+-- parsed on demand. Only directory display names need a system-side table.
+
+-- Directory display names. Folder renames only change this label; the path
+-- segment stays stable, and folders are not documents (no frontmatter).
+CREATE TABLE dir_titles (
+    inode INTEGER PRIMARY KEY,
+    title TEXT NOT NULL,
     FOREIGN KEY (inode) REFERENCES inodes(inode) ON DELETE CASCADE
 );
-CREATE INDEX idx_meta_kind_status ON meta(kind, status);
-CREATE INDEX idx_meta_due ON meta(due) WHERE due IS NOT NULL;
 
 -- Search index: text is CJK-spaced before indexing; see vfs/fts.rs.
 CREATE VIRTUAL TABLE fts_docs USING fts5(
@@ -146,16 +149,6 @@ CREATE TABLE version_meta (
     FOREIGN KEY (inode) REFERENCES inodes(inode) ON DELETE CASCADE
 );
 CREATE INDEX idx_version_inode ON version_meta(inode, rev DESC);
-
--- Cross index: one row per dimension value for reverse lookups.
-CREATE TABLE index_entries (
-    inode     INTEGER NOT NULL,
-    dimension TEXT NOT NULL,                  -- type | date | time | location | person | tag | due
-    value     TEXT NOT NULL,
-    PRIMARY KEY (inode, dimension, value),
-    FOREIGN KEY (inode) REFERENCES inodes(inode) ON DELETE CASCADE
-);
-CREATE INDEX idx_index_lookup ON index_entries(dimension, value, inode);
 
 -- Agent conversations. `last_message_at` stays NULL until the first message
 -- commits; the chat list only shows conversations with a non-NULL value.
@@ -263,14 +256,19 @@ CREATE TABLE assets (
 CREATE INDEX idx_assets_created ON assets(created_at DESC);
 ";
 
+/// Store-owned schema version (`PRAGMA user_version`).
+pub fn schema_version(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.pragma_query_value(None, "user_version", |row| row.get(0))
+}
+
 /// True when the database was created by this build.
 ///
 /// The version stamp is the primary check; the table probe only rejects a
-/// stamped-but-broken file. Older structures are deleted and rebuilt by
-/// `db::open_or_rebuild`, so no per-column compatibility check is needed.
+/// stamped-but-broken file. An *older* version is upgraded in place by
+/// [`migrate`] (see `db::open_or_rebuild`); only a newer or structurally broken
+/// file is rebuilt.
 pub fn is_current(conn: &Connection) -> rusqlite::Result<bool> {
-    let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version != SCHEMA_VERSION {
+    if schema_version(conn)? != SCHEMA_VERSION {
         return Ok(false);
     }
     for table in REQUIRED_TABLES {
@@ -310,9 +308,8 @@ pub fn create(conn: &mut Connection) -> rusqlite::Result<()> {
     }
     for (path, title) in DEFAULT_DIR_TITLES {
         tx.execute(
-            "INSERT OR IGNORE INTO meta (inode, kind, title, status, due, tags, extra)
-             SELECT inode, 'folder', ?2, NULL, NULL, NULL, '{}'
-             FROM inodes WHERE path = ?1",
+            "INSERT OR IGNORE INTO dir_titles (inode, title)
+             SELECT inode, ?2 FROM inodes WHERE path = ?1",
             params![*path, *title],
         )?;
     }
@@ -320,48 +317,182 @@ pub fn create(conn: &mut Connection) -> rusqlite::Result<()> {
     tx.commit()
 }
 
-/// Additive, non-destructive migrations for databases created by older builds.
+/// Upgrade an older database in place and stamp it as current.
 ///
-/// `SCHEMA_VERSION` is intentionally not bumped: bumping it would delete and
-/// rebuild `life.db` (see `db::open_or_rebuild`), losing user data.
+/// Every statement runs inside one transaction, so a failure rolls the whole
+/// upgrade back and leaves the file with its previous structure — openable and
+/// retryable on the next launch. Nothing user-visible is dropped: the only
+/// table removed is `meta`, whose folder rows are copied into `dir_titles`
+/// first and whose document rows are redundant (frontmatter already lives in
+/// the Markdown body, which is the VFS source of truth).
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
-    let has_column: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name = 'last_message_at'",
-        [],
-        |row| row.get(0),
-    )?;
-    if has_column == 0 {
-        conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    // The cross index was removed: it was pure derived data rebuilt on every
+    // Markdown write and never read by the UI. Dropping the table in place
+    // keeps existing documents untouched.
+    tx.execute("DROP TABLE IF EXISTS index_entries", [])?;
+    if table_exists(&tx, "conversations")?
+        && !column_exists(&tx, "conversations", "last_message_at")?
+    {
+        tx.execute(
             "ALTER TABLE conversations ADD COLUMN last_message_at TEXT",
             [],
         )?;
         // Backfill from the transcript so existing conversations stay visible.
-        conn.execute(
-            "UPDATE conversations
-             SET last_message_at = (SELECT MAX(created_at) FROM messages m
-                                    WHERE m.conversation_id = conversations.id)",
+        if table_exists(&tx, "messages")? {
+            tx.execute(
+                "UPDATE conversations
+                 SET last_message_at = (SELECT MAX(created_at) FROM messages m
+                                        WHERE m.conversation_id = conversations.id)",
+                [],
+            )?;
+        }
+    }
+    if table_exists(&tx, "conversations")? {
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversations_last_message
+             ON conversations(last_message_at)",
             [],
         )?;
     }
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_conversations_last_message
-         ON conversations(last_message_at)",
-        [],
-    )?;
     // Reasoning duration joined the message row later; old databases keep
     // their data and gain the column in place.
-    let has_thinking_duration: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'thinking_duration_ms'",
-        [],
-        |row| row.get(0),
-    )?;
-    if has_thinking_duration == 0 {
-        conn.execute(
+    if table_exists(&tx, "messages")?
+        && !column_exists(&tx, "messages", "thinking_duration_ms")?
+    {
+        tx.execute(
             "ALTER TABLE messages ADD COLUMN thinking_duration_ms INTEGER",
             [],
         )?;
     }
+    migrate_file_layers(&tx)?;
+    // Stamped only after every statement above succeeded.
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    tx.commit()
+}
+
+/// Split the base file layer from the Markdown content layer.
+///
+/// Older databases kept directory labels and document frontmatter in the same
+/// `meta` table and used a single `deleted` flag for lifecycle. Frontmatter is
+/// already stored in the Markdown body, so only directory labels are carried
+/// over; the legacy table is then dropped and `deleted` becomes `status`.
+///
+/// This runs inside [`migrate`]'s transaction: a failure here rolls back the
+/// whole upgrade instead of leaving a half-migrated file.
+pub(crate) fn migrate_file_layers(conn: &Connection) -> rusqlite::Result<()> {
+    // `ext` is a base-layer attribute. Older rows never stored it, so derive it
+    // once from the path with the same first-dot rule the runtime uses; without
+    // this every query would fail with `no such column: ext`.
+    if !column_exists(conn, "inodes", "ext")? {
+        conn.execute(
+            "ALTER TABLE inodes ADD COLUMN ext TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+        let rows = {
+            let mut stmt = conn.prepare("SELECT inode, path, kind FROM inodes")?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        for (inode, path, kind) in rows {
+            // Directories are not documents: they never carry an extension.
+            let ext = if kind == "file" {
+                crate::vfs::path_extension(&path)
+            } else {
+                String::new()
+            };
+            conn.execute(
+                "UPDATE inodes SET ext = ?1 WHERE inode = ?2",
+                params![ext, inode],
+            )?;
+        }
+    }
+    if !column_exists(conn, "inodes", "hash")? {
+        conn.execute("ALTER TABLE inodes ADD COLUMN hash TEXT", [])?;
+    }
+    if !column_exists(conn, "inodes", "status")? {
+        // Drop dependent indexes first: SQLite refuses to drop an indexed column.
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_inode_kind;
+             DROP INDEX IF EXISTS idx_inode_pinned;
+             ALTER TABLE inodes ADD COLUMN status TEXT NOT NULL DEFAULT 'active'
+                 CHECK (status IN ('active', 'archived', 'deleted'));",
+        )?;
+        if column_exists(conn, "inodes", "deleted")? {
+            conn.execute(
+                "UPDATE inodes
+                 SET status = CASE WHEN deleted = 1 THEN 'deleted' ELSE 'active' END",
+                [],
+            )?;
+            conn.execute("ALTER TABLE inodes DROP COLUMN deleted", [])?;
+        }
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_inode_kind ON inodes(kind, status);
+             CREATE INDEX IF NOT EXISTS idx_inode_pinned ON inodes(kind, status, pinned);",
+        )?;
+    }
+    if table_exists(conn, "meta")? {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS dir_titles (
+                 inode INTEGER PRIMARY KEY,
+                 title TEXT NOT NULL,
+                 FOREIGN KEY (inode) REFERENCES inodes(inode) ON DELETE CASCADE
+             );
+             INSERT OR IGNORE INTO dir_titles (inode, title)
+                 SELECT m.inode, COALESCE(NULLIF(m.title, ''), i.path)
+                 FROM meta m JOIN inodes i ON i.inode = m.inode
+                 WHERE m.kind = 'folder';
+             DROP TABLE meta;",
+        )?;
+    }
+    // One-time hash backfill; later writes maintain it in place.
+    let rows = {
+        let mut stmt = conn.prepare(
+            "SELECT i.inode, b.content
+             FROM inodes i
+             JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
+             WHERE i.kind = 'file' AND i.hash IS NULL",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    for (inode, content) in rows {
+        conn.execute(
+            "UPDATE inodes SET hash = ?1 WHERE inode = ?2",
+            params![crate::assets::sha256_hex(content.as_bytes()), inode],
+        )?;
+    }
     Ok(())
+}
+
+/// Column probe used by the additive migrations. `table` is always an internal
+/// constant, never user input, so the formatted identifier is safe.
+fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let count: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
+        params![column],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+fn table_exists(conn: &Connection, table: &str) -> rusqlite::Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        params![table],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
 }
 
 /// Idempotently ensure the system folders, display titles and path renames.
@@ -382,9 +513,8 @@ pub fn ensure_default_dirs(conn: &Connection) -> rusqlite::Result<()> {
     }
     for (path, title) in DEFAULT_DIR_TITLES {
         conn.execute(
-            "INSERT OR IGNORE INTO meta (inode, kind, title, status, due, tags, extra)
-             SELECT inode, 'folder', ?2, NULL, NULL, NULL, '{}'
-             FROM inodes WHERE path = ?1",
+            "INSERT OR IGNORE INTO dir_titles (inode, title)
+             SELECT inode, ?2 FROM inodes WHERE path = ?1",
             params![*path, *title],
         )?;
     }
@@ -426,9 +556,8 @@ pub fn ensure_notes_root(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
     conn.execute(
-        "INSERT OR IGNORE INTO meta (inode, kind, title, status, due, tags, extra)
-         SELECT inode, 'folder', '默认', NULL, NULL, NULL, '{}'
-         FROM inodes WHERE path = '/life/notes'",
+        "INSERT OR IGNORE INTO dir_titles (inode, title)
+         SELECT inode, '默认' FROM inodes WHERE path = '/life/notes'",
         [],
     )?;
     Ok(())

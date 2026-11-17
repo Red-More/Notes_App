@@ -200,7 +200,7 @@ fn storage(err: impl std::fmt::Display) -> ToolError {
     }
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 

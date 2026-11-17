@@ -1,4 +1,4 @@
-﻿//! 文件夹命令：目录即文件夹，显示名存 meta.title。
+﻿//! 文件夹命令：目录即文件夹，显示名存 dir_titles。
 
 use tauri::State;
 

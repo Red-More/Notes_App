@@ -1,5 +1,5 @@
 //! M0 regression tests: CapGate, read/write chain, rev conflicts, trash,
-//! version restore, cross index refresh, and write-source semantics.
+//! version restore, and write-source semantics.
 //! Every case runs against an in-memory database, never the real `life.db`.
 
 use rusqlite::params;
@@ -198,7 +198,7 @@ fn acl_filters_glob_and_grep_results() {
             path: None,
             max_results: Some(50),
             context_lines: None,
-            doc_type: None,
+            extension: None,
             principal: Principal::Agent,
         })
         .unwrap();
@@ -233,7 +233,7 @@ fn acl_filters_glob_and_grep_results() {
             path: None,
             max_results: Some(50),
             context_lines: None,
-            doc_type: None,
+            extension: None,
             principal: Principal::User,
         })
         .unwrap();
@@ -327,7 +327,6 @@ fn skill_documents_stay_out_of_the_document_mirror() {
         path: path.into(),
         content: "---\nname: demo\ndescription: demo\n---\nbody".into(),
         create_parents: Some(true),
-        auto_frontmatter: Some(false),
         source: WriteSource::User,
     })
     .unwrap();
@@ -341,21 +340,6 @@ fn skill_documents_stay_out_of_the_document_mirror() {
     })
     .unwrap();
 
-    let count = |table: &str| -> i64 {
-        vfs.conn()
-            .query_row(
-                &format!(
-                    "SELECT COUNT(*) FROM {table} WHERE inode IN
-                     (SELECT inode FROM inodes WHERE path GLOB '*/.agent/*')"
-                ),
-                [],
-                |row| row.get(0),
-            )
-            .unwrap()
-    };
-    for table in ["meta", "index_entries"] {
-        assert_eq!(count(table), 0, "{table} must stay empty for skills");
-    }
     let fts: i64 = vfs
         .conn()
         .query_row(
@@ -365,6 +349,7 @@ fn skill_documents_stay_out_of_the_document_mirror() {
             |row| row.get(0),
         )
         .unwrap();
+    assert_eq!(fts, 0, "skills stay out of the search index");
     assert_eq!(fts, 0, "fts_docs must stay empty for skills");
 }
 
@@ -410,7 +395,7 @@ fn acl_hides_existence_inside_denied_folders() {
             path: Some("/life/notes/ghost.md".into()),
             max_results: Some(5),
             context_lines: None,
-            doc_type: None,
+            extension: None,
             principal: Principal::Agent,
         })
         .unwrap_err();
@@ -448,7 +433,6 @@ fn agent_write(vfs: &mut VirtualFs, path: &str) -> Result<WriteReceipt, ToolErro
         path: path.into(),
         content: "agent body".into(),
         create_parents: Some(true),
-        auto_frontmatter: Some(false),
         source: WriteSource::Agent,
     })
 }
@@ -611,7 +595,7 @@ fn reserved_policy_paths_are_model_invisible() {
             path: None,
             max_results: Some(50),
             context_lines: None,
-            doc_type: None,
+            extension: None,
             principal: Principal::Agent,
         })
         .unwrap();
@@ -683,7 +667,7 @@ fn system_folders_reject_delete_and_rename() {
     let folders: i64 = vfs
         .conn()
         .query_row(
-            "SELECT COUNT(*) FROM inodes WHERE path = '/life/diary' AND deleted = 0",
+            "SELECT COUNT(*) FROM inodes WHERE path = '/life/diary' AND status = 'active'",
             [],
             |row| row.get(0),
         )
@@ -692,7 +676,7 @@ fn system_folders_reject_delete_and_rename() {
     let kept: i64 = vfs
         .conn()
         .query_row(
-            "SELECT COUNT(*) FROM inodes WHERE path = ?1 AND deleted = 0",
+            "SELECT COUNT(*) FROM inodes WHERE path = ?1 AND status = 'active'",
             params![diary.path],
             |row| row.get(0),
         )
@@ -710,19 +694,20 @@ fn ordinary_folder_delete_still_moves_notes_to_root() {
     let (path, kind): (String, String) = vfs
         .conn()
         .query_row(
-            "SELECT i.path, m.kind FROM inodes i JOIN meta m ON m.inode = i.inode
-             WHERE i.inode = ?1",
+            "SELECT path, kind FROM inodes WHERE inode = ?1",
             params![note.id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
+    assert_eq!(kind, "file");
+    let doc = docs::get(&vfs, note.id, false).unwrap();
+    assert_eq!(doc.kind, "note");
     assert!(path.starts_with("/life/notes/"), "note moved to the root: {path}");
     assert!(!path.starts_with("/life/notes/项目/"), "note left the folder: {path}");
-    assert_eq!(kind, "note", "the document kind is untouched");
     let folder_left: i64 = vfs
         .conn()
         .query_row(
-            "SELECT COUNT(*) FROM inodes WHERE path LIKE '/life/notes/项目%' AND deleted = 0",
+            "SELECT COUNT(*) FROM inodes WHERE path LIKE '/life/notes/项目%' AND status = 'active'",
             [],
             |row| row.get(0),
         )
@@ -852,17 +837,34 @@ fn folders_outside_notes_support_create_rename_move_and_delete() {
         "moved by path: {path}"
     );
 
-    // Deleting a non-notes folder recycles its documents instead of dropping them.
-    docs::folders::delete(&mut vfs, folder.id).unwrap();
-    let deleted: i64 = vfs
+    // A move keeps the document's own extension instead of rewriting it to `.md`.
+    let typed =
+        docs::create_typed(&mut vfs, "note", "说明", "正文", None, None, Some("txt")).unwrap();
+    docs::move_many_to_dir(&mut vfs, &[typed.id], &folder.path).unwrap();
+    let typed_path: String = vfs
         .conn()
         .query_row(
-            "SELECT deleted FROM inodes WHERE inode = ?1",
+            "SELECT path FROM inodes WHERE inode = ?1",
+            params![typed.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        typed_path.ends_with("说明.txt"),
+        "extension preserved: {typed_path}"
+    );
+
+    // Deleting a non-notes folder recycles its documents instead of dropping them.
+    docs::folders::delete(&mut vfs, folder.id).unwrap();
+    let deleted: String = vfs
+        .conn()
+        .query_row(
+            "SELECT status FROM inodes WHERE inode = ?1",
             params![todo.id],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(deleted, 1, "documents must land in the recycle bin");
+    assert_eq!(deleted, "deleted", "documents must land in the recycle bin");
     let dirs: i64 = vfs
         .conn()
         .query_row(
@@ -882,7 +884,7 @@ fn reserved_config_folders_are_managed_like_ordinary_folders() {
     let title: String = vfs
         .conn()
         .query_row(
-            "SELECT title FROM meta WHERE inode = ?1",
+            "SELECT title FROM dir_titles WHERE inode = ?1",
             params![agent],
             |row| row.get(0),
         )
@@ -893,7 +895,7 @@ fn reserved_config_folders_are_managed_like_ordinary_folders() {
     let left: i64 = vfs
         .conn()
         .query_row(
-            "SELECT COUNT(*) FROM inodes WHERE path = '/life/.agent' AND deleted = 0",
+            "SELECT COUNT(*) FROM inodes WHERE path = '/life/.agent' AND status = 'active'",
             [],
             |row| row.get(0),
         )
@@ -924,7 +926,7 @@ fn grep_finds_moved_documents_without_reindexing() {
             path: None,
             max_results: Some(10),
             context_lines: None,
-            doc_type: None,
+            extension: None,
             principal: Principal::User,
         })
         .unwrap();
@@ -965,21 +967,12 @@ fn reserved_config_files_are_listable_and_editable_by_the_user() {
         )
         .unwrap();
     assert_eq!(body, raw, "reserved files keep their raw body");
-    let meta_rows: i64 = vfs
-        .conn()
-        .query_row(
-            "SELECT COUNT(*) FROM meta WHERE inode = ?1",
-            params![id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(meta_rows, 0, "config files stay out of the document mirror");
 
     // Renaming a policy file (in or out) would silently change ACL
     // enforcement, so it must be rejected on both sides.
-    assert!(docs::rename_file(&mut vfs, id, "old-policy.json").is_err());
+    assert!(docs::rename_file(&mut vfs, id, "old-policy", "json").is_err());
     let other = docs::create_typed(&mut vfs, "note", "普通", "正文", None, None, Some("md")).unwrap();
-    assert!(docs::rename_file(&mut vfs, other.id, "ai.policy").is_err());
+    assert!(docs::rename_file(&mut vfs, other.id, "ai", "policy").is_err());
 }
 
 #[test]
@@ -1001,6 +994,139 @@ fn folder_reorder_persists_and_is_listed_first() {
     assert!(docs::folders::reorder(&vfs, None, None, &[nested.id]).is_err());
 }
 
+fn stored_body(vfs: &VirtualFs, id: i64) -> String {
+    vfs.conn()
+        .query_row(
+            "SELECT b.content FROM blobs b JOIN inodes i ON i.inode = b.inode
+             WHERE i.inode = ?1 AND b.rev = i.head_rev",
+            params![id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn raw_documents_store_and_export_without_frontmatter() {
+    let mut vfs = test_vfs();
+    let script = docs::create_typed(
+        &mut vfs,
+        "note",
+        "脚本",
+        "const a = 1\n",
+        None,
+        None,
+        Some("js"),
+    )
+    .unwrap();
+    assert_eq!(script.format, "raw");
+    assert_eq!(script.content, "const a = 1\n");
+    assert!(
+        !stored_body(&vfs, script.id).starts_with("---"),
+        "raw body must not gain frontmatter"
+    );
+
+    // Editing keeps it raw.
+    docs::save(
+        &mut vfs,
+        script.id,
+        None,
+        Some("let b = 2\n".into()),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let saved = docs::get(&vfs, script.id, false).unwrap();
+    assert_eq!(saved.content, "let b = 2\n");
+    assert_eq!(saved.format, "raw");
+
+    // Markdown siblings still get frontmatter.
+    let md = docs::create_typed(&mut vfs, "note", "笔记", "正文", None, None, Some("md")).unwrap();
+    assert_eq!(md.format, "markdown");
+    assert!(stored_body(&vfs, md.id).starts_with("---"));
+
+    // Markdown and raw never cross by rename; same-family renames still work.
+    assert!(docs::rename_file(&mut vfs, script.id, "脚本", "md").is_err());
+    let renamed = docs::rename_file(&mut vfs, script.id, "脚本", "mjs").unwrap();
+    assert_eq!(renamed.format, "raw");
+
+    // Case-insensitive uniqueness: "Abc" and "abc" cannot share a path.
+    let first = docs::create_typed(&mut vfs, "note", "Abc", "", None, None, Some("md")).unwrap();
+    let second = docs::create_typed(&mut vfs, "note", "abc", "", None, None, Some("md")).unwrap();
+    assert_ne!(
+        first.path.to_lowercase(),
+        second.path.to_lowercase(),
+        "case-only collisions must be resolved"
+    );
+}
+
+#[test]
+fn path_writes_respect_the_format_family() {
+    let mut vfs = test_vfs();
+    // Raw extensions keep the caller's bytes: no frontmatter, no parsing.
+    write_file(
+        &mut vfs,
+        "/life/notes/run.py",
+        "print(1)\n",
+        WriteSource::User,
+    );
+    match read_file(&vfs, "/life/notes/run.py") {
+        ReadResult::File { content, .. } => assert_eq!(content.trim_end(), "print(1)"),
+        ReadResult::Dir { .. } => panic!("expected a file"),
+    }
+    // Markdown paths still get the generated frontmatter.
+    write_file(&mut vfs, "/life/notes/plain", "正文", WriteSource::User);
+    match read_file(&vfs, "/life/notes/plain.md") {
+        ReadResult::File { content, .. } => assert!(content.starts_with("---")),
+        ReadResult::Dir { .. } => panic!("expected a file"),
+    }
+
+    // Editing a raw document must not derive the title from a `#` line.
+    edit_file(
+        &mut vfs,
+        "/life/notes/run.py",
+        "print(1)",
+        "# print(2)",
+        None,
+        WriteSource::User,
+    )
+    .unwrap();
+    let title = docs::get(&vfs, inode_of(&vfs, "/life/notes/run.py"), false)
+        .unwrap()
+        .title;
+    assert_eq!(title, "run");
+}
+
+#[test]
+fn extensionless_create_coexists_with_markdown_and_multi_dot_titles() {
+    let mut vfs = test_vfs();
+    let markdown = docs::create_typed(&mut vfs, "note", "版本", "正文", None, None, None).unwrap();
+    assert!(markdown.path.ends_with("版本.md"), "{}", markdown.path);
+
+    // The extension-less sibling must not be resolved to `版本.md`.
+    let bare = docs::create_typed(&mut vfs, "note", "版本", "raw", None, None, Some("")).unwrap();
+    assert!(bare.path.ends_with("版本"), "{}", bare.path);
+    assert_eq!(bare.ext, "");
+    assert_eq!(bare.title, "版本");
+
+    let fallback = docs::create_typed(&mut vfs, "note", "版本", "", None, None, Some("")).unwrap();
+    assert!(fallback.path.ends_with("版本-2"), "{}", fallback.path);
+
+    // The first dot separates the extension, so a multi-part one stays out of
+    // the title.
+    let packed =
+        docs::create_typed(&mut vfs, "note", "规格", "", None, None, Some("spec.draft")).unwrap();
+    assert!(packed.path.ends_with("规格.spec.draft"), "{}", packed.path);
+    assert_eq!(packed.title, "规格");
+}
+
+#[test]
+fn folder_names_keep_dots() {
+    let mut vfs = test_vfs();
+    let folder = docs::folders::create_scoped(&mut vfs, "v1.2", None, None).unwrap();
+    assert!(folder.path.ends_with("/v1.2"), "{}", folder.path);
+}
+
 #[test]
 fn typed_create_and_rename_reject_illegal_names() {
     let mut vfs = test_vfs();
@@ -1008,16 +1134,65 @@ fn typed_create_and_rename_reject_illegal_names() {
         .unwrap();
     assert!(doc.path.ends_with("说明.txt"), "typed extension: {}", doc.path);
 
-    let renamed = docs::rename_file(&mut vfs, doc.id, "说明-v2.js").unwrap();
+    let renamed = docs::rename_file(&mut vfs, doc.id, "说明-v2", "js").unwrap();
     assert!(renamed.path.ends_with("说明-v2.js"));
+    assert_eq!(renamed.ext, "js");
     // The title mirror follows the file name so `doc_list` cards stay in sync
     // with the editor, which treats the file name as the title.
     assert_eq!(renamed.title, "说明-v2");
 
-    assert!(docs::rename_file(&mut vfs, doc.id, "bad/name.md").is_err());
-    assert!(docs::rename_file(&mut vfs, doc.id, "CON.md").is_err());
-    assert!(docs::rename_file(&mut vfs, doc.id, "trailing.").is_err());
+    // Markdown frontmatter tracks the file name on rename.
+    let note = docs::create_typed(&mut vfs, "note", "会议", "正文", None, None, Some("md")).unwrap();
+    let renamed = docs::rename_file(&mut vfs, note.id, "会议纪要", "md").unwrap();
+    assert_eq!(renamed.title, "会议纪要");
+    let body: String = vfs
+        .conn()
+        .query_row(
+            "SELECT b.content FROM blobs b
+             WHERE b.inode = ?1
+               AND b.rev = (SELECT head_rev FROM inodes WHERE inode = ?1)",
+            params![note.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let parts = crate::vfs::meta::parse_document(&body);
+    assert_eq!(parts.title.as_deref(), Some("会议纪要"), "body: {body}");
+
+    // Base names cannot contain dots; the extension picker owns them.
+    assert!(docs::rename_file(&mut vfs, doc.id, "版本 v1.2", "md").is_err());
+
+    // Multi-segment extensions are allowed and keep their case.
+    let packed = docs::rename_file(&mut vfs, doc.id, "版本", "spec.DRAFT").unwrap();
+    assert!(packed.path.ends_with("版本.spec.DRAFT"), "multi-dot ext: {}", packed.path);
+    assert_eq!(packed.ext, "spec.DRAFT");
+    assert_eq!(packed.title, "版本");
+
+    // Clearing the extension removes the separator dot entirely.
+    let bare = docs::rename_file(&mut vfs, doc.id, "版本", "").unwrap();
+    assert!(bare.path.ends_with("版本"), "extension-less: {}", bare.path);
+    assert_eq!(bare.ext, "");
+    assert_eq!(bare.title, "版本");
+
+    assert!(docs::rename_file(&mut vfs, doc.id, "bad/name", "md").is_err());
+    assert!(docs::rename_file(&mut vfs, doc.id, "CON", "md").is_err());
+    assert!(docs::rename_file(&mut vfs, doc.id, "trailing.", "md").is_err());
     assert!(docs::create_typed(&mut vfs, "note", "坏", "", None, None, Some("a/b")).is_err());
+
+    // Any character legal in a file name is a valid extension, dots included.
+    let chinese =
+        docs::create_typed(&mut vfs, "note", "中文类型", "", None, None, Some("笔记")).unwrap();
+    assert!(chinese.path.ends_with("中文类型.笔记"), "custom ext: {}", chinese.path);
+    let multi =
+        docs::create_typed(&mut vfs, "note", "规格", "", None, None, Some("spec.draft")).unwrap();
+    assert!(multi.path.ends_with("规格.spec.draft"), "multi-dot ext: {}", multi.path);
+    assert_eq!(multi.ext, "spec.draft");
+    // Binary formats cannot be stored as text documents.
+    assert!(docs::create_typed(&mut vfs, "note", "报表", "", None, None, Some("pdf")).is_err());
+    assert!(docs::create_typed(&mut vfs, "note", "备份", "", None, None, Some("backup.tar.gz"))
+        .is_err());
+    assert!(docs::rename_file(&mut vfs, doc.id, "版本", "docx").is_err());
+    // A dot in the title is rejected instead of silently becoming an extension.
+    assert!(docs::create_typed(&mut vfs, "note", "版本 v1.2", "", None, None, Some("md")).is_err());
 
     // The path move is transparent to FTS, which is keyed by inode.
     let hits = vfs
@@ -1026,19 +1201,25 @@ fn typed_create_and_rename_reject_illegal_names() {
             path: None,
             max_results: Some(10),
             context_lines: None,
-            doc_type: None,
+            extension: None,
             principal: Principal::User,
         })
         .unwrap();
-    assert!(hits.hits.iter().any(|hit| hit.path == renamed.path));
+    assert!(hits.hits.iter().any(|hit| hit.path == bare.path));
 }
 
 fn write_file(vfs: &mut VirtualFs, path: &str, content: &str, source: WriteSource) -> WriteReceipt {
+    // Tests use extension-less convenience paths; the write layer no longer
+    // rewrites paths, so the `.md` suffix is made explicit here.
+    let target = if path.rsplit('/').next().is_some_and(|name| name.contains('.')) {
+        path.to_string()
+    } else {
+        format!("{path}.md")
+    };
     vfs.write(WriteRequest {
-        path: path.to_string(),
+        path: target,
         content: content.to_string(),
         create_parents: Some(true),
-        auto_frontmatter: Some(true),
         source,
     })
     .expect("write should succeed")
@@ -1124,6 +1305,94 @@ fn fields(pairs: &[(&str, Value)]) -> DocFields {
         .iter()
         .map(|(key, value)| (key.to_string(), value.clone()))
         .collect()
+}
+
+/// Contact names are free text: dots stay, illegal path characters are errors,
+/// and the id in the file name keeps two contacts with the same name apart.
+#[test]
+fn contact_file_name_keeps_dots_and_the_stable_id() {
+    let mut vfs = test_vfs();
+    let first = docs::create_typed(
+        &mut vfs,
+        "contact",
+        "Dr. Smith-c_abc123",
+        "",
+        None,
+        Some(fields(&[
+            ("id", Value::String("c_abc123".into())),
+            ("name", Value::String("Dr. Smith".into())),
+        ])),
+        Some("md"),
+    )
+    .expect("a dotted contact name must be accepted");
+    assert!(
+        first.path.ends_with("Dr. Smith-c_abc123.md"),
+        "contact path: {}",
+        first.path
+    );
+    assert_eq!(first.title, "Dr. Smith-c_abc123");
+    assert_eq!(
+        first.fields.get("name").and_then(|value| value.as_str()),
+        Some("Dr. Smith")
+    );
+
+    // The same name with another id is a different contact, not a collision.
+    let second = docs::create_typed(
+        &mut vfs,
+        "contact",
+        "Dr. Smith-c_def456",
+        "",
+        None,
+        Some(fields(&[("id", Value::String("c_def456".into()))])),
+        Some("md"),
+    )
+    .expect("duplicate names must be distinguished by the id");
+    assert!(second.path.ends_with("Dr. Smith-c_def456.md"));
+
+    // Renaming the display name keeps the id and the document.
+    let renamed =
+        docs::rename_file(&mut vfs, first.id, "Dr. Jane Smith-c_abc123", "md").unwrap();
+    assert!(
+        renamed.path.ends_with("Dr. Jane Smith-c_abc123.md"),
+        "renamed path: {}",
+        renamed.path
+    );
+    assert_eq!(renamed.ext, "md");
+    assert_eq!(renamed.id, first.id);
+
+    // Path separators are reported, never rewritten into a silent `_`.
+    assert!(docs::create_typed(&mut vfs, "contact", "A/B-c_1", "", None, None, Some("md")).is_err());
+    assert!(docs::rename_file(&mut vfs, first.id, "A/B-c_abc123", "md").is_err());
+    // Notes keep the stricter rule: the dot belongs to the extension.
+    assert!(docs::create_typed(&mut vfs, "note", "v1.2", "", None, None, Some("md")).is_err());
+    let note = docs::create_typed(&mut vfs, "note", "说明", "", None, None, Some("md")).unwrap();
+    assert!(docs::rename_file(&mut vfs, note.id, "v1.2", "md").is_err());
+}
+
+/// The virtual namespace mirrors a case-insensitive host filesystem.
+#[test]
+fn write_rejects_a_case_only_duplicate() {
+    let mut vfs = test_vfs();
+    vfs.write(WriteRequest {
+        path: "/life/notes/A.md".into(),
+        content: "一".into(),
+        create_parents: Some(true),
+        source: WriteSource::User,
+    })
+    .expect("the first write must succeed");
+
+    let error = vfs
+        .write(WriteRequest {
+            path: "/life/notes/a.md".into(),
+            content: "二".into(),
+            create_parents: Some(true),
+            source: WriteSource::User,
+        })
+        .expect_err("a case-only duplicate must be refused");
+    assert!(
+        matches!(error, ToolError::AlreadyExists { .. }),
+        "unexpected error: {error:?}"
+    );
 }
 
 #[test]
@@ -1223,7 +1492,7 @@ fn write_edit_read_grep_roundtrip() {
             path: Some("/life/diary".into()),
             max_results: None,
             context_lines: None,
-            doc_type: None,
+            extension: None,
             principal: Principal::Agent,
         })
         .expect("grep should succeed");
@@ -1437,63 +1706,6 @@ fn save_refuses_when_head_blob_is_missing() {
 }
 
 #[test]
-fn cross_index_refreshes_on_write_and_save() {
-    let mut vfs = test_vfs();
-    let initial = fields(&[
-        ("dueDate", Value::String("2026-10-30".into())),
-        ("personId", Value::String("zhang-san".into())),
-        ("tags", Value::Array(vec![Value::String("日语".into())])),
-    ]);
-    let doc = docs::create(&mut vfs, "todo", "买牛奶", "", None, Some(initial)).unwrap();
-
-    assert_eq!(
-        docs::index::query(&vfs, "person", "zhang-san", None, None)
-            .unwrap()
-            .len(),
-        1
-    );
-    assert_eq!(
-        docs::index::query(&vfs, "tag", "日语", None, None)
-            .unwrap()
-            .len(),
-        1
-    );
-
-    let update = fields(&[
-        ("personId", Value::Null),
-        ("tags", Value::Array(vec![Value::String("生活".into())])),
-    ]);
-    let saved = docs::save(
-        &mut vfs,
-        doc.id,
-        None,
-        Some("已完成".into()),
-        Some(update),
-        None,
-        None,
-    )
-    .expect("save should refresh index");
-    // Autosave updates the head in place, so the revision does not bump.
-    assert_eq!(saved.rev, 1);
-
-    assert!(
-        docs::index::query(&vfs, "person", "zhang-san", None, None)
-            .unwrap()
-            .is_empty(),
-        "removed personId must drop its index row"
-    );
-    assert_eq!(
-        docs::index::query(&vfs, "tag", "生活", None, None)
-            .unwrap()
-            .len(),
-        1
-    );
-    assert!(docs::index::query(&vfs, "tag", "日语", None, None)
-        .unwrap()
-        .is_empty());
-}
-
-#[test]
 fn export_markdown_and_zip_regression() {
     let mut vfs = test_vfs();
     let root = std::env::temp_dir().join(format!("notes-export-assets-{}", std::process::id()));
@@ -1530,6 +1742,35 @@ fn export_markdown_and_zip_regression() {
     );
 
     let _ = std::fs::remove_dir_all(root);
+
+    // A typed document keeps its own extension inside the archive.
+    let typed =
+        docs::create_typed(&mut vfs, "note", "脚本", "console.log(1)", None, None, Some("js"))
+            .unwrap();
+    let typed_bytes =
+        docs::export::zip_entries(&docs::export::collect(&vfs, &[typed.id], &store).unwrap())
+            .unwrap();
+    let typed_archive = zip::ZipArchive::new(std::io::Cursor::new(typed_bytes)).unwrap();
+    let names: Vec<String> = typed_archive.file_names().map(str::to_string).collect();
+    assert!(
+        names.iter().any(|name| name.ends_with(".js")),
+        "archive keeps the document extension: {names:?}"
+    );
+
+    // An extension-less document exports without an invented suffix.
+    let bare = docs::create_typed(&mut vfs, "note", "版本", "原始正文", None, None, Some(""))
+        .unwrap();
+    assert!(bare.path.ends_with("版本"), "no extension: {}", bare.path);
+    assert_eq!(bare.ext, "");
+    let bare_bytes =
+        docs::export::zip_entries(&docs::export::collect(&vfs, &[bare.id], &store).unwrap())
+            .unwrap();
+    let bare_archive = zip::ZipArchive::new(std::io::Cursor::new(bare_bytes)).unwrap();
+    let bare_names: Vec<String> = bare_archive.file_names().map(str::to_string).collect();
+    assert!(
+        bare_names.iter().any(|name| name.ends_with("版本")),
+        "no extension is added on export: {bare_names:?}"
+    );
 }
 
 #[test]
@@ -3194,14 +3435,14 @@ fn grep_vfs(
     vfs: &VirtualFs,
     pattern: &str,
     path: Option<&str>,
-    doc_type: Option<&str>,
+    extension: Option<&str>,
 ) -> crate::vfs::types::GrepResponse {
     vfs.grep(GrepRequest {
         pattern: pattern.into(),
         path: path.map(str::to_string),
         max_results: Some(200),
         context_lines: None,
-        doc_type: doc_type.map(str::to_string),
+        extension: extension.map(str::to_string),
         principal: Principal::Agent,
     })
     .expect("grep should succeed")
@@ -3307,51 +3548,44 @@ fn fts_recalls_two_character_chinese_words() {
 }
 
 #[test]
-fn grep_type_filter_uses_meta_kind() {
+fn grep_extension_filter_uses_the_base_layer() {
     let mut vfs = test_vfs();
     let note = docs::create(&mut vfs, "note", "预算笔记", "预算复盘", None, None).unwrap();
-    let todo = docs::create(
-        &mut vfs,
-        "todo",
-        "预算待办",
-        "",
-        None,
-        Some(fields(&[("completed", Value::Bool(false))])),
-    )
-    .unwrap();
+    let script =
+        docs::create_typed(&mut vfs, "note", "预算脚本", "print('预算')", None, None, Some("py"))
+            .unwrap();
 
     let all = grep_vfs(&vfs, "预算", None, None);
     assert!(all.hits.iter().any(|hit| hit.path == note.path));
-    assert!(all.hits.iter().any(|hit| hit.path == todo.path));
+    assert!(all.hits.iter().any(|hit| hit.path == script.path));
 
-    let notes = grep_vfs(&vfs, "预算", None, Some("note"));
-    assert!(notes.hits.iter().all(|hit| hit.path == note.path));
-    assert!(notes.hits.iter().any(|hit| hit.path == note.path));
+    // Extension matching is case-insensitive and tolerates a leading dot.
+    let markdown = grep_vfs(&vfs, "预算", None, Some("MD"));
+    assert!(!markdown.hits.is_empty());
+    assert!(markdown.hits.iter().all(|hit| hit.path == note.path));
 
-    let todos = grep_vfs(&vfs, "预算", None, Some("todo"));
-    assert!(todos.hits.iter().all(|hit| hit.path == todo.path));
-    assert!(todos.hits.iter().any(|hit| hit.path == todo.path));
+    let python = grep_vfs(&vfs, "预算", None, Some(".py"));
+    assert_eq!(python.hits.len(), 1);
+    assert_eq!(python.hits[0].path, script.path);
 
-    let contacts = grep_vfs(&vfs, "预算", None, Some("contact"));
-    assert!(contacts.hits.is_empty());
+    assert!(grep_vfs(&vfs, "预算", None, Some("rs")).hits.is_empty());
 }
 
 #[test]
 fn todo_checkbox_edits_keep_meta_status_in_sync() {
     let mut vfs = test_vfs();
     let receipt = write_file(&mut vfs, "todos/demo", "- [ ] 买牛奶", WriteSource::User);
-    let status = |vfs: &VirtualFs| -> Option<String> {
+    let body = |vfs: &VirtualFs| -> String {
         vfs.conn()
             .query_row(
-                "SELECT status FROM meta WHERE inode = (
-                     SELECT inode FROM inodes WHERE path = '/life/todos/demo.md'
-                 )",
+                "SELECT b.content FROM blobs b JOIN inodes i ON i.inode = b.inode
+                 WHERE i.path = '/life/todos/demo.md' AND b.rev = i.head_rev",
                 [],
-                |row| row.get::<_, Option<String>>(0),
+                |row| row.get(0),
             )
-            .expect("meta row should exist")
+            .expect("todo body should exist")
     };
-    assert_eq!(status(&vfs).as_deref(), Some("open"));
+    assert!(body(&vfs).contains("- [ ] 买牛奶"));
 
     edit_file(
         &mut vfs,
@@ -3362,17 +3596,11 @@ fn todo_checkbox_edits_keep_meta_status_in_sync() {
         WriteSource::Agent,
     )
     .expect("agent checkbox edit should succeed");
-    assert_eq!(status(&vfs).as_deref(), Some("done"));
+    assert!(body(&vfs).contains("- [x] 买牛奶"));
 
-    // Frontmatter wins over the body when the UI toggles a todo.
+    // The UI toggle writes completion into frontmatter, which is part of the body.
     let toggled = write_file(&mut vfs, "todos/ui-toggle", "- [ ] 洗碗", WriteSource::User);
     let inode = inode_of(&vfs, &toggled.path);
-    vfs.conn()
-        .execute(
-            "UPDATE meta SET status = 'open' WHERE inode = ?1",
-            params![inode],
-        )
-        .unwrap();
     docs::save(
         &mut vfs,
         inode,
@@ -3383,7 +3611,11 @@ fn todo_checkbox_edits_keep_meta_status_in_sync() {
         None,
     )
     .expect("UI toggle should save completed field");
-    assert_eq!(status(&vfs).as_deref(), Some("done"));
+    let doc = docs::get(&vfs, inode, false).unwrap();
+    assert_eq!(
+        doc.fields.get("completed").and_then(|value| value.as_bool()),
+        Some(true)
+    );
 }
 
 #[test]
@@ -3428,7 +3660,7 @@ fn empty_trash_drops_stale_index_rows() {
     let files: i64 = vfs
         .conn()
         .query_row(
-            "SELECT COUNT(*) FROM inodes WHERE kind = 'file' AND deleted = 1",
+            "SELECT COUNT(*) FROM inodes WHERE kind = 'file' AND status = 'deleted'",
             [],
             |row| row.get(0),
         )
@@ -3451,19 +3683,321 @@ fn fts_repair_drops_orphan_rows() {
     assert_eq!(added, 0, "no visible document is missing yet");
 }
 
-#[test]
-fn outdated_database_is_deleted_and_rebuilt() {
+/// Temp directory for database-lifecycle tests.
+fn temp_db_dir(tag: &str) -> std::path::PathBuf {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir =
-        std::env::temp_dir().join(format!("notes-app-schema-{}-{unique}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "notes-app-{tag}-{}-{unique}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn table_columns(conn: &rusqlite::Connection, table: &str) -> Vec<String> {
+    conn.prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
+/// Seed the *real* v6 structure: `deleted` instead of `status`, no `ext`, no
+/// `hash`, folder labels in `meta`, plus a cross index. The rows are the ones
+/// the upgrade must preserve.
+fn seed_v6_database(db_path: &std::path::Path) {
+    let conn = rusqlite::Connection::open(db_path).unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE inodes (
+            inode INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE,
+            kind TEXT NOT NULL CHECK (kind IN ('directory', 'file')),
+            head_rev INTEGER NOT NULL DEFAULT 0,
+            size INTEGER NOT NULL DEFAULT 0,
+            ctime TEXT NOT NULL, mtime TEXT NOT NULL,
+            deleted INTEGER NOT NULL DEFAULT 0,
+            pinned INTEGER NOT NULL DEFAULT 0,
+            deleted_at TEXT);
+        CREATE INDEX idx_inode_path ON inodes(path);
+        CREATE INDEX idx_inode_kind ON inodes(kind, deleted);
+        CREATE INDEX idx_inode_pinned ON inodes(kind, deleted, pinned);
+        CREATE TABLE blobs (
+            inode INTEGER NOT NULL, rev INTEGER NOT NULL,
+            content TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT 'user',
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (inode, rev));
+        CREATE TABLE meta (
+            inode INTEGER PRIMARY KEY, kind TEXT, title TEXT, status TEXT,
+            due TEXT, tags TEXT, extra TEXT);
+        CREATE INDEX idx_meta_kind_status ON meta(kind, status);
+        CREATE TABLE index_entries (
+            inode INTEGER NOT NULL, dimension TEXT NOT NULL, value TEXT NOT NULL,
+            PRIMARY KEY (inode, dimension, value));
+        CREATE TABLE version_bases (
+            inode INTEGER NOT NULL, rev INTEGER NOT NULL,
+            content TEXT NOT NULL, created_at TEXT NOT NULL,
+            PRIMARY KEY (inode, rev));
+        CREATE TABLE version_diffs (
+            inode INTEGER NOT NULL, rev INTEGER NOT NULL,
+            patch BLOB NOT NULL,
+            PRIMARY KEY (inode, rev));
+        CREATE TABLE version_meta (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            inode INTEGER NOT NULL, rev INTEGER NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'auto',
+            title TEXT NOT NULL DEFAULT '',
+            label TEXT NOT NULL DEFAULT '',
+            label_description TEXT NOT NULL DEFAULT '',
+            is_manual INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL);
+        -- v6 conversations/messages had no last_message_at / thinking_duration_ms.
+        CREATE TABLE conversations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            model_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL);
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL);
+        CREATE TABLE settings (
+            key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE assets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sha256 TEXT NOT NULL UNIQUE, mime TEXT NOT NULL, size INTEGER NOT NULL,
+            width INTEGER, height INTEGER, created_at TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'import');
+
+        INSERT INTO inodes (inode, path, kind, ctime, mtime) VALUES
+            (1, '/life', 'directory', '2026-01-01 00:00:00', '2026-01-01 00:00:00'),
+            (2, '/life/notes', 'directory', '2026-01-01 00:00:00', '2026-01-01 00:00:00'),
+            (5, '/life/diary', 'directory', '2026-01-01 00:00:00', '2026-01-01 00:00:00');
+        INSERT INTO inodes (inode, path, kind, head_rev, size, ctime, mtime) VALUES
+            (3, '/life/notes/购物清单.md', 'file', 1, 10, '2026-01-01 00:00:00', '2026-01-03 00:00:00'),
+            (6, '/life/diary/2026-01-01.md', 'file', 1, 6, '2026-01-01 00:00:00', '2026-01-01 00:00:00');
+        INSERT INTO inodes (inode, path, kind, head_rev, size, ctime, mtime, deleted, deleted_at) VALUES
+            (4, '/life/notes/旧待办.md', 'file', 1, 4, '2026-01-01 00:00:00', '2026-01-02 00:00:00', 1, '2026-01-02 00:00:00');
+
+        INSERT INTO blobs (inode, rev, content, source, created_at) VALUES
+            (3, 1, '---' || char(10) || 'title: 购物清单' || char(10) || '---' || char(10) || '牛奶', 'user', '2026-01-01 00:00:00'),
+            (4, 1, '旧文', 'user', '2026-01-01 00:00:00'),
+            (6, 1, '日记正文', 'user', '2026-01-01 00:00:00');
+
+        INSERT INTO meta VALUES (2, 'folder', '默认', NULL, NULL, NULL, '{}');
+        INSERT INTO meta VALUES (3, 'note', '购物清单', NULL, NULL, '生活', '{}');
+        INSERT INTO index_entries VALUES (3, 'type', 'note'), (3, 'tag', '生活');
+        INSERT INTO version_bases (inode, rev, content, created_at) VALUES
+            (3, 1, '牛奶', '2026-01-01 00:00:00');
+        INSERT INTO conversations (id, title, model_id, created_at, updated_at) VALUES
+            (1, '周会', 'demo', '2026-01-01 09:00:00', '2026-01-01 09:05:00');
+        INSERT INTO messages (conversation_id, role, content, created_at) VALUES
+            (1, 'user', '早', '2026-01-01 09:00:00'),
+            (1, 'assistant', '好', '2026-01-01 09:05:00');
+        INSERT INTO settings (key, value, updated_at) VALUES
+            ('model_registry', '[]', '2026-01-01 00:00:00'),
+            ('prompt_config', '{}', '2026-01-01 00:00:00');
+        INSERT INTO assets (sha256, mime, size, created_at) VALUES
+            ('abc', 'image/png', 12, '2026-01-01 00:00:00');
+
+        PRAGMA user_version = 6;
+        "#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn legacy_v6_database_upgrades_in_place_without_data_loss() {
+    let dir = temp_db_dir("upgrade-v6");
+    let db_path = dir.join(db::DB_FILE_NAME);
+    seed_v6_database(&db_path);
+
+    let conn = db::open_or_rebuild(&dir).expect("a v6 database must upgrade, not be deleted");
+
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        version,
+        db::schema::SCHEMA_VERSION,
+        "the upgrade must stamp the current version"
+    );
+
+    // The new base-layer columns exist and the legacy flag is gone.
+    let columns = table_columns(&conn, "inodes");
+    for expected in ["ext", "hash", "status"] {
+        assert!(
+            columns.contains(&expected.to_string()),
+            "the upgrade must add inodes.{expected}, got {columns:?}"
+        );
+    }
+    assert!(!columns.contains(&"deleted".to_string()));
+
+    // Documents are preserved, lifecycle is carried over, extensions backfilled.
+    let files: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM inodes WHERE kind = 'file'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(files, 3, "no document row may be dropped by the upgrade");
+
+    let rows: Vec<(String, String, String)> = conn
+        .prepare("SELECT path, status, ext FROM inodes WHERE kind = 'file' ORDER BY inode")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "/life/notes/购物清单.md".to_string(),
+                "active".to_string(),
+                "md".to_string()
+            ),
+            (
+                "/life/notes/旧待办.md".to_string(),
+                "deleted".to_string(),
+                "md".to_string()
+            ),
+            (
+                "/life/diary/2026-01-01.md".to_string(),
+                "active".to_string(),
+                "md".to_string()
+            ),
+        ],
+        "trash state and extensions must survive the upgrade"
+    );
+
+    // Folder labels moved to dir_titles; the derived tables are gone.
+    let folder_title: String = conn
+        .query_row("SELECT title FROM dir_titles WHERE inode = 2", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(folder_title, "默认");
+    for dropped in ["meta", "index_entries"] {
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                params![dropped],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "{dropped} must be dropped in place");
+    }
+
+    // Conversations, messages, settings and assets all survive, and the new
+    // conversation column is backfilled from the transcript.
+    let (conversations, messages, settings, assets): (i64, i64, i64, i64) = (
+        conn.query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
+            .unwrap(),
+        conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .unwrap(),
+        conn.query_row("SELECT COUNT(*) FROM settings", [], |r| r.get(0))
+            .unwrap(),
+        conn.query_row("SELECT COUNT(*) FROM assets", [], |r| r.get(0))
+            .unwrap(),
+    );
+    assert_eq!(
+        (conversations, messages, settings, assets),
+        (1, 2, 2, 1),
+        "user data outside the file layer must survive the upgrade"
+    );
+    let last_message: String = conn
+        .query_row(
+            "SELECT last_message_at FROM conversations WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(last_message, "2026-01-01 09:05:00");
+
+    // Hashes are backfilled once, so later writes only maintain them.
+    let hashed: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM inodes WHERE kind = 'file' AND hash IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(hashed, 3);
+
+    drop(conn);
+    // No destructive fallback: the main file was upgraded, not replaced.
+    assert!(
+        !dir.join("life.db.bak-v6").exists(),
+        "a successful upgrade must not leave a backup of a deleted database"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn failed_upgrade_rolls_back_and_keeps_the_file_openable() {
+    let dir = temp_db_dir("upgrade-fail");
+    let db_path = dir.join(db::DB_FILE_NAME);
+    seed_v6_database(&db_path);
+    {
+        // A view named `dir_titles` makes the meta -> dir_titles copy fail after
+        // the additive columns were already applied, so the rollback has to undo
+        // real DDL, not just a no-op.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch("CREATE VIEW dir_titles AS SELECT 1 AS inode, 'x' AS title;")
+            .unwrap();
+    }
+
+    let result = db::open_or_rebuild(&dir);
+    assert!(
+        result.is_err(),
+        "a failed upgrade must surface instead of silently rebuilding"
+    );
+
+    // The original file keeps its v6 structure and stays openable.
+    let conn = rusqlite::Connection::open(&db_path).expect("the database must stay openable");
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 6, "the version stamp must not advance on failure");
+    let columns = table_columns(&conn, "inodes");
+    assert!(
+        !columns.contains(&"ext".to_string()),
+        "the rolled-back column must not survive: {columns:?}"
+    );
+    assert!(columns.contains(&"deleted".to_string()));
+    let (files, meta_rows): (i64, i64) = (
+        conn.query_row(
+            "SELECT COUNT(*) FROM inodes WHERE kind = 'file'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap(),
+        conn.query_row("SELECT COUNT(*) FROM meta", [], |row| row.get(0))
+            .unwrap(),
+    );
+    assert_eq!((files, meta_rows), (3, 2), "no user data may be lost");
+    drop(conn);
+    // A safety copy is still written next to the untouched database.
+    assert!(dir.join("life.db.bak-v6").exists());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn future_schema_version_is_backed_up_and_rebuilt() {
+    let dir = temp_db_dir("future-v12");
     let db_path = dir.join(db::DB_FILE_NAME);
 
     {
-        // Simulate an older build: a stamped version with a legacy table set.
+        // A newer build's file cannot be downgraded: rebuild is the only option.
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         conn.execute_batch(
             "CREATE TABLE inodes (inode INTEGER PRIMARY KEY, path TEXT);
@@ -3476,7 +4010,7 @@ fn outdated_database_is_deleted_and_rebuilt() {
     std::fs::write(dir.join("life.db-wal"), b"").unwrap();
     std::fs::write(dir.join("life.db-shm"), b"").unwrap();
 
-    let conn = db::open_or_rebuild(&dir).expect("outdated database must be rebuilt");
+    let conn = db::open_or_rebuild(&dir).expect("a future database must be rebuilt");
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
@@ -3501,17 +4035,116 @@ fn outdated_database_is_deleted_and_rebuilt() {
         !dir.join("life.db-shm").exists(),
         "stale shm must be removed"
     );
-    let backups = std::fs::read_dir(&dir)
+    let backups: Vec<String> = std::fs::read_dir(&dir)
         .unwrap()
         .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("life.db.bak-")
-        })
-        .count();
-    assert_eq!(backups, 0, "no backup file is kept");
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("life.db.bak-"))
+        .collect();
+    assert_eq!(
+        backups,
+        vec!["life.db.bak-v12".to_string()],
+        "the outgoing database is preserved before the rebuild"
+    );
+    // The backup is a readable copy of the pre-rebuild schema.
+    let old = rusqlite::Connection::open(dir.join("life.db.bak-v12")).unwrap();
+    let legacy: i64 = old
+        .query_row("SELECT COUNT(*) FROM legacy_marker", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(legacy, 0, "backup keeps the old table set");
+    // Windows keeps the file locked until this connection closes.
+    drop(old);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+fn table_row_count(conn: &rusqlite::Connection, table: &str) -> i64 {
+    conn.query_row(&format!("SELECT COUNT(*) FROM \"{table}\""), [], |row| {
+        row.get(0)
+    })
+    .unwrap()
+}
+
+/// Opt-in acceptance check against a real database, not a synthetic fixture.
+///
+/// Copy a v6 `life.db` (plus its `-wal` / `-shm` sidecars) into a directory, then
+/// run `NOTES_APP_V6_FIXTURE=<dir> cargo test real_v6_database_copy_upgrades -- --ignored`.
+/// It asserts the upgrade keeps every user row and never falls back to a rebuild.
+#[test]
+#[ignore = "opt-in: set NOTES_APP_V6_FIXTURE to a directory holding a real v6 life.db copy"]
+fn real_v6_database_copy_upgrades() {
+    let fixture = std::env::var("NOTES_APP_V6_FIXTURE").expect("NOTES_APP_V6_FIXTURE must be set");
+    let source = std::path::Path::new(&fixture);
+    let dir = temp_db_dir("real-v6-copy");
+    let db_path = dir.join(db::DB_FILE_NAME);
+    std::fs::copy(source.join(db::DB_FILE_NAME), &db_path).unwrap();
+    for sidecar in ["-wal", "-shm"] {
+        let from = source.join(format!("{}{sidecar}", db::DB_FILE_NAME));
+        if from.exists() {
+            let to = dir.join(format!("{}{sidecar}", db::DB_FILE_NAME));
+            std::fs::copy(&from, &to).unwrap();
+        }
+    }
+
+    // Snapshot the v6 shape before upgrading.
+    let user_tables = [
+        "inodes",
+        "blobs",
+        "meta",
+        "conversations",
+        "messages",
+        "settings",
+        "assets",
+        "version_bases",
+        "version_meta",
+    ];
+    let (version_before, rows_before) = {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        db::wal::configure(&conn).unwrap();
+        let version = db::schema::schema_version(&conn).unwrap();
+        let rows: Vec<i64> = user_tables
+            .iter()
+            .map(|table| table_row_count(&conn, table))
+            .collect();
+        (version, rows)
+    };
+    assert_eq!(version_before, 6, "the fixture must be a real v6 database");
+
+    let conn = db::open_or_rebuild(&dir).expect("the real v6 copy must upgrade in place");
+    assert_eq!(
+        db::schema::schema_version(&conn).unwrap(),
+        db::schema::SCHEMA_VERSION
+    );
+    let columns = table_columns(&conn, "inodes");
+    for expected in ["ext", "hash", "status"] {
+        assert!(columns.contains(&expected.to_string()), "missing {expected}");
+    }
+    assert!(!columns.contains(&"deleted".to_string()));
+
+    // Every user row survives; only the derived tables are dropped.
+    for (table, before) in user_tables.iter().zip(rows_before.iter()) {
+        if *table == "meta" {
+            continue;
+        }
+        assert_eq!(
+            table_row_count(&conn, table),
+            *before,
+            "{table} rows must not change across the upgrade"
+        );
+    }
+    let meta_gone: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'meta'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(meta_gone, 0);
+    drop(conn);
+
+    assert!(
+        !dir.join(format!("life.db.bak-v{version_before}")).exists(),
+        "the upgraded database must not have been replaced"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -3570,7 +4203,6 @@ fn invalid_skill_documents_are_skipped_not_fatal() {
             path: path.into(),
             content: content.into(),
             create_parents: Some(true),
-            auto_frontmatter: Some(false),
             source: WriteSource::User,
         })
         .unwrap();
@@ -3596,7 +4228,6 @@ fn skill_block_list_triggers_are_parsed() {
         path: "/life/.agent/skills/block-triggers/SKILL.md".into(),
         content: "---\nname: \"块状触发\"\ndescription: \"验证 YAML 块状列表\"\ntriggers:\n  - capture\n  - idea\n  - note this\n---\n\n正文".into(),
         create_parents: Some(true),
-        auto_frontmatter: Some(false),
         source: WriteSource::User,
     })
     .unwrap();
@@ -3692,7 +4323,6 @@ fn malicious_skill_is_only_text_and_agents_stay_read_only() {
             path: "/life/.agent/skills/evil/SKILL.md".into(),
             content: "x".into(),
             create_parents: Some(true),
-            auto_frontmatter: Some(false),
             source: WriteSource::Agent,
         }),
         Err(ToolError::ReadOnlyArea { .. })
@@ -3881,12 +4511,6 @@ fn thousand_document_search_performance() {
     }
     grep_samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    let mut index_samples = Vec::new();
-    measure(&mut index_samples, 10, || {
-        docs::index::query(&vfs, "tag", "种子", None, Some(200)).unwrap();
-    });
-    index_samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
     let mut dir_samples = Vec::new();
     measure(&mut dir_samples, 10, || {
         vfs.read(ReadRequest {
@@ -3902,11 +4526,9 @@ fn thousand_document_search_performance() {
     dir_samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
     println!(
-        "1000-doc seed: grep p50={:.1}ms p95={:.1}ms | index_query p50={:.1}ms p95={:.1}ms | dir p50={:.1}ms p95={:.1}ms",
+        "1000-doc seed: grep p50={:.1}ms p95={:.1}ms | dir p50={:.1}ms p95={:.1}ms",
         percentile(&grep_samples, 0.50),
         percentile(&grep_samples, 0.95),
-        percentile(&index_samples, 0.50),
-        percentile(&index_samples, 0.95),
         percentile(&dir_samples, 0.50),
         percentile(&dir_samples, 0.95),
     );
@@ -3914,10 +4536,6 @@ fn thousand_document_search_performance() {
     assert!(
         percentile(&grep_samples, 0.95) < 200.0,
         "grep first screen must stay under 200ms at 1000 documents"
-    );
-    assert!(
-        percentile(&index_samples, 0.95) < 100.0,
-        "index_query must stay under 100ms at 1000 documents"
     );
 }
 
@@ -3994,6 +4612,342 @@ fn conversation_model_can_be_rebound_in_place() {
     assert_eq!(updated.provider, second.id);
     assert_eq!(updated.model, second.model_id);
     assert_eq!(updated.updated_at, "2020-01-01 00:00:00");
+}
+
+#[test]
+fn markdown_writes_only_sync_the_system_dates() {
+    let mut vfs = test_vfs();
+    write_file(
+        &mut vfs,
+        "/life/ai_default/custom.md",
+        "---\nkind: note\ncustom: keep\n---\n正文",
+        WriteSource::User,
+    );
+    let content = stored_body(&vfs, inode_of(&vfs, "/life/ai_default/custom.md"));
+    // User-owned keys are replayed byte-for-byte: no injected kind/title and no
+    // value reshaping.
+    assert!(content.contains("kind: note"), "kind keeps the user spelling");
+    assert!(content.contains("custom: keep"), "unknown field preserved");
+    assert!(!content.contains("title:"), "the system must not add a title");
+
+    // Only the two system dates are added.
+    assert!(content.contains("created_at: \""), "missing created_at filled");
+    assert!(content.contains("updated_at: \""), "missing updated_at filled");
+    assert!(content.ends_with("---\n正文"), "the body is untouched");
+    // Dates written by the caller never win.
+    let forged = "---\nkind: note\ncreated_at: 2020-01-01T00:00:00+08:00\nupdated_at: 2020-01-01T00:00:00+08:00\nnote: keep\n---\nbody";
+    write_file(&mut vfs, "/life/ai_default/forged.md", forged, WriteSource::User);
+    let stored = stored_body(&vfs, inode_of(&vfs, "/life/ai_default/forged.md"));
+    assert!(!stored.contains("2020-01-01"), "caller dates are overwritten");
+    assert!(stored.contains("note: keep"), "unknown field preserved");
+}
+
+#[test]
+fn saving_and_editing_keep_the_base_layer_creation_time() {
+    let mut vfs = test_vfs();
+    let doc = docs::create_typed(&mut vfs, "note", "时间", "正文", None, None, Some("md")).unwrap();
+    let created: String = vfs
+        .conn()
+        .query_row("SELECT ctime FROM inodes WHERE inode = ?1", params![doc.id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+
+    // Simulate a caller that forged the dates in the stored frontmatter.
+    let forged = "---\nkind: note\ncreated_at: \"1999-01-01 00:00:00\"\nupdated_at: \"1999-01-01 00:00:00\"\n---\n正文";
+    vfs.conn()
+        .execute(
+            "UPDATE blobs SET content = ?1
+             WHERE inode = ?2 AND rev = (SELECT head_rev FROM inodes WHERE inode = ?2)",
+            params![forged, doc.id],
+        )
+        .unwrap();
+
+    docs::save(&mut vfs, doc.id, None, Some("新正文".into()), None, None, None).unwrap();
+    let stored = stored_body(&vfs, doc.id);
+    assert!(!stored.contains("1999-01-01"), "created_at comes from inodes.ctime");
+    assert!(stored.contains(&format!("created_at: \"{created}\"")));
+
+    edit_file(&mut vfs, &doc.path, "新正文", "再改", None, WriteSource::User).unwrap();
+    let edited = stored_body(&vfs, doc.id);
+    assert!(
+        edited.contains(&format!("created_at: \"{created}\"")),
+        "edits must keep the base-layer creation time"
+    );
+    assert!(edited.contains("再改"));
+}
+
+#[test]
+fn saving_a_document_refreshes_the_base_layer_hash() {
+    let mut vfs = test_vfs();
+    let doc =
+        docs::create_typed(&mut vfs, "note", "哈希", "第一版", None, None, Some("md")).unwrap();
+    docs::save(&mut vfs, doc.id, None, Some("第二版".into()), None, None, None)
+        .expect("save should succeed");
+
+    let (content, hash): (String, String) = vfs
+        .conn()
+        .query_row(
+            "SELECT b.content, i.hash
+             FROM inodes i JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
+             WHERE i.inode = ?1",
+            params![doc.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        hash,
+        crate::assets::sha256_hex(content.as_bytes()),
+        "autosave must keep the content hash current"
+    );
+}
+
+#[test]
+fn list_search_matches_raw_document_names() {
+    let mut vfs = test_vfs();
+    let doc = docs::create_typed(&mut vfs, "note", "脚本", "print(1)", None, None, Some("py"))
+        .expect("raw document");
+    assert_eq!(doc.title, "脚本");
+
+    let hits = docs::list(
+        &vfs,
+        docs::types::ListQuery {
+            search: Some("脚本".into()),
+            ..Default::default()
+        },
+    )
+    .expect("search should succeed");
+    assert!(
+        hits.iter().any(|hit| hit.id == doc.id),
+        "raw documents are found by their file name"
+    );
+}
+
+/// Saving follows the creating rule: a note's title is its file name, so dots
+/// are refused; a free-text contact title keeps them.
+#[test]
+fn save_applies_the_dot_rule_per_kind() {
+    let mut vfs = test_vfs();
+    let note = docs::create(&mut vfs, "note", "会议", "正文", None, None).unwrap();
+    assert!(
+        docs::save(
+            &mut vfs,
+            note.id,
+            Some("v1.2".into()),
+            None,
+            None,
+            None,
+            None
+        )
+        .is_err(),
+        "a note title must not contain the extension separator"
+    );
+
+    let contact = docs::create_typed(
+        &mut vfs,
+        "contact",
+        "Dr. Smith-c_1",
+        "",
+        None,
+        None,
+        Some("md"),
+    )
+    .unwrap();
+    docs::save(
+        &mut vfs,
+        contact.id,
+        Some("Dr. Jane-c_1".into()),
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("a contact title may contain dots");
+    assert_eq!(
+        docs::get(&vfs, contact.id, false).unwrap().title,
+        "Dr. Jane-c_1"
+    );
+}
+
+/// The backend contract the todo day-file model relies on.
+///
+/// Todos are ordinary documents: one `todo-{date}.md` per day, whose body is the
+/// checkbox list. The day lives in the path only — frontmatter carries `kind`
+/// and the system dates, never a duplicate `date`. The store lives in the
+/// frontend, so this test pins the primitives it depends on — creating the day
+/// file, appending to it, and listing it back.
+#[test]
+fn todo_day_file_round_trips_through_the_document_layer() {
+    let mut vfs = test_vfs();
+    let first = docs::create_typed(
+        &mut vfs,
+        "todo",
+        "todo-2026-11-17",
+        "- [ ] {id: t_a1} 买菜\n  - created: 2026-11-17T09:00:00\n",
+        None,
+        None,
+        Some("md"),
+    )
+    .expect("the day file must be creatable as an ordinary document");
+
+    assert_eq!(first.path, "/life/todos/todo-2026-11-17.md");
+    assert_eq!(first.kind, "todo");
+    assert_eq!(first.ext, "md");
+    assert_eq!(first.format, "markdown");
+    // The path is the single source of truth for the day: no `date` mirror.
+    assert!(
+        !first.fields.contains_key("date"),
+        "the day must not be duplicated into frontmatter"
+    );
+    assert!(first.content.contains("{id: t_a1}"));
+
+    // A second todo on the same day appends to the same file: no second document.
+    let appended = format!("{}- [ ] {{id: t_b2}} 写周报\n", first.content);
+    docs::save(
+        &mut vfs,
+        first.id,
+        None,
+        Some(appended),
+        None,
+        None,
+        None,
+    )
+    .expect("appending to the day file must succeed");
+
+    let listed = docs::list(
+        &vfs,
+        docs::types::ListQuery {
+            kind: Some("todo".into()),
+            ..Default::default()
+        },
+    )
+    .expect("listing todos must succeed");
+    assert_eq!(listed.len(), 1, "one file per day, not one per todo");
+    assert_eq!(listed[0].path, "/life/todos/todo-2026-11-17.md");
+    assert!(listed[0].content.contains("{id: t_a1}"));
+    assert!(listed[0].content.contains("{id: t_b2}"));
+    // The body is the list; frontmatter stays out of it and keeps the day.
+    assert!(listed[0].content.starts_with("- [ ]"));
+}
+
+#[test]
+fn legacy_meta_table_migrates_to_the_base_layer_only() {
+    let conn = rusqlite::Connection::open_in_memory().expect("open in-memory life.db");
+    db::wal::configure(&conn).expect("apply wal pragmas");
+    conn.execute_batch(
+        // The real v6 shape: no `ext`, no `hash`, and a `deleted` flag for
+        // lifecycle. This fixture must not pre-create columns the migration is
+        // responsible for, or the upgrade gap goes unnoticed.
+        "CREATE TABLE inodes (
+             inode INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE,
+             kind TEXT NOT NULL, head_rev INTEGER NOT NULL DEFAULT 0,
+             size INTEGER NOT NULL DEFAULT 0, ctime TEXT NOT NULL, mtime TEXT NOT NULL,
+             deleted INTEGER NOT NULL DEFAULT 0, pinned INTEGER NOT NULL DEFAULT 0,
+             deleted_at TEXT);
+         CREATE INDEX idx_inode_kind ON inodes(kind, deleted);
+         CREATE TABLE blobs (
+             inode INTEGER NOT NULL, rev INTEGER NOT NULL,
+             content TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'user',
+             created_at TEXT NOT NULL, PRIMARY KEY (inode, rev));
+         CREATE TABLE meta (
+             inode INTEGER PRIMARY KEY, kind TEXT, title TEXT, status TEXT,
+             due TEXT, tags TEXT, extra TEXT);
+         INSERT INTO inodes (inode, path, kind, ctime, mtime)
+             VALUES (1, '/life/notes', 'directory', '2026-01-01 00:00:00', '2026-01-01 00:00:00');
+         INSERT INTO inodes (inode, path, kind, head_rev, size, ctime, mtime)
+             VALUES (2, '/life/notes/会议.md', 'file', 1, 10, '2026-01-01 00:00:00', '2026-01-01 00:00:00');
+         INSERT INTO inodes (inode, path, kind, head_rev, size, ctime, mtime, deleted, deleted_at)
+             VALUES (3, '/life/notes/旧.md', 'file', 1, 4, '2026-01-01 00:00:00', '2026-01-01 00:00:00', 1, '2026-01-02 00:00:00');
+         INSERT INTO inodes (inode, path, kind, head_rev, size, ctime, mtime)
+             VALUES (4, '/life/notes/archive.tar.gz', 'file', 1, 6, '2026-01-01 00:00:00', '2026-01-01 00:00:00');
+         INSERT INTO blobs (inode, rev, content, source, created_at)
+             VALUES (2, 1, '---\ntitle: 会议\n---\n正文', 'user', '2026-01-01 00:00:00'),
+                    (3, 1, '旧文', 'user', '2026-01-01 00:00:00'),
+                    (4, 1, '打包内容', 'user', '2026-01-01 00:00:00');
+         INSERT INTO meta VALUES (1, 'folder', '默认', NULL, NULL, NULL, '{}');
+         INSERT INTO meta VALUES (2, 'note', '会议', NULL, NULL, '工作', '{}');",
+    )
+    .expect("seed the legacy layout");
+
+    db::schema::migrate_file_layers(&conn).expect("migrate the legacy layout");
+
+    let table_count = |name: &str| -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            params![name],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(table_count("meta"), 0, "the legacy mirror table is dropped");
+    assert_eq!(
+        table_count("doc_frontmatter"),
+        0,
+        "frontmatter stays in the Markdown body"
+    );
+
+    let title: String = conn
+        .query_row("SELECT title FROM dir_titles WHERE inode = 1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(title, "默认");
+
+    let statuses: Vec<String> = conn
+        .prepare("SELECT status FROM inodes WHERE kind = 'file' ORDER BY inode")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        statuses,
+        vec![
+            "active".to_string(),
+            "deleted".to_string(),
+            "active".to_string()
+        ]
+    );
+
+    let has_deleted: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('inodes') WHERE name = 'deleted'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(has_deleted, 0, "lifecycle is stored as status only");
+
+    let hash: String = conn
+        .query_row("SELECT hash FROM inodes WHERE inode = 2", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        hash,
+        crate::assets::sha256_hex("---\ntitle: 会议\n---\n正文".as_bytes())
+    );
+
+    // `ext` is a v7 column: the migration must add it and backfill it from the
+    // stored paths, otherwise every later query fails with `no such column`.
+    let exts: Vec<(String, String)> = conn
+        .prepare("SELECT path, ext FROM inodes ORDER BY inode")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        exts,
+        vec![
+            ("/life/notes".to_string(), String::new()),
+            ("/life/notes/会议.md".to_string(), "md".to_string()),
+            ("/life/notes/旧.md".to_string(), "md".to_string()),
+            // The first dot separates, so a multi-part extension survives.
+            ("/life/notes/archive.tar.gz".to_string(), "tar.gz".to_string()),
+        ],
+        "directories stay extension-less and files are backfilled from their path"
+    );
 }
 
 // ---------------------------------------------------------------------------

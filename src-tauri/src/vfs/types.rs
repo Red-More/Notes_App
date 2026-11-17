@@ -86,7 +86,6 @@ pub struct WriteRequest {
     pub path: String,
     pub content: String,
     pub create_parents: Option<bool>,
-    pub auto_frontmatter: Option<bool>,
     pub source: WriteSource,
 }
 
@@ -145,8 +144,8 @@ pub struct GrepRequest {
     pub path: Option<String>,
     pub max_results: Option<usize>,
     pub context_lines: Option<usize>,
-    /// 文档类型过滤（`type` 参数），复用 `meta.kind`：note/todo/contact/diary。
-    pub doc_type: Option<String>,
+    /// 扩展名过滤（不含点，大小写不敏感）；空表示不限制。
+    pub extension: Option<String>,
     pub principal: Principal,
 }
 

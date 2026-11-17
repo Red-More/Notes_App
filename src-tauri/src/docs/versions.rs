@@ -9,13 +9,12 @@
 //! 因此历史链上的 `content(rev) = replay(baseline, diffs[2..=rev])`，除基线
 //! 与 head 外不再有任何整份正文副本。
 
-use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::vfs::error::ToolError;
 use crate::vfs::meta;
-use crate::vfs::{fts, index, version_store, VirtualFs};
+use crate::vfs::{fts, version_store, VirtualFs};
 
 use super::types::{Doc, DocVersion};
 use super::util;
@@ -35,11 +34,9 @@ pub fn list(
         return Ok(Vec::new());
     }
     let mut statement = conn.prepare(
-        "SELECT v.id, v.inode, v.rev,
-                CASE WHEN v.title <> '' THEN v.title ELSE COALESCE(m.title, '') END,
+        "SELECT v.id, v.inode, v.rev, v.title,
                 v.label, v.label_description, v.is_manual, v.created_at
          FROM version_meta v
-         LEFT JOIN meta m ON m.inode = v.inode
          WHERE v.inode = ?1 AND (?2 = 1 OR v.is_manual = 1 OR v.kind = 'baseline')
          ORDER BY v.rev DESC",
     )?;
@@ -59,6 +56,13 @@ pub fn list(
     let mut versions = Vec::new();
     for row in rows {
         versions.push(row?);
+    }
+    // Auto snapshots carry no stored title; fall back to the current document.
+    let fallback = current_title(conn, doc_id).unwrap_or_default();
+    for version in &mut versions {
+        if version.title.trim().is_empty() {
+            version.title = fallback.clone();
+        }
     }
     Ok(versions)
 }
@@ -80,17 +84,13 @@ pub fn content(vfs: &VirtualFs, version_id: i64) -> Result<String, ToolError> {
 pub fn create(vfs: &mut VirtualFs, doc_id: i64) -> Result<DocVersion, ToolError> {
     let tx = vfs.conn_mut().transaction()?;
     let row = util::fetch_row(&tx, doc_id, false)?;
-    let kind = row
-        .meta_kind
-        .clone()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| meta::infer_kind(&row.path).to_string());
+    let parts = meta::parse_document(&row.content);
+    let kind = meta::doc_kind(&parts, &row.path);
     if !meta::is_versioned(&kind) {
         return Err(ToolError::invalid("该类型不支持版本"));
     }
     let now = util::now(&tx)?;
-    let parts = meta::parse_document(&row.content);
-    let title = title_of(&parts, &row.path);
+    let title = title_of(&parts, &row.path, &row.ext);
     let rev = version_store::append_version(
         &tx,
         doc_id,
@@ -124,8 +124,14 @@ pub fn restore(vfs: &mut VirtualFs, version_id: i64) -> Result<Doc, ToolError> {
     }
     let content = version_store::replay(&tx, doc_id, rev)?;
     let now = util::now(&tx)?;
+    // The system owns the two dates: a restore must not resurrect the old ones.
+    let content = if meta::is_markdown_ext(&row.ext) {
+        meta::sync_system_dates(&content, &row.ctime, &now)
+    } else {
+        content
+    };
     let parts = meta::parse_document(&content);
-    let title = title_of(&parts, &row.path);
+    let title = title_of(&parts, &row.path, &row.ext);
     version_store::append_version(
         &tx,
         doc_id,
@@ -139,8 +145,6 @@ pub fn restore(vfs: &mut VirtualFs, version_id: i64) -> Result<Doc, ToolError> {
             created_at: &now,
         },
     )?;
-    meta::upsert_parts(&tx, doc_id, &row.path, &parts)?;
-    index::refresh_parts(&tx, doc_id, &row.path, &parts)?;
     fts::index_document(&tx, doc_id, &content)?;
     tx.commit()?;
 
@@ -198,24 +202,48 @@ pub fn delete(vfs: &mut VirtualFs, version_id: i64) -> Result<(), ToolError> {
 
 /// Resolve the document kind that decides whether versioning applies.
 fn doc_kind_of(conn: &Connection, doc_id: i64) -> Result<String, ToolError> {
-    let row: Option<(String, Option<String>)> = conn
+    let row: Option<(String, String, String)> = conn
         .query_row(
-            "SELECT i.path, m.kind
+            "SELECT i.path, i.ext, COALESCE(b.content, '')
              FROM inodes i
-             LEFT JOIN meta m ON m.inode = i.inode
+             LEFT JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
              WHERE i.inode = ?1 AND i.kind = 'file'",
             params![doc_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    let Some((path, kind)) = row else {
+    let Some((path, ext, content)) = row else {
         return Err(ToolError::NotFound {
             path: format!("doc#{doc_id}"),
         });
     };
-    Ok(kind
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| meta::infer_kind(&path).to_string()))
+    if !meta::is_markdown_ext(&ext) {
+        return Ok(meta::infer_kind(&path).to_string());
+    }
+    Ok(meta::doc_kind(&meta::parse_document(&content), &path))
+}
+
+/// Current document title, used as the fallback for auto snapshot titles.
+fn current_title(conn: &Connection, doc_id: i64) -> Result<String, ToolError> {
+    let row: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT i.path, i.ext, COALESCE(b.content, '')
+             FROM inodes i
+             LEFT JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
+             WHERE i.inode = ?1 AND i.kind = 'file'",
+            params![doc_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((path, ext, content)) = row else {
+        return Ok(String::new());
+    };
+    let parts = if meta::is_markdown_ext(&ext) {
+        meta::parse_document(&content)
+    } else {
+        meta::DocumentParts::default()
+    };
+    Ok(meta::doc_title(&parts, &path, &ext))
 }
 
 fn find_version(conn: &Connection, version_id: i64) -> Result<Option<(i64, i64)>, ToolError> {
@@ -229,12 +257,10 @@ fn find_version(conn: &Connection, version_id: i64) -> Result<Option<(i64, i64)>
 }
 
 fn fetch_version(conn: &Connection, doc_id: i64, rev: i64) -> Result<DocVersion, ToolError> {
-    let version = conn.query_row(
-        "SELECT v.id, v.inode, v.rev,
-                CASE WHEN v.title <> '' THEN v.title ELSE COALESCE(m.title, '') END,
+    let mut version = conn.query_row(
+        "SELECT v.id, v.inode, v.rev, v.title,
                 v.label, v.label_description, v.is_manual, v.created_at
          FROM version_meta v
-         LEFT JOIN meta m ON m.inode = v.inode
          WHERE v.inode = ?1 AND v.rev = ?2",
         params![doc_id, rev],
         |row| {
@@ -251,19 +277,14 @@ fn fetch_version(conn: &Connection, doc_id: i64, rev: i64) -> Result<DocVersion,
             })
         },
     )?;
+    if version.title.trim().is_empty() {
+        version.title = current_title(conn, doc_id)?;
+    }
     Ok(version)
 }
 
-fn title_of(parts: &meta::DocumentParts, path: &str) -> String {
-    parts
-        .title
-        .clone()
-        .filter(|title| !title.trim().is_empty())
-        .unwrap_or_else(|| {
-            Path::new(path)
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .unwrap_or("untitled")
-                .to_string()
-        })
+/// Snapshot title for a document, resolved exactly like the read path so the
+/// version list and the editor agree on the name.
+fn title_of(parts: &meta::DocumentParts, path: &str, ext: &str) -> String {
+    meta::doc_title(parts, path, ext)
 }

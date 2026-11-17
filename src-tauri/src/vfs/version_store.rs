@@ -151,8 +151,14 @@ pub fn append_version(
         ],
     )?;
     conn.execute(
-        "UPDATE inodes SET head_rev = ?1, size = ?2, mtime = ?3 WHERE inode = ?4",
-        params![next, record.content.len() as i64, record.created_at, inode],
+        "UPDATE inodes SET head_rev = ?1, size = ?2, mtime = ?3, hash = ?4 WHERE inode = ?5",
+        params![
+            next,
+            record.content.len() as i64,
+            record.created_at,
+            super::content_hash(record.content),
+            inode
+        ],
     )?;
     Ok(next)
 }

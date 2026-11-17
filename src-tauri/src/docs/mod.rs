@@ -12,7 +12,6 @@
 
 pub mod export;
 pub mod folders;
-pub mod index;
 pub mod types;
 pub mod util;
 pub mod versions;
@@ -33,9 +32,9 @@ use crate::vfs::{
 
 use types::{Doc, DocFields, DocSaveReceipt, ListQuery};
 use util::{
-    basename, doc_date, doc_from_row, fetch_row, folder_map, folder_path, folder_path_any,
-    head_content, normalize_extension, parent_dir, root_for, safe_segment, unique_file_path,
-    unique_file_path_ext, validate_file_name,
+    doc_date, doc_from_row, ensure_text_extension, fetch_row, folder_map, folder_path,
+    folder_path_any, head_content, normalize_extension_or_empty, parent_dir, root_for, safe_segment,
+    stem, unique_file_path, validate_file_name,
 };
 
 /// 读取单个文档。
@@ -50,27 +49,23 @@ pub fn get(vfs: &VirtualFs, id: i64, include_deleted: bool) -> Result<Doc, ToolE
 /// 这样字段扩展不需要频繁改 SQL，文档量级（千级）下成本可控。
 pub fn list(vfs: &VirtualFs, query: ListQuery) -> Result<Vec<Doc>, ToolError> {
     let conn = vfs.conn();
-    let deleted = if query.deleted.unwrap_or(false) { 1 } else { 0 };
+    let status = if query.deleted.unwrap_or(false) {
+        "deleted"
+    } else {
+        "active"
+    };
     let kind_filter = query.kind.clone();
     let mut sql = String::from(
         "SELECT i.inode, i.path, i.head_rev, i.pinned, i.ctime, i.mtime, i.deleted_at,
-                m.kind, m.title, COALESCE(b.content, '')
+                COALESCE(b.content, ''), i.ext
          FROM inodes i
-         LEFT JOIN meta m ON m.inode = i.inode
          JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
-         WHERE i.kind = 'file' AND i.deleted = ?",
+         WHERE i.kind = 'file' AND i.status = ?",
     );
-    let mut args: Vec<SqlValue> = vec![SqlValue::Integer(deleted)];
+    let mut args: Vec<SqlValue> = vec![SqlValue::Text(status.to_string())];
 
     // A folder tab shows whatever lives inside it, so kind is ignored when a
     // folder id or an explicit root scope is given.
-    if query.folder_id.is_none() && query.root.is_none() {
-        if let Some(kind) = kind_filter.as_deref() {
-            sql.push_str(" AND m.kind = ?");
-            args.push(SqlValue::Text(kind.to_string()));
-        }
-    }
-
     if let Some(folder_id) = query.folder_id {
         let dir = folder_path_any(conn, folder_id)?;
         push_direct_child_filter(&mut sql, &mut args, &dir);
@@ -90,12 +85,12 @@ pub fn list(vfs: &VirtualFs, query: ListQuery) -> Result<Vec<Doc>, ToolError> {
     if let Some(raw) = query.search.as_deref() {
         let search = raw.trim();
         if !search.is_empty() {
+            // Raw documents are titled by their file name, so the path must
+            // participate; Markdown titles live in the frontmatter body.
             sql.push_str(
-                " AND (instr(lower(COALESCE(m.title, '')), lower(?)) > 0
-                       OR instr(lower(b.content), lower(?)) > 0
-                       OR instr(lower(COALESCE(m.extra, '')), lower(?)) > 0)",
+                " AND (instr(lower(b.content), lower(?)) > 0
+                       OR instr(lower(i.path), lower(?)) > 0)",
             );
-            args.push(SqlValue::Text(search.to_string()));
             args.push(SqlValue::Text(search.to_string()));
             args.push(SqlValue::Text(search.to_string()));
         }
@@ -110,7 +105,18 @@ pub fn list(vfs: &VirtualFs, query: ListQuery) -> Result<Vec<Doc>, ToolError> {
         sql.push_str(&format!(" AND i.path IN ({placeholders})"));
         args.extend(paths.iter().map(|path| SqlValue::Text(path.clone())));
     }
-    sql.push_str(" ORDER BY i.mtime DESC LIMIT 2000");
+    // A kind-scoped query is already bounded by its root folder, so the row cap
+    // is skipped: filtering by frontmatter kind happens after this query and
+    // must not lose candidates to the 2000-row window.
+    let kind_scoped = kind_filter.is_some()
+        && query.folder_id.is_none()
+        && query.root.is_none()
+        && !query.unclassified.unwrap_or(false);
+    if kind_scoped {
+        sql.push_str(" ORDER BY i.mtime DESC");
+    } else {
+        sql.push_str(" ORDER BY i.mtime DESC LIMIT 2000");
+    }
 
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(rusqlite::params_from_iter(args), util::row_to_doc)?;
@@ -118,6 +124,13 @@ pub fn list(vfs: &VirtualFs, query: ListQuery) -> Result<Vec<Doc>, ToolError> {
     let mut docs = Vec::new();
     for row in rows {
         docs.push(doc_from_row(row?, &folders));
+    }
+
+    // Kind lives in frontmatter, so filter after parsing instead of in SQL.
+    if query.folder_id.is_none() && query.root.is_none() {
+        if let Some(kind) = kind_filter.as_deref() {
+            docs.retain(|doc| doc.kind == kind);
+        }
     }
 
     if let Some(raw) = query.tag.as_deref() {
@@ -185,11 +198,19 @@ pub fn create_typed(
     ext: Option<&str>,
 ) -> Result<Doc, ToolError> {
     root_for(kind)?;
-    let mut fields = fields.unwrap_or_default();
+    // Notes treat the title as a file name, so dots stay reserved for the
+    // extension picker. Todo/Contact titles are free text ("Dr. Smith"), so only
+    // path-illegal characters are rejected — and reported, never rewritten.
+    let forbid_dots = kind == "note";
+    if forbid_dots && title.contains('.') {
+        return Err(ToolError::invalid("文件名不能包含点号，扩展名请单独选择"));
+    }
+    let fields = fields.unwrap_or_default();
     let ext = match ext {
-        Some(raw) => normalize_extension(raw)?,
+        Some(raw) => normalize_extension_or_empty(raw)?,
         None => "md".to_string(),
     };
+    ensure_text_extension(&ext)?;
 
     let dir = {
         let conn = vfs.conn();
@@ -205,9 +226,15 @@ pub fn create_typed(
 
     // safe_segment keeps trailing dots/spaces; trim them so a hand-crafted
     // command never stores a stem like "报告." (the UI validates the same rule).
-    let raw_stem = safe_segment(title, kind);
-    let trimmed_stem = raw_stem.trim_end_matches(|c| c == '.' || c == ' ');
-    let stem = if trimmed_stem.is_empty() {
+    let raw_stem = if forbid_dots {
+        safe_segment(title, kind, true)
+    } else {
+        // A contact name may contain dots; it must not be silently rewritten,
+        // so an illegal character is an error the user can act on.
+        validate_file_name(title, true)?
+    };
+    let trimmed_stem = raw_stem.trim_end_matches(['.', ' ']);
+    let stem_name = if trimmed_stem.is_empty() {
         kind.to_string()
     } else {
         trimmed_stem.to_string()
@@ -215,25 +242,28 @@ pub fn create_typed(
 
     let path = {
         let conn = vfs.conn();
-        unique_file_path_ext(conn, &dir, &stem, &ext)?
+        unique_file_path(conn, &dir, &stem_name, &ext)?
     };
 
-    if kind == "contact" && !fields.contains_key("personId") {
-        fields.insert(
-            "personId".to_string(),
-            Value::String(basename(&path).to_string()),
-        );
-    }
-
     let now = util::now(vfs.conn())?;
-    let markdown = meta::compose(kind, title, &now, &now, &fields, content);
-    vfs.write(WriteRequest {
-        path: path.clone(),
-        content: markdown,
-        create_parents: Some(true),
-        auto_frontmatter: Some(false),
-        source: WriteSource::User,
-    })?;
+    // Raw formats store the body verbatim; only Markdown gets frontmatter.
+    let is_markdown = meta::is_markdown_ext(&ext);
+    let payload = if is_markdown {
+        meta::compose(kind, title, &now, &now, &fields, content)
+    } else {
+        content.to_string()
+    };
+    // The document API owns the exact path, including extension-less files, and
+    // passes the resolved extension so a dotted base name is never re-split.
+    vfs.write_with_ext(
+        WriteRequest {
+            path: path.clone(),
+            content: payload,
+            create_parents: Some(true),
+            source: WriteSource::User,
+        },
+        &ext,
+    )?;
 
     let conn = vfs.conn();
     let folders = folder_map(conn)?;
@@ -261,13 +291,30 @@ pub fn save(
             message: format!("inode {id} has no body for rev={}", row.head_rev),
         });
     };
-    let parts = meta::parse_document(&head);
-    let kind = row
-        .meta_kind
-        .clone()
-        .filter(|s| !s.is_empty())
-        .or_else(|| parts.kind.clone())
-        .unwrap_or_else(|| meta::infer_kind(&row.path).to_string());
+    // Raw documents keep their bytes verbatim: parsing them as Markdown would
+    // strip a leading `---` or treat a shebang as a heading. The persisted
+    // extension decides, because a contact-like base name may contain dots.
+    let is_markdown = meta::is_markdown_ext(&row.ext);
+    let parts = if is_markdown {
+        meta::parse_document(&head)
+    } else {
+        meta::DocumentParts {
+            body: head.clone(),
+            ..Default::default()
+        }
+    };
+    let kind = meta::doc_kind(&parts, &row.path);
+
+    // Saving follows the same naming rule as creating: a note's title is its
+    // file name, so it must not contain the extension separator. Free-text kinds
+    // (todo/contact) keep their dots.
+    if kind == "note" {
+        if let Some(next_title) = title.as_deref() {
+            if next_title.contains('.') {
+                return Err(ToolError::invalid("文件名不能包含点号，扩展名请单独选择"));
+            }
+        }
+    }
 
     if let Some(expect) = expect_rev {
         if expect != row.head_rev {
@@ -287,48 +334,31 @@ pub fn save(
                 folder_path(&tx, target_id)?
             };
             if parent_dir(&row.path) != target_dir.as_str() {
-                let stem = basename(&row.path).to_string();
-                new_path = unique_file_path(&tx, &target_dir, &stem)?;
+                let base = stem(&row.path, &row.ext).to_string();
+                new_path = unique_file_path(&tx, &target_dir, &base, &row.ext)?;
             }
         }
     }
 
-    let old_title = row
-        .meta_title
-        .clone()
-        .filter(|s| !s.is_empty())
-        .or_else(|| parts.title.clone())
-        .unwrap_or_else(|| basename(&row.path).to_string());
-    let title = title.unwrap_or(old_title);
     let body = content.unwrap_or(parts.body);
-
-    let mut merged = parts.fields;
-    if let Some(update) = fields {
-        for (key, value) in update {
-            if value.is_null() {
-                merged.remove(&key);
-            } else {
-                merged.insert(key, value);
-            }
-        }
-    }
-    if kind == "contact" && !merged.contains_key("personId") {
-        merged.insert(
-            "personId".to_string(),
-            Value::String(basename(&new_path).to_string()),
-        );
+    // User-owned frontmatter passes through untouched: only keys the caller
+    // explicitly updates are rewritten (`null` removes a key).
+    let mut updates = fields.unwrap_or_default();
+    if let Some(title) = title {
+        updates.insert("title".to_string(), Value::String(title));
     }
 
-    let created_at = parts.created_at.unwrap_or_else(|| row.ctime.clone());
     let now = util::now(&tx)?;
     // Reserved config documents (`.agent` / `.lifeos`) are ordinary editable
     // files for the user: write the body verbatim instead of adding Markdown
     // frontmatter, and keep them out of the document mirror.
     let is_reserved = reserved::is_reserved_path(&new_path);
-    let markdown = if is_reserved {
+    // created_at is owned by the base layer and updated_at by the clock; any
+    // date the caller wrote into the frontmatter is discarded.
+    let markdown = if is_reserved || !is_markdown {
         body
     } else {
-        meta::compose(&kind, &title, &created_at, &now, &merged, &body)
+        meta::rewrite_document(&head, Some(&body), &updates, &row.ctime, &now)
     };
     if markdown.len() > 1024 * 1024 {
         return Err(ToolError::ContentTooLarge {
@@ -356,14 +386,17 @@ pub fn save(
         params![markdown, now, id, row.head_rev],
     )?;
     tx.execute(
-        "UPDATE inodes SET path = ?1, size = ?2, mtime = ?3 WHERE inode = ?4",
-        params![new_path, markdown.len() as i64, now, id],
+        "UPDATE inodes SET path = ?1, size = ?2, mtime = ?3, hash = ?4 WHERE inode = ?5",
+        params![
+            new_path,
+            markdown.len() as i64,
+            now,
+            crate::vfs::content_hash(&markdown),
+            id
+        ],
     )?;
-    // Parse the rewritten document once and share it with both mirrors.
-    let written = meta::parse_document(&markdown);
+    // The body already holds its frontmatter; only search needs refreshing.
     if !is_reserved {
-        meta::upsert_parts(&tx, id, &new_path, &written)?;
-        crate::vfs::index::refresh_parts(&tx, id, &new_path, &written)?;
         crate::vfs::fts::index_document(&tx, id, &markdown)?;
     }
     let receipt = DocSaveReceipt {
@@ -377,14 +410,46 @@ pub fn save(
     Ok(receipt)
 }
 
-/// Rename one document file (base name + extension) in place.
+/// Document kind of a stored row, resolved like the rest of the layer: Markdown
+/// frontmatter wins, otherwise the path root decides.
+fn doc_kind_of_row(row: &util::DocRow) -> String {
+    if meta::is_markdown_ext(&row.ext) {
+        meta::doc_kind(&meta::parse_document(&row.content), &row.path)
+    } else {
+        meta::infer_kind(&row.path).to_string()
+    }
+}
+
+/// Rename one document file in place.
 ///
-/// Moving the path does not touch FTS or the cross index: both are keyed by
-/// inode and resolve the current path from `inodes`.
-pub fn rename_file(vfs: &mut VirtualFs, id: i64, name: &str) -> Result<Doc, ToolError> {
-    let name = validate_file_name(name)?;
+/// `base` is the whole name without the extension. Notes must not contain dots
+/// (the dot separates the extension); free-text names such as a contact
+/// ("Dr. Smith-c_ab12") keep theirs. `ext` is stored separately so a multi-part
+/// extension is never re-split; an empty `ext` removes the extension.
+///
+/// Moving the path does not touch FTS: rows are keyed by inode and resolve the
+/// current path from `inodes`.
+pub fn rename_file(vfs: &mut VirtualFs, id: i64, base: &str, ext: &str) -> Result<Doc, ToolError> {
+    let ext = normalize_extension_or_empty(ext)?;
+    ensure_text_extension(&ext)?;
     let row = fetch_row(vfs.conn(), id, false)?;
+    // The dot rule follows the document kind, so it has to be resolved from the
+    // row rather than the caller.
+    let base = validate_file_name(base, doc_kind_of_row(&row) != "note")?;
+    let name = if ext.is_empty() {
+        base.clone()
+    } else {
+        format!("{base}.{ext}")
+    };
     let target = format!("{}/{}", parent_dir(&row.path), name);
+    // Switching between Markdown and raw would need a content conversion, so
+    // the two families never cross by rename alone. The stored extension of the
+    // row and the requested one decide, not the shape of the name.
+    if meta::is_markdown_ext(&row.ext) != meta::is_markdown_ext(&ext) {
+        return Err(ToolError::invalid(
+            "Markdown 与非 Markdown 文档之间不能直接切换扩展名",
+        ));
+    }
     // Renaming a policy file (in or out) silently changes visibility ACL
     // enforcement; the file must stay editable in place instead.
     if reserved::is_policy_file(&row.path) || reserved::is_policy_file(&target) {
@@ -394,29 +459,56 @@ pub fn rename_file(vfs: &mut VirtualFs, id: i64, name: &str) -> Result<Doc, Tool
         return get(vfs, id, false);
     }
     let exists: i64 = vfs.conn().query_row(
-        "SELECT COUNT(*) FROM inodes WHERE path = ?1",
-        params![target],
+        "SELECT COUNT(*) FROM inodes WHERE lower(path) = lower(?1) AND inode <> ?2",
+        params![target, id],
         |row| row.get(0),
     )?;
     if exists > 0 {
         return Err(ToolError::AlreadyExists { path: target });
     }
-    // Path and title stay in one transaction: `doc_list` renders `meta.title`
-    // directly, and the editor treats the file name as the title. Reserved
-    // config files keep no meta row at all.
+    // Path and extension change in one transaction.
     let tx = vfs.conn_mut().transaction()?;
+    let now = util::now(&tx)?;
     tx.execute(
-        "UPDATE inodes SET path = ?1, mtime = datetime('now','localtime')
-         WHERE inode = ?2 AND kind = 'file'",
-        params![target, id],
+        "UPDATE inodes SET path = ?1, ext = ?2, mtime = ?3
+         WHERE inode = ?4 AND kind = 'file'",
+        params![target, ext, now, id],
     )?;
-    if !reserved::is_reserved_path(&target) {
-        // Title = file stem; the extension is not part of the display title.
-        let stem = match name.rsplit_once('.') {
-            Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => stem.to_string(),
-            _ => name.to_string(),
-        };
-        tx.execute("UPDATE meta SET title = ?1 WHERE inode = ?2", params![stem, id])?;
+    // Keep the YAML title in sync with the file name: the editor shows the file
+    // name, so a stale frontmatter title would reappear after a reload.
+    let row = util::fetch_row(&tx, id, false)?;
+    if meta::is_markdown_ext(&row.ext) && !reserved::is_reserved_path(&row.path) {
+        let parts = meta::parse_document(&row.content);
+        if parts.title.is_some() && parts.title.as_deref() != Some(base.as_str()) {
+            let updates = std::collections::BTreeMap::from([(
+                "title".to_string(),
+                Value::String(base.clone()),
+            )]);
+            let rewritten =
+                meta::rewrite_document(&row.content, None, &updates, &row.ctime, &now);
+            tx.execute(
+                "UPDATE blobs SET content = ?1 WHERE inode = ?2 AND rev = ?3",
+                params![rewritten, id, row.head_rev],
+            )?;
+            tx.execute(
+                "UPDATE inodes SET size = ?1, hash = ?2 WHERE inode = ?3",
+                params![
+                    rewritten.len() as i64,
+                    crate::vfs::content_hash(&rewritten),
+                    id
+                ],
+            )?;
+            crate::vfs::fts::index_document(&tx, id, &rewritten)?;
+            // Auto snapshots carry the document title; keep the head snapshot
+            // in sync. Manual labels are user-authored and stay untouched.
+            if let Some(old_title) = parts.title.as_deref() {
+                tx.execute(
+                    "UPDATE version_meta SET title = ?1
+                     WHERE inode = ?2 AND rev = ?3 AND is_manual = 0 AND title = ?4",
+                    params![base, id, row.head_rev, old_title],
+                )?;
+            }
+        }
     }
     tx.commit()?;
     get(vfs, id, false)
@@ -428,8 +520,8 @@ pub fn delete_many(vfs: &mut VirtualFs, ids: &[i64]) -> Result<(), ToolError> {
     let now = util::now(&tx)?;
     for id in ids {
         tx.execute(
-            "UPDATE inodes SET deleted = 1, deleted_at = ?1, mtime = ?1
-             WHERE inode = ?2 AND kind = 'file' AND deleted = 0",
+            "UPDATE inodes SET status = 'deleted', deleted_at = ?1, mtime = ?1
+             WHERE inode = ?2 AND kind = 'file' AND status = 'active'",
             params![now, id],
         )?;
         // 回收站内容不可被检索；恢复时再重建索引行。
@@ -444,23 +536,22 @@ pub fn restore_many(vfs: &mut VirtualFs, ids: &[i64]) -> Result<(), ToolError> {
     let tx = vfs.conn_mut().transaction()?;
     for id in ids {
         tx.execute(
-            "UPDATE inodes SET deleted = 0, deleted_at = NULL
+            "UPDATE inodes SET status = 'active', deleted_at = NULL
              WHERE inode = ?1 AND kind = 'file'",
             params![id],
         )?;
-        // 恢复后立即补齐交叉索引，避免历史文档恢复后查不到。
-        let row: Option<(String, String)> = tx
+        // Refresh the search row so a restored document is searchable again.
+        let content: Option<String> = tx
             .query_row(
-                "SELECT i.path, COALESCE(b.content, '')
+                "SELECT COALESCE(b.content, '')
                  FROM inodes i
                  LEFT JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
                  WHERE i.inode = ?1 AND i.kind = 'file'",
                 params![id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| r.get(0),
             )
             .optional()?;
-        if let Some((path, content)) = row {
-            crate::vfs::index::refresh(&tx, *id, &path, &content)?;
+        if let Some(content) = content {
             crate::vfs::fts::index_document(&tx, *id, &content)?;
         }
     }
@@ -468,13 +559,13 @@ pub fn restore_many(vfs: &mut VirtualFs, ids: &[i64]) -> Result<(), ToolError> {
     Ok(())
 }
 
-/// 物理删除回收站中的文档（blobs/meta/version/index 级联删除）。
+/// 物理删除回收站中的文档（blobs/frontmatter/version 级联删除）。
 pub fn purge_many(vfs: &mut VirtualFs, ids: &[i64]) -> Result<(), ToolError> {
     let tx = vfs.conn_mut().transaction()?;
     for id in ids {
         crate::vfs::fts::remove_document(&tx, *id)?;
         tx.execute(
-            "DELETE FROM inodes WHERE inode = ?1 AND kind = 'file' AND deleted = 1",
+            "DELETE FROM inodes WHERE inode = ?1 AND kind = 'file' AND status = 'deleted'",
             params![id],
         )?;
     }
@@ -486,7 +577,7 @@ pub fn purge_many(vfs: &mut VirtualFs, ids: &[i64]) -> Result<(), ToolError> {
 pub fn empty_trash(vfs: &mut VirtualFs) -> Result<(), ToolError> {
     crate::vfs::fts::remove_deleted(vfs.conn_mut())?;
     vfs.conn_mut()
-        .execute("DELETE FROM inodes WHERE kind = 'file' AND deleted = 1", [])?;
+        .execute("DELETE FROM inodes WHERE kind = 'file' AND status = 'deleted'", [])?;
     Ok(())
 }
 
@@ -515,31 +606,37 @@ pub fn move_many(
         _ => NOTES_ROOT.to_string(),
     };
     for id in ids {
-        let row: Option<(String, String)> = {
+        let row: Option<(String, String, String)> = {
             let mut stmt = tx.prepare(
-                "SELECT i.path, COALESCE(m.kind, '')
-                 FROM inodes i LEFT JOIN meta m ON m.inode = i.inode
-                 WHERE i.inode = ?1 AND i.kind = 'file' AND i.deleted = 0",
+                "SELECT i.path, i.ext, COALESCE(b.content, '')
+                 FROM inodes i
+                 LEFT JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
+                 WHERE i.inode = ?1 AND i.kind = 'file' AND i.status = 'active'",
             )?;
             let mut rows = stmt.query(params![id])?;
             match rows.next()? {
-                Some(r) => Some((r.get(0)?, r.get(1)?)),
+                Some(r) => Some((r.get(0)?, r.get(1)?, r.get(2)?)),
                 None => None,
             }
         };
-        let Some((path, kind)) = row else {
+        let Some((path, ext, content)) = row else {
             return Err(ToolError::NotFound {
                 path: format!("doc#{id}"),
             });
         };
-        if !kind.is_empty() && kind != "note" {
+        let kind = if meta::is_markdown_ext(&ext) {
+            meta::doc_kind(&meta::parse_document(&content), &path)
+        } else {
+            meta::infer_kind(&path).to_string()
+        };
+        if kind != "note" {
             return Err(ToolError::invalid("只有笔记可以移动文件夹"));
         }
         if parent_dir(&path) == target_dir.as_str() {
             continue;
         }
-        let stem = basename(&path).to_string();
-        let new_path = unique_file_path(&tx, &target_dir, &stem)?;
+        let base = stem(&path, &ext).to_string();
+        let new_path = unique_file_path(&tx, &target_dir, &base, &ext)?;
         tx.execute(
             "UPDATE inodes SET path = ?1, mtime = datetime('now','localtime') WHERE inode = ?2",
             params![new_path, id],
@@ -565,7 +662,7 @@ pub fn move_many_to_dir(
     let kind: Option<String> = vfs
         .conn()
         .query_row(
-            "SELECT kind FROM inodes WHERE path = ?1 AND deleted = 0",
+            "SELECT kind FROM inodes WHERE path = ?1 AND status = 'active'",
             params![target_dir],
             |r| r.get(0),
         )
@@ -576,15 +673,15 @@ pub fn move_many_to_dir(
 
     let tx = vfs.conn_mut().transaction()?;
     for id in ids {
-        let path: Option<String> = tx
+        let row: Option<(String, String)> = tx
             .query_row(
-                "SELECT path FROM inodes
-                 WHERE inode = ?1 AND kind = 'file' AND deleted = 0",
+                "SELECT path, ext FROM inodes
+                 WHERE inode = ?1 AND kind = 'file' AND status = 'active'",
                 params![id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        let Some(path) = path else {
+        let Some((path, ext)) = row else {
             return Err(ToolError::NotFound {
                 path: format!("doc#{id}"),
             });
@@ -592,8 +689,8 @@ pub fn move_many_to_dir(
         if parent_dir(&path) == target_dir {
             continue;
         }
-        let stem = basename(&path).to_string();
-        let new_path = unique_file_path(&tx, &target_dir, &stem)?;
+        let base = stem(&path, &ext).to_string();
+        let new_path = unique_file_path(&tx, &target_dir, &base, &ext)?;
         tx.execute(
             "UPDATE inodes SET path = ?1, mtime = datetime('now','localtime') WHERE inode = ?2",
             params![new_path, id],

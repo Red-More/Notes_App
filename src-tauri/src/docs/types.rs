@@ -17,8 +17,12 @@ pub struct Doc {
     /// inode，作为稳定 id 暴露给前端。
     pub id: i64,
     pub path: String,
+    /// 持久化的扩展名（保留大小写，不含点）；空串表示无扩展名。
+    pub ext: String,
     /// note | todo | contact | diary
     pub kind: String,
+    /// markdown | raw — raw documents store their body verbatim (no frontmatter).
+    pub format: String,
     pub title: String,
     /// 正文（已剥离 frontmatter）。
     pub content: String,
@@ -86,17 +90,6 @@ pub struct FolderCrumb {
     pub name: String,
     /// 虚拟路径，用于前端按路径判断命名空间。
     pub path: String,
-}
-
-/// 交叉索引查询结果：轻量引用，供“人物/地点/日期”聚合列表使用。
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DocRef {
-    pub id: i64,
-    pub path: String,
-    pub kind: String,
-    pub title: String,
-    pub updated_at: String,
 }
 
 /// 文档列表查询参数（由 Tauri command 逐项构造）。

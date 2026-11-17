@@ -41,14 +41,12 @@ pub fn fs_write(
     path: String,
     content: String,
     create_parents: Option<bool>,
-    auto_frontmatter: Option<bool>,
 ) -> Result<WriteReceipt, ToolError> {
     let mut vfs = crate::lock(&state.0);
     vfs.write(WriteRequest {
         path,
         content,
         create_parents,
-        auto_frontmatter,
         source: WriteSource::Agent,
     })
 }
@@ -92,13 +90,14 @@ pub fn fs_glob(
 }
 
 /// 内容搜索：FTS5 优先，未命中时 LIKE 回退，响应中 `fallback` 如实标记。
-/// `type` 按文档类型过滤（note/todo/contact/diary）。（模型面：身份固定为 Agent）
+/// `extension` 按文件扩展名过滤（如 md、py，不带点；大小写不敏感）。
+/// （模型面：身份固定为 Agent）
 #[tauri::command]
 pub fn fs_grep(
     state: State<'_, VfsState>,
     pattern: String,
     path: Option<String>,
-    r#type: Option<String>,
+    extension: Option<String>,
     max_results: Option<usize>,
     context_lines: Option<usize>,
 ) -> Result<GrepResponse, ToolError> {
@@ -108,7 +107,7 @@ pub fn fs_grep(
         path,
         max_results,
         context_lines,
-        doc_type: r#type,
+        extension,
         principal: Principal::Agent,
     })
 }
@@ -137,7 +136,7 @@ pub fn user_read(
 pub fn user_search(
     state: State<'_, VfsState>,
     pattern: String,
-    r#type: Option<String>,
+    extension: Option<String>,
     path: Option<String>,
     max_results: Option<usize>,
 ) -> Result<GrepResponse, ToolError> {
@@ -147,7 +146,7 @@ pub fn user_search(
         path,
         max_results,
         context_lines: None,
-        doc_type: r#type,
+        extension,
         principal: Principal::User,
     })
 }

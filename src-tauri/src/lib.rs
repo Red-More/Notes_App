@@ -30,14 +30,11 @@ pub fn run() {
         .setup(|app| {
             // life.db 是唯一数据库；VirtualFs 独占连接并通过 Mutex 串行化。
             let conn = db::init(app.handle())?;
+            // 增量迁移（文件分层、会话列）先执行：旧库在这里把目录标题
+            // 拆到 dir_titles，并把 deleted 升级为 status。
+            db::schema::migrate(&conn)?;
             // 系统目录、中文标题与 Agent 默认 ACL：幂等补齐，不覆盖用户修改。
             db::schema::ensure_default_dirs(&conn)?;
-            // 增量列（如 conversations.last_message_at）就地补齐，绝不重建数据库。
-            db::schema::migrate(&conn)?;
-            // 历史文件可能没有交叉索引行，启动时补建一次（幂等）。
-            if let Err(e) = vfs::index::rebuild_missing(&conn) {
-                eprintln!("life.db index rebuild failed: {e}");
-            }
             // 检索索引自愈：删除孤儿行、补建缺失行；FTS 行数与可见文件数不一致时告警。
             match vfs::fts::rebuild_missing(&conn) {
                 Ok((removed, added)) if removed > 0 || added > 0 => {
@@ -135,8 +132,7 @@ pub fn run() {
             commands::export::export_folder,
             commands::assets::asset_import,
             commands::assets::asset_data,
-            commands::index::index_query,
-            commands::index::search_reindex,
+            commands::search::search_reindex,
             commands::skill::skill_list,
             commands::skill::skill_read,
             commands::skill::agent_skill_read,

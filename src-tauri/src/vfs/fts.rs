@@ -98,7 +98,7 @@ pub(crate) fn remove_document(conn: &Connection, inode: i64) -> rusqlite::Result
 pub(crate) fn remove_deleted(conn: &Connection) -> rusqlite::Result<usize> {
     conn.execute(
         "DELETE FROM fts_docs WHERE rowid IN
-             (SELECT inode FROM inodes WHERE kind = 'file' AND deleted = 1)",
+             (SELECT inode FROM inodes WHERE kind = 'file' AND status = 'deleted')",
         [],
     )
 }
@@ -117,7 +117,7 @@ pub(crate) fn rebuild_missing(conn: &Connection) -> rusqlite::Result<(usize, usi
     )?;
     let orphan = tx.execute(
         "DELETE FROM fts_docs WHERE rowid NOT IN
-             (SELECT inode FROM inodes WHERE kind = 'file' AND deleted = 0)",
+             (SELECT inode FROM inodes WHERE kind = 'file' AND status = 'active')",
         [],
     )?;
     let removed = reserved + orphan;
@@ -127,7 +127,7 @@ pub(crate) fn rebuild_missing(conn: &Connection) -> rusqlite::Result<(usize, usi
             "SELECT i.inode, b.content
              FROM inodes i
              JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
-             WHERE i.kind = 'file' AND i.deleted = 0
+             WHERE i.kind = 'file' AND i.status = 'active'
                AND i.path NOT GLOB '*/.agent/*'
                AND i.path NOT GLOB '*/.lifeos/*'
                AND i.path NOT GLOB '*/ai.policy'
@@ -156,7 +156,7 @@ pub(crate) fn rebuild_all(conn: &Connection) -> rusqlite::Result<usize> {
     const SQL: &str = "SELECT i.inode, b.content
                         FROM inodes i
                         JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
-                        WHERE i.kind = 'file' AND i.deleted = 0
+                        WHERE i.kind = 'file' AND i.status = 'active'
                           AND i.path NOT GLOB '*/.agent/*'
                           AND i.path NOT GLOB '*/.lifeos/*'
                           AND i.path NOT GLOB '*/ai.policy'";
@@ -178,7 +178,7 @@ pub(crate) fn stats(conn: &Connection) -> rusqlite::Result<(i64, i64)> {
     let indexed: i64 = conn.query_row("SELECT COUNT(*) FROM fts_docs", [], |r| r.get(0))?;
     let visible: i64 = conn.query_row(
         "SELECT COUNT(*) FROM inodes
-         WHERE kind = 'file' AND deleted = 0
+         WHERE kind = 'file' AND status = 'active'
            AND path NOT GLOB '*/.agent/*'
            AND path NOT GLOB '*/.lifeos/*'
            AND path NOT GLOB '*/ai.policy'",

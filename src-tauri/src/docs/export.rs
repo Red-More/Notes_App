@@ -15,13 +15,16 @@ use zip::CompressionMethod;
 
 use crate::assets::AssetStore;
 use crate::vfs::error::ToolError;
+use crate::vfs::meta;
 use crate::vfs::VirtualFs;
 
-use super::util::{basename, fetch_row, folder_path};
+use super::util::{fetch_row, folder_path, stem};
 
 pub struct ExportEntry {
     pub id: i64,
     pub title: String,
+    /// Extension of the backing file, so archived names keep their type.
+    pub ext: String,
     pub markdown: String,
     /// Referenced images already rewritten to `assets/<sha>.<ext>`.
     pub assets: Vec<ExportAsset>,
@@ -63,7 +66,7 @@ pub fn collect_folder(
     let ids: Vec<i64> = {
         let mut stmt = conn.prepare(
             "SELECT i.inode FROM inodes i
-             WHERE i.kind = 'file' AND i.deleted = 0
+             WHERE i.kind = 'file' AND i.status = 'active'
                AND i.path LIKE ?1 ESCAPE '\\'
                AND instr(substr(i.path, length(?2) + 1), '/') = 0
              ORDER BY i.mtime DESC",
@@ -94,15 +97,23 @@ pub fn collect_one(
     store: &AssetStore,
 ) -> Result<ExportEntry, ToolError> {
     let row = fetch_row(vfs.conn(), id, false)?;
-    let title = row
-        .meta_title
-        .clone()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| basename(&row.path).to_string());
-    let (markdown, assets) = rewrite_assets(vfs, store, &row.content);
+    let is_markdown = meta::is_markdown_ext(&row.ext);
+    let title = if is_markdown {
+        meta::doc_title(&meta::parse_document(&row.content), &row.path, &row.ext)
+    } else {
+        stem(&row.path, &row.ext).to_string()
+    };
+    // Raw documents are exported byte-for-byte: `asset:` inside code is not a
+    // reference and no frontmatter must be added.
+    let (markdown, assets) = if is_markdown {
+        rewrite_assets(vfs, store, &row.content)
+    } else {
+        (row.content.clone(), Vec::new())
+    };
     Ok(ExportEntry {
         id,
         title,
+        ext: row.ext,
         markdown,
         assets,
     })
@@ -190,10 +201,12 @@ pub fn zip_entries(entries: &[ExportEntry]) -> Result<Vec<u8>, ToolError> {
         let base = format!("{}-{}", entry.id, safe_file_name(&entry.title));
         let count = names.entry(base.clone()).or_insert(0);
         *count += 1;
-        let name = if *count == 1 {
-            format!("{base}.md")
-        } else {
-            format!("{base}-{}.md", *count)
+        // No extension fallback: a document without one stays extension-less.
+        let name = match (entry.ext.is_empty(), *count) {
+            (false, 1) => format!("{base}.{}", entry.ext),
+            (false, count) => format!("{base}-{count}.{}", entry.ext),
+            (true, 1) => base,
+            (true, count) => format!("{base}-{count}"),
         };
         zip.start_file(name, options).map_err(zip_error)?;
         zip.write_all(entry.markdown.as_bytes()).map_err(zip_error)?;
@@ -210,11 +223,13 @@ fn zip_error(error: impl std::fmt::Display) -> ToolError {
     }
 }
 
+/// Archive entry base name: dots are reserved for the extension separator, so
+/// they cannot appear in the title part.
 fn safe_file_name(title: &str) -> String {
     let cleaned: String = title
         .chars()
         .map(|c| {
-            if c.is_control() || "\\/:*?\"<>|".contains(c) {
+            if c.is_control() || "\\/:*?\"<>|.".contains(c) {
                 '_'
             } else {
                 c

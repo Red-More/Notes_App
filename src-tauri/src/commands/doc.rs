@@ -113,15 +113,16 @@ pub fn doc_move_path(
     docs::move_many_to_dir(&mut vfs, &ids, &dir)
 }
 
-/// 重命名文件（标题即文件名，支持切换扩展名）。
+/// 重命名文件：基名与扩展名分开传入，基名中的点号不会被当作扩展名分隔符。
 #[tauri::command]
 pub fn doc_rename(
     state: State<'_, VfsState>,
     id: i64,
-    name: String,
+    base: String,
+    ext: String,
 ) -> Result<Doc, ToolError> {
     let mut vfs = crate::lock(&state.0);
-    docs::rename_file(&mut vfs, id, &name)
+    docs::rename_file(&mut vfs, id, &base, &ext)
 }
 
 #[tauri::command]

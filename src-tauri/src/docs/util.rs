@@ -16,18 +16,18 @@ use super::types::{Doc, DocFields};
 pub(super) struct DocRow {
     pub inode: i64,
     pub path: String,
+    /// Persisted extension (case preserved, no dot); empty means "no extension".
+    pub ext: String,
     pub head_rev: i64,
     pub pinned: i64,
     pub ctime: String,
     pub mtime: String,
     pub deleted_at: Option<String>,
-    pub meta_kind: Option<String>,
-    pub meta_title: Option<String>,
     pub content: String,
 }
 
 const DOC_COLUMNS: &str = "i.inode, i.path, i.head_rev, i.pinned, i.ctime, i.mtime, i.deleted_at,
-                           m.kind, m.title, COALESCE(b.content, '')";
+                           COALESCE(b.content, ''), i.ext";
 
 /// SQLite 本地时间（`YYYY-MM-DD HH:MM:SS`）。
 pub(super) fn now(conn: &Connection) -> Result<String, ToolError> {
@@ -62,11 +62,14 @@ pub(super) fn root_for(kind: &str) -> Result<&'static str, ToolError> {
 }
 
 /// 把标题变成安全的路径段：非法字符替换为 `_`，截断 60 字符。
-pub(super) fn safe_segment(value: &str, fallback: &str) -> String {
+///
+/// `forbid_dots` applies the file-name rule (the dot separates the extension);
+/// folder names keep dots, they have no extension semantics.
+pub(super) fn safe_segment(value: &str, fallback: &str, forbid_dots: bool) -> String {
     let cleaned: String = value
         .chars()
         .map(|c| {
-            if c.is_control() || "/\\:*?\"<>|".contains(c) {
+            if c.is_control() || "/\\:*?\"<>|".contains(c) || (forbid_dots && c == '.') {
                 '_'
             } else {
                 c
@@ -82,29 +85,24 @@ pub(super) fn safe_segment(value: &str, fallback: &str) -> String {
     base.chars().take(60).collect()
 }
 
-/// 生成不冲突的文件路径（自动补 `.md`）。
+/// 为已存在的文件生成不冲突的新路径，保留原文件名的基名与扩展名。
+///
+/// `ext` 为空表示文档没有扩展名；冲突时在基名后插入 `-n`，因此
+/// `archive` + `tar.gz` 变成 `archive-1.tar.gz`，不会被改写成 `.md`。
 pub(super) fn unique_file_path(
     conn: &Connection,
     dir: &str,
-    stem: &str,
-) -> Result<String, ToolError> {
-    unique_file_path_ext(conn, dir, stem, "md")
-}
-
-/// Same as [`unique_file_path`] but with an explicit extension (without dot).
-pub(super) fn unique_file_path_ext(
-    conn: &Connection,
-    dir: &str,
-    stem: &str,
+    base: &str,
     ext: &str,
 ) -> Result<String, ToolError> {
     for n in 1..=9999 {
-        let name = if n == 1 {
-            format!("{stem}.{ext}")
-        } else {
-            format!("{stem}-{n}.{ext}")
+        let candidate_name = match (ext.is_empty(), n) {
+            (false, 1) => format!("{base}.{ext}"),
+            (false, n) => format!("{base}-{n}.{ext}"),
+            (true, 1) => base.to_string(),
+            (true, n) => format!("{base}-{n}"),
         };
-        let candidate = format!("{dir}/{name}");
+        let candidate = format!("{dir}/{candidate_name}");
         if !path_exists(conn, &candidate)? {
             return Ok(candidate);
         }
@@ -112,11 +110,42 @@ pub(super) fn unique_file_path_ext(
     Err(ToolError::invalid("同名文档过多，无法生成唯一路径"))
 }
 
-/// Validate one user-supplied file name (base name + extension included).
+/// 按持久化扩展名拆分文件名：`base` 是去掉 `.{ext}` 后缀的名称。
+///
+/// 扩展名为空时整个文件名就是基名，所以 `v1.2` 不会被拆成 `v1` + `2`。
+pub(super) fn split_name<'a>(name: &'a str, ext: &str) -> &'a str {
+    if ext.is_empty() {
+        return name;
+    }
+    let suffix_len = ext.len() + 1;
+    if name.len() > suffix_len {
+        let (base, suffix) = name.split_at(name.len() - suffix_len);
+        if suffix.starts_with('.') && suffix[1..].eq_ignore_ascii_case(ext) {
+            return base;
+        }
+    }
+    name
+}
+
+/// Same as [`normalize_extension`] but an empty value means "no extension".
+pub(super) fn normalize_extension_or_empty(raw: &str) -> Result<String, ToolError> {
+    if raw.trim().trim_start_matches('.').is_empty() {
+        return Ok(String::new());
+    }
+    normalize_extension(raw)
+}
+
+/// Validate one user-supplied base name (no extension).
 ///
 /// Mirrors the frontend rules so a hand-crafted command cannot store a name
-/// Windows cannot represent.
-pub(super) fn validate_file_name(name: &str) -> Result<String, ToolError> {
+/// Windows cannot represent. The extension is validated separately and may
+/// contain dots.
+///
+/// `allow_dots` is false for notes, whose base name must not shadow the
+/// extension separator, and true for free-text names such as a contact
+/// ("Dr. Smith-c_ab12"). Dots are the only character released: path separators
+/// and control characters stay errors either way.
+pub(super) fn validate_file_name(name: &str, allow_dots: bool) -> Result<String, ToolError> {
     let name = name.trim();
     if name.is_empty() {
         return Err(ToolError::invalid("文件名不能为空"));
@@ -127,11 +156,16 @@ pub(super) fn validate_file_name(name: &str) -> Result<String, ToolError> {
     if name.chars().any(|c| c.is_control() || "/\\:*?\"<>|".contains(c)) {
         return Err(ToolError::invalid("文件名不能包含 / \\ : * ? \" < > | 等字符"));
     }
-    if name == "." || name == ".." {
-        return Err(ToolError::invalid("文件名不能是 . 或 .."));
+    if allow_dots {
+        // A trailing dot would merge into the extension separator.
+        if name.ends_with('.') {
+            return Err(ToolError::invalid("文件名不能以点结尾"));
+        }
+    } else if name.contains('.') {
+        return Err(ToolError::invalid("文件名不能包含点号，扩展名请单独填写"));
     }
-    if name.ends_with('.') || name.ends_with(' ') {
-        return Err(ToolError::invalid("文件名不能以点或空格结尾"));
+    if name.ends_with(' ') {
+        return Err(ToolError::invalid("文件名不能以空格结尾"));
     }
     let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
     const RESERVED: &[&str] = &[
@@ -145,15 +179,54 @@ pub(super) fn validate_file_name(name: &str) -> Result<String, ToolError> {
 }
 
 /// Normalize a user-supplied extension (accepts a leading dot).
+///
+/// The extension may contain further dots (`tar.gz`); its case is preserved
+/// exactly as typed. Whitespace, separators and a trailing dot are rejected.
 pub(super) fn normalize_extension(raw: &str) -> Result<String, ToolError> {
     let ext = raw.trim().trim_start_matches('.');
     if ext.is_empty() || ext.chars().count() > 16 {
         return Err(ToolError::invalid("扩展名长度必须在 1–16 个字符之间"));
     }
-    if !ext.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return Err(ToolError::invalid("扩展名只能包含字母和数字"));
+    if ext.ends_with('.')
+        || ext
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || "/\\:*?\"<>|".contains(c))
+    {
+        return Err(ToolError::invalid(
+            "扩展名不能包含空格、结尾点或 / \\ : * ? \" < > | 等字符",
+        ));
     }
-    Ok(ext.to_ascii_lowercase())
+    Ok(ext.to_string())
+}
+
+/// Extensions whose bytes cannot round-trip through a UTF-8 document.
+///
+/// Creating one would silently corrupt the file on save/export, so the document
+/// API rejects them instead of storing a textual placeholder.
+const BINARY_EXTENSIONS: &[&str] = &[
+    "pdf", "doc", "docx", "odt", "rtf", "xls", "xlsx", "ods", "ppt", "pptx", "odp", "epub",
+    "zip", "gz", "tgz", "bz2", "xz", "tar", "7z", "rar", "png", "jpg", "jpeg", "gif", "webp",
+    "bmp", "tif", "tiff", "heic", "ico", "mp3", "wav", "flac", "ogg", "m4a", "mp4", "mov", "avi",
+    "mkv", "webm", "exe", "dll", "so", "dylib", "bin", "iso", "dmg", "msi", "apk", "woff",
+    "woff2", "ttf", "otf", "sqlite", "db",
+];
+
+/// Reject document extensions that cannot be stored as text.
+///
+/// Multi-part extensions are checked by their last segment too, so
+/// `backup.tar.gz` is rejected like `.gz`.
+pub(super) fn ensure_text_extension(ext: &str) -> Result<(), ToolError> {
+    if ext.is_empty() {
+        return Ok(());
+    }
+    let lower = ext.to_ascii_lowercase();
+    let last = lower.rsplit('.').next().unwrap_or(lower.as_str());
+    if BINARY_EXTENSIONS.contains(&lower.as_str()) || BINARY_EXTENSIONS.contains(&last) {
+        return Err(ToolError::invalid(format!(
+            "不支持创建二进制文档（.{ext}），请改用附件导入"
+        )));
+    }
+    Ok(())
 }
 
 /// 生成不冲突的目录路径。
@@ -176,9 +249,11 @@ pub(super) fn unique_dir_path(
     Err(ToolError::invalid("同名文件夹过多，无法生成唯一路径"))
 }
 
+/// Case-insensitive existence check: Windows and macOS hosts cannot tell
+/// `A.md` from `a.md`, so the virtual namespace must not either.
 fn path_exists(conn: &Connection, path: &str) -> Result<bool, ToolError> {
     let exists: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM inodes WHERE path = ?1",
+        "SELECT COUNT(*) FROM inodes WHERE lower(path) = lower(?1)",
         params![path],
         |r| r.get(0),
     )?;
@@ -189,7 +264,7 @@ fn path_exists(conn: &Connection, path: &str) -> Result<bool, ToolError> {
 pub(super) fn folder_path(conn: &Connection, folder_id: i64) -> Result<String, ToolError> {
     let row: Option<(String, String)> = conn
         .query_row(
-            "SELECT kind, path FROM inodes WHERE inode = ?1 AND deleted = 0",
+            "SELECT kind, path FROM inodes WHERE inode = ?1 AND status = 'active'",
             params![folder_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -212,7 +287,7 @@ fn path_is_notes_dir(path: &str) -> bool {
 pub(super) fn folder_path_any(conn: &Connection, folder_id: i64) -> Result<String, ToolError> {
     let row: Option<(String, String)> = conn
         .query_row(
-            "SELECT kind, path FROM inodes WHERE inode = ?1 AND deleted = 0",
+            "SELECT kind, path FROM inodes WHERE inode = ?1 AND status = 'active'",
             params![folder_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -231,8 +306,8 @@ pub(super) fn folder_map(conn: &Connection) -> Result<HashMap<String, (i64, Stri
     let mut stmt = conn.prepare(
         "SELECT i.inode, i.path, m.title
          FROM inodes i
-         LEFT JOIN meta m ON m.inode = i.inode
-         WHERE i.kind = 'directory' AND i.deleted = 0 AND i.path LIKE '/life/notes/%'",
+         LEFT JOIN dir_titles m ON m.inode = i.inode
+         WHERE i.kind = 'directory' AND i.status = 'active' AND i.path LIKE '/life/notes/%'",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((
@@ -261,12 +336,11 @@ pub(super) fn fetch_row(
     let filter = if include_deleted {
         ""
     } else {
-        " AND i.deleted = 0"
+        " AND i.status = 'active'"
     };
     let sql = format!(
         "SELECT {DOC_COLUMNS}
          FROM inodes i
-         LEFT JOIN meta m ON m.inode = i.inode
          LEFT JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
          WHERE i.inode = ?1 AND i.kind = 'file'{filter}"
     );
@@ -286,12 +360,11 @@ pub(super) fn fetch_row_by_path(
     let filter = if include_deleted {
         ""
     } else {
-        " AND i.deleted = 0"
+        " AND i.status = 'active'"
     };
     let sql = format!(
         "SELECT {DOC_COLUMNS}
          FROM inodes i
-         LEFT JOIN meta m ON m.inode = i.inode
          LEFT JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
          WHERE i.path = ?1 AND i.kind = 'file'{filter}"
     );
@@ -311,27 +384,27 @@ pub(super) fn row_to_doc(r: &rusqlite::Row<'_>) -> rusqlite::Result<DocRow> {
         ctime: r.get(4)?,
         mtime: r.get(5)?,
         deleted_at: r.get(6)?,
-        meta_kind: r.get(7)?,
-        meta_title: r.get(8)?,
-        content: r.get(9)?,
+        content: r.get(7)?,
+        ext: r.get(8)?,
     })
 }
 
 /// 把 DocRow 组装成前端 DTO。
 pub(super) fn doc_from_row(row: DocRow, folders: &HashMap<String, (i64, String)>) -> Doc {
-    let parts = meta::parse_document(&row.content);
-    let kind = row
-        .meta_kind
-        .clone()
-        .filter(|s| !s.is_empty())
-        .or_else(|| parts.kind.clone())
-        .unwrap_or_else(|| meta::infer_kind(&row.path).to_string());
-    let title = row
-        .meta_title
-        .clone()
-        .filter(|s| !s.is_empty())
-        .or_else(|| parts.title.clone())
-        .unwrap_or_else(|| basename(&row.path).to_string());
+    // Raw documents keep their bytes verbatim: parsing them as Markdown would
+    // strip a leading `---` or treat a shebang as a heading. The persisted
+    // extension decides, so a dotted contact name is never re-split.
+    let is_markdown = meta::is_markdown_ext(&row.ext);
+    let parts = if is_markdown {
+        meta::parse_document(&row.content)
+    } else {
+        meta::DocumentParts {
+            body: row.content,
+            ..Default::default()
+        }
+    };
+    let kind = meta::doc_kind(&parts, &row.path);
+    let title = meta::doc_title(&parts, &row.path, &row.ext);
     let (folder_id, folder_name) = if kind == "note" {
         let parent = parent_dir(&row.path);
         if parent == NOTES_ROOT {
@@ -350,7 +423,9 @@ pub(super) fn doc_from_row(row: DocRow, folders: &HashMap<String, (i64, String)>
     Doc {
         id: row.inode,
         path: row.path,
+        ext: row.ext,
         kind,
+        format: if is_markdown { "markdown" } else { "raw" }.to_string(),
         title,
         content: parts.body,
         fields,
@@ -364,11 +439,21 @@ pub(super) fn doc_from_row(row: DocRow, folders: &HashMap<String, (i64, String)>
     }
 }
 
+/// 路径的最后一段，保留扩展名（与 Unix `basename` 语义一致）。
+///
+/// 不剥离扩展名，因此 `archive.tar.gz`、`v1.2` 这类名字不会被截断。
 pub(super) fn basename(path: &str) -> &str {
     Path::new(path)
-        .file_stem()
+        .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(path)
+}
+
+/// 去掉持久化扩展名后的名称，用于文档标题与人物标识。
+///
+/// 扩展名为空时返回完整文件名，因此 `v1.2` 这类含点标题不会被截断。
+pub(super) fn stem<'a>(path: &'a str, ext: &str) -> &'a str {
+    split_name(basename(path), ext)
 }
 
 pub(super) fn parent_dir(path: &str) -> &str {
@@ -436,4 +521,36 @@ pub(super) fn doc_date(doc: &Doc) -> Option<String> {
             None
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{basename, split_name, stem};
+
+    #[test]
+    fn basename_keeps_multi_part_extensions() {
+        assert_eq!(basename("/life/notes/archive.tar.gz"), "archive.tar.gz");
+        assert_eq!(basename("/life/notes/v1.2"), "v1.2");
+        assert_eq!(basename("/life/notes"), "notes");
+    }
+
+    #[test]
+    fn split_name_uses_the_persisted_extension() {
+        assert_eq!(split_name("archive.tar.gz", "tar.gz"), "archive");
+        assert_eq!(split_name("report.md", "md"), "report");
+        assert_eq!(split_name("report.MD", "md"), "report");
+        // No extension: every dot belongs to the title.
+        assert_eq!(split_name("v1.2", ""), "v1.2");
+        // A suffix that does not match the stored extension is part of the name.
+        assert_eq!(split_name("notes.2026", "md"), "notes.2026");
+        assert_eq!(split_name(".gitignore", "gitignore"), ".gitignore");
+    }
+
+    #[test]
+    fn stem_strips_only_the_stored_extension() {
+        assert_eq!(stem("/life/notes/archive.tar.gz", "tar.gz"), "archive");
+        assert_eq!(stem("/life/notes/report.md", "md"), "report");
+        assert_eq!(stem("/life/notes/v1.2", ""), "v1.2");
+        assert_eq!(stem("/life/notes/noext", ""), "noext");
+    }
 }
