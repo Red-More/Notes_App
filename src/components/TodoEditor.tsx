@@ -4,7 +4,7 @@ import { formatDueLabel, friendlyError } from '../utils'
 import type { Todo } from '../types'
 import ReminderPicker, { REPEAT_OPTIONS, type RepeatValue } from './ReminderPicker'
 import { OverlayPortal } from './ui'
-import { IconCalendar, IconClock, IconCollapse, IconExpand } from './Icons'
+import { IconCalendar, IconClock, IconCollapse, IconExpand, IconFlag } from './Icons'
 import { toast } from '../toast'
 
 interface Props {
@@ -18,20 +18,22 @@ interface Props {
 
 /**
  * Compact bottom-sheet todo editor: content only. The text doubles as the
- * title, there is no category, and the reminder time is the only value that
- * notifies (the deadline is tracked separately and has no control here yet).
+ * title, there is no category, and deadline and reminder are two independent
+ * values: the deadline only drives the "已过期" badge, the reminder is the only
+ * one that notifies. Changing either never moves the entry's day file.
  * No header or close button — tapping the overlay dismisses it.
  */
 export default function TodoEditor({ todo, initialRemind, onClose, onSaved }: Props) {
   const [content, setContent] = useState(todo?.title ?? '')
-  // Only the reminder notifies; the deadline is a separate value with no UI yet.
   const [remind, setRemind] = useState<string | null>(todo?.remindAt ?? initialRemind ?? null)
+  const [due, setDue] = useState<string | null>(todo?.dueDate ?? null)
   const [repeat, setRepeat] = useState<RepeatValue>(
     REPEAT_OPTIONS.some((o) => o.value === todo?.repeat)
       ? (todo?.repeat as RepeatValue)
       : 'none',
   )
-  const [pickerOpen, setPickerOpen] = useState(false)
+  /** Which picker is open; both share the same wheel. */
+  const [picker, setPicker] = useState<'remind' | 'due' | null>(null)
   /** Day file the todo belongs to; only editable for an existing todo. */
   const [day, setDay] = useState(todo?.date ?? '')
   const [saving, setSaving] = useState(false)
@@ -60,12 +62,12 @@ export default function TodoEditor({ todo, initialRemind, onClose, onSaved }: Pr
     setSaving(true)
     try {
       if (todo) {
-        await api.updateTodo(todo, { title, remindAt: remind, repeat })
+        await api.updateTodo(todo, { title, remindAt: remind, dueDate: due, repeat })
         // The day is the file the todo lives in — an explicit move, never a
-        // side effect of changing the reminder time.
+        // side effect of changing the deadline or the reminder.
         if (day && day !== todo.date) await api.moveTodoDate(todo, day)
       } else {
-        await api.createTodo({ title, remindAt: remind, repeat })
+        await api.createTodo({ title, remindAt: remind, dueDate: due, repeat })
       }
       toast(todo ? '已保存' : '待办已创建')
       await onSaved()
@@ -103,14 +105,25 @@ export default function TodoEditor({ todo, initialRemind, onClose, onSaved }: Pr
           </button>
         </div>
         <div className="todo-quick-actions">
-          <button
-            type="button"
-            className={`todo-quick-time ${remind ? 'set' : ''}`}
-            onClick={() => setPickerOpen(true)}
-          >
-            <IconClock size={16} />
-            <span>{remind ? formatDueLabel(remind) : '设置提醒'}</span>
-          </button>
+          <div className="todo-quick-times">
+            <button
+              type="button"
+              className={`todo-quick-time ${remind ? 'set' : ''}`}
+              onClick={() => setPicker('remind')}
+            >
+              <IconClock size={16} />
+              <span>{remind ? formatDueLabel(remind) : '设置提醒'}</span>
+            </button>
+            <button
+              type="button"
+              className={`todo-quick-time due ${due ? 'set' : ''}`}
+              onClick={() => setPicker('due')}
+              title="截止时间只用于标记过期，不会提醒"
+            >
+              <IconFlag size={16} />
+              <span>{due ? `截止 ${formatDueLabel(due)}` : '设置截止'}</span>
+            </button>
+          </div>
           <button
             type="button"
             className="todo-quick-save"
@@ -140,16 +153,30 @@ export default function TodoEditor({ todo, initialRemind, onClose, onSaved }: Pr
         )}
       </div>
 
-      {pickerOpen && (
+      {picker && (
         <ReminderPicker
-          initial={remind}
+          variant={picker}
+          initial={picker === 'due' ? due : remind}
           initialRepeat={repeat}
           onConfirm={(v, rp) => {
-            setRemind(v)
-            setRepeat(rp)
-            setPickerOpen(false)
+            if (picker === 'due') {
+              // A deadline is a single timestamp; the repeat belongs to the reminder.
+              setDue(v)
+            } else {
+              setRemind(v)
+              setRepeat(rp)
+            }
+            setPicker(null)
           }}
-          onCancel={() => setPickerOpen(false)}
+          onClear={
+            picker === 'due'
+              ? () => {
+                  setDue(null)
+                  setPicker(null)
+                }
+              : undefined
+          }
+          onCancel={() => setPicker(null)}
         />
       )}
       </div>

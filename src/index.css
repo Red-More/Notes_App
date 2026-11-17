@@ -3742,6 +3742,20 @@ body.split-resizing {
   border-color: var(--accent-weak);
 }
 
+/* Deadline and reminder are independent, so they get one row each. */
+.todo-quick-times {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.todo-quick-time.due.set {
+  color: var(--text-2);
+  border-color: var(--border);
+}
+
 .todo-quick-save {
   background: var(--accent);
   color: #fff;
@@ -3960,6 +3974,15 @@ body.split-resizing {
   flex: 1;
   background: var(--surface-2);
   color: var(--text);
+  border-radius: 14px;
+  padding: 12px 0;
+}
+
+/* Only rendered for a value that can be cleared (the deadline). */
+.picker-clear {
+  flex: 0.8;
+  background: var(--surface-2);
+  color: var(--text-2);
   border-radius: 14px;
   padding: 12px 0;
 }

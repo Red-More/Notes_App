@@ -57,15 +57,9 @@ describe('createContact', () => {
 })
 
 describe('updateContact', () => {
-  it('renames the file when the name changes, keeping the id', async () => {
+  it('renames and saves in one call so a failure cannot half-apply', async () => {
     invoke
       .mockResolvedValueOnce(doc())
-      .mockResolvedValueOnce(
-        doc({
-          path: '/life/contacts/Dr. Jane-c_abc123.md',
-          title: 'Dr. Jane-c_abc123',
-        }),
-      )
       .mockResolvedValueOnce({ id: 7, path: '/life/contacts/Dr. Jane-c_abc123.md', rev: 2 })
       .mockResolvedValueOnce(
         doc({
@@ -78,21 +72,22 @@ describe('updateContact', () => {
     const contact = await api.updateContact({ id: 7, name: 'Dr. Jane' })
 
     const commands = invoke.mock.calls.map((call) => call[0])
-    expect(commands).toEqual(['doc_get', 'doc_rename', 'doc_save', 'doc_get'])
-    const renameArgs = invoke.mock.calls[1]?.[1] as Record<string, unknown>
-    expect(renameArgs).toMatchObject({
-      id: 7,
-      base: 'Dr. Jane-c_abc123',
-      ext: 'md',
-    })
-    const saveArgs = invoke.mock.calls[2]?.[1] as { fields: Record<string, unknown> }
+    // One write command: the rename travels with the field update.
+    expect(commands).toEqual(['doc_get', 'doc_save', 'doc_get'])
+    const saveArgs = invoke.mock.calls[1]?.[1] as {
+      fields: Record<string, unknown>
+      renameBase: string
+      renameExt: string
+    }
+    expect(saveArgs.renameBase).toBe('Dr. Jane-c_abc123')
+    expect(saveArgs.renameExt).toBe('md')
     expect(saveArgs.fields.name).toBe('Dr. Jane')
     expect(saveArgs.fields.id).toBe('c_abc123')
     expect(contact.name).toBe('Dr. Jane')
     expect(contact.contactId).toBe('c_abc123')
   })
 
-  it('does not rename when only the other fields change', async () => {
+  it('still sends the current name so a field-only edit keeps the file name', async () => {
     invoke
       .mockResolvedValueOnce(doc())
       .mockResolvedValueOnce({ id: 7, path: doc().path, rev: 2 })
@@ -102,6 +97,9 @@ describe('updateContact', () => {
 
     const commands = invoke.mock.calls.map((call) => call[0])
     expect(commands).toEqual(['doc_get', 'doc_save', 'doc_get'])
+    const saveArgs = invoke.mock.calls[1]?.[1] as Record<string, unknown>
+    expect(saveArgs.renameBase).toBe('Dr. Smith-c_abc123')
+    expect((saveArgs.fields as Record<string, unknown>).phone).toBe('123')
   })
 
   it('refuses an illegal name before touching the backend', async () => {
@@ -113,9 +111,6 @@ describe('updateContact', () => {
     invoke
       .mockResolvedValueOnce(
         doc({ id: 9, path: '/life/contacts/老联系人.md', title: '老联系人', fields: {} }),
-      )
-      .mockResolvedValueOnce(
-        doc({ id: 9, path: '/life/contacts/新名字-c_9.md', title: '新名字-c_9' }),
       )
       .mockResolvedValueOnce({ id: 9, path: '/life/contacts/新名字-c_9.md', rev: 2 })
       .mockResolvedValueOnce(
@@ -129,8 +124,8 @@ describe('updateContact', () => {
 
     const contact = await api.updateContact({ id: 9, name: '新名字' })
 
-    const renameArgs = invoke.mock.calls[1]?.[1] as Record<string, unknown>
-    expect(renameArgs).toMatchObject({ id: 9, base: '新名字-c_9', ext: 'md' })
+    const saveArgs = invoke.mock.calls[1]?.[1] as Record<string, unknown>
+    expect(saveArgs.renameBase).toBe('新名字-c_9')
     expect(contact.contactId).toBe('c_9')
     expect(contact.name).toBe('新名字')
   })

@@ -88,7 +88,11 @@ pub fn doc_create(
 
 /// 保存文档；字段用 null 表示清除。folder_id 仅对笔记生效：
 /// Some(-1) 表示默认文件夹，None 表示不移动。
+///
+/// `rename` (base + ext) 与保存同一事务：改名和正文不会一半成功，
+/// 因此联系人这类“名字即文件名”的编辑只需要一次调用。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn doc_save(
     state: State<'_, VfsState>,
     id: i64,
@@ -97,9 +101,33 @@ pub fn doc_save(
     fields: Option<DocFields>,
     folder_id: Option<i64>,
     expect_rev: Option<i64>,
+    rename_base: Option<String>,
+    rename_ext: Option<String>,
 ) -> Result<DocSaveReceipt, ToolError> {
     let mut vfs = crate::lock(&state.0);
-    docs::save(&mut vfs, id, title, content, fields, folder_id, expect_rev)
+    // Both halves of a rename are required: a base without an extension would
+    // silently drop the extension instead of keeping it.
+    let rename = match (rename_base, rename_ext) {
+        (Some(base), Some(ext)) => Some((base, ext)),
+        (None, None) => None,
+        _ => {
+            return Err(ToolError::invalid(
+                "改名需要同时提供文件名与扩展名",
+            ))
+        }
+    };
+    docs::save_document(
+        &mut vfs,
+        id,
+        docs::SaveRequest {
+            title,
+            content,
+            fields,
+            rename,
+            folder_id,
+            expect_rev,
+        },
+    )
 }
 
 /// 批量移动到任意虚拟目录（长按菜单的“移动到”）。

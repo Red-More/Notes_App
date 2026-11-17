@@ -125,6 +125,13 @@ export const IconCalendar = (p: IconProps) => (
   </svg>
 )
 
+export const IconFlag = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" />
+    <path d="M4 22v-7" />
+  </svg>
+)
+
 export const IconUsers = (p: IconProps) => (
   <svg {...base(p)}>
     <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />

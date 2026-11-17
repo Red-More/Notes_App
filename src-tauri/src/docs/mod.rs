@@ -273,6 +273,10 @@ pub fn create_typed(
 
 /// 保存文档：可选更新标题/正文/字段；笔记可同时移动到另一个文件夹。
 /// 自动保存原地更新当前 head，不产生新的历史版本；expect_rev 不一致时返回 Conflict。
+///
+/// Test-only shorthand for [`save_document`] without a rename: production always
+/// goes through `doc_save`, which may carry one.
+#[cfg(test)]
 pub fn save(
     vfs: &mut VirtualFs,
     id: i64,
@@ -282,6 +286,53 @@ pub fn save(
     folder_id: Option<i64>,
     expect_rev: Option<i64>,
 ) -> Result<DocSaveReceipt, ToolError> {
+    save_document(
+        vfs,
+        id,
+        SaveRequest {
+            title,
+            content,
+            fields,
+            folder_id,
+            expect_rev,
+            ..Default::default()
+        },
+    )
+}
+
+/// Everything one save may change; omitted fields keep their stored value.
+#[derive(Default)]
+pub struct SaveRequest {
+    pub title: Option<String>,
+    pub content: Option<String>,
+    pub fields: Option<DocFields>,
+    /// New base name and extension, applied in the same transaction.
+    pub rename: Option<(String, String)>,
+    /// Only meaningful for notes: `-1` is the default folder, `None` means
+    /// "do not move".
+    pub folder_id: Option<i64>,
+    pub expect_rev: Option<i64>,
+}
+
+/// [`save`] plus an optional rename, done in the same transaction.
+///
+/// A caller that changes both the file name and the fields (a contact edit is
+/// the motivating case) must not be able to land the rename and fail the body:
+/// two IPC calls would leave the file renamed but the frontmatter stale. Here
+/// the path, the extension and the body change together or not at all.
+pub fn save_document(
+    vfs: &mut VirtualFs,
+    id: i64,
+    request: SaveRequest,
+) -> Result<DocSaveReceipt, ToolError> {
+    let SaveRequest {
+        title,
+        content,
+        fields,
+        rename,
+        folder_id,
+        expect_rev,
+    } = request;
     let tx = vfs.conn_mut().transaction()?;
     let row = fetch_row(&tx, id, false)?;
     // The row reader falls back to an empty body when the head blob is gone,
@@ -325,19 +376,37 @@ pub fn save(
         }
     }
 
-    let mut new_path = row.path.clone();
+    // Where the file ends up: a folder move decides the directory, a rename
+    // decides the base name and extension. Both are validated before anything
+    // is written so a rejected name leaves the document untouched.
+    let mut target_dir = parent_dir(&row.path).to_string();
     if kind == "note" {
         if let Some(target_id) = folder_id {
-            let target_dir = if target_id < 0 {
+            target_dir = if target_id < 0 {
                 NOTES_ROOT.to_string()
             } else {
                 folder_path(&tx, target_id)?
             };
-            if parent_dir(&row.path) != target_dir.as_str() {
-                let base = stem(&row.path, &row.ext).to_string();
-                new_path = unique_file_path(&tx, &target_dir, &base, &row.ext)?;
-            }
         }
+    }
+    let (mut new_path, mut new_ext, mut new_base) = (
+        row.path.clone(),
+        row.ext.clone(),
+        stem(&row.path, &row.ext).to_string(),
+    );
+    // A rename also rewrites the frontmatter title below; remember it before the
+    // option is consumed by the pattern match.
+    let renamed = rename.is_some();
+    if let Some((base, ext)) = rename {
+        let plan = plan_rename(&tx, &row, &target_dir, &base, &ext)?;
+        new_path = plan.target;
+        new_ext = plan.ext;
+        new_base = plan.base;
+    } else if target_dir != parent_dir(&row.path) {
+        // A folder move keeps the name; a collision is resolved by suffixing
+        // instead of failing, which is what dragging a note into a folder with a
+        // same-named note should do.
+        new_path = unique_file_path(&tx, &target_dir, &new_base, &new_ext)?;
     }
 
     let body = content.unwrap_or(parts.body);
@@ -346,6 +415,11 @@ pub fn save(
     let mut updates = fields.unwrap_or_default();
     if let Some(title) = title {
         updates.insert("title".to_string(), Value::String(title));
+    }
+    // The file name is the title the editor shows, so a rename rewrites it in
+    // the same pass; a stale value would reappear after a reload.
+    if renamed {
+        updates.insert("title".to_string(), Value::String(new_base));
     }
 
     let now = util::now(&tx)?;
@@ -386,9 +460,11 @@ pub fn save(
         params![markdown, now, id, row.head_rev],
     )?;
     tx.execute(
-        "UPDATE inodes SET path = ?1, size = ?2, mtime = ?3, hash = ?4 WHERE inode = ?5",
+        "UPDATE inodes SET path = ?1, ext = ?2, size = ?3, mtime = ?4, hash = ?5
+         WHERE inode = ?6",
         params![
             new_path,
+            new_ext,
             markdown.len() as i64,
             now,
             crate::vfs::content_hash(&markdown),
@@ -420,31 +496,40 @@ fn doc_kind_of_row(row: &util::DocRow) -> String {
     }
 }
 
-/// Rename one document file in place.
+/// A validated rename: the new path plus the normalized parts it was built from.
+struct RenamePlan {
+    target: String,
+    /// Base name after validation (trimmed, dot rule applied).
+    base: String,
+    /// Normalized extension; empty means "no extension".
+    ext: String,
+}
+
+/// Where a document should live after an optional rename.
 ///
-/// `base` is the whole name without the extension. Notes must not contain dots
-/// (the dot separates the extension); free-text names such as a contact
-/// ("Dr. Smith-c_ab12") keep theirs. `ext` is stored separately so a multi-part
-/// extension is never re-split; an empty `ext` removes the extension.
-///
-/// Moving the path does not touch FTS: rows are keyed by inode and resolve the
-/// current path from `inodes`.
-pub fn rename_file(vfs: &mut VirtualFs, id: i64, base: &str, ext: &str) -> Result<Doc, ToolError> {
+/// Both `save` (which may rename as part of a folder move) and `rename_file`
+/// must apply the same rules, so the checks live here instead of being copied:
+/// the dot rule follows the document kind, Markdown and raw never cross, policy
+/// files stay put, and a name already taken by another document is refused.
+fn plan_rename(
+    conn: &rusqlite::Connection,
+    row: &util::DocRow,
+    dir: &str,
+    base: &str,
+    ext: &str,
+) -> Result<RenamePlan, ToolError> {
     let ext = normalize_extension_or_empty(ext)?;
     ensure_text_extension(&ext)?;
-    let row = fetch_row(vfs.conn(), id, false)?;
-    // The dot rule follows the document kind, so it has to be resolved from the
-    // row rather than the caller.
-    let base = validate_file_name(base, doc_kind_of_row(&row) != "note")?;
+    let base = validate_file_name(base, doc_kind_of_row(row) != "note")?;
     let name = if ext.is_empty() {
         base.clone()
     } else {
         format!("{base}.{ext}")
     };
-    let target = format!("{}/{}", parent_dir(&row.path), name);
-    // Switching between Markdown and raw would need a content conversion, so
-    // the two families never cross by rename alone. The stored extension of the
-    // row and the requested one decide, not the shape of the name.
+    let target = format!("{dir}/{name}");
+    // Switching between Markdown and raw would need a content conversion, so the
+    // two families never cross by rename alone. The stored extension of the row
+    // and the requested one decide, not the shape of the name.
     if meta::is_markdown_ext(&row.ext) != meta::is_markdown_ext(&ext) {
         return Err(ToolError::invalid(
             "Markdown 与非 Markdown 文档之间不能直接切换扩展名",
@@ -455,16 +540,37 @@ pub fn rename_file(vfs: &mut VirtualFs, id: i64, base: &str, ext: &str) -> Resul
     if reserved::is_policy_file(&row.path) || reserved::is_policy_file(&target) {
         return Err(ToolError::invalid("可见性策略文件 ai.policy 不能重命名"));
     }
-    if target == row.path {
-        return get(vfs, id, false);
+    if target != row.path {
+        let taken: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM inodes WHERE lower(path) = lower(?1) AND inode <> ?2",
+            params![target, row.inode],
+            |r| r.get(0),
+        )?;
+        if taken > 0 {
+            return Err(ToolError::AlreadyExists { path: target });
+        }
     }
-    let exists: i64 = vfs.conn().query_row(
-        "SELECT COUNT(*) FROM inodes WHERE lower(path) = lower(?1) AND inode <> ?2",
-        params![target, id],
-        |row| row.get(0),
-    )?;
-    if exists > 0 {
-        return Err(ToolError::AlreadyExists { path: target });
+    Ok(RenamePlan {
+        target,
+        base,
+        ext,
+    })
+}
+
+/// Rename one document file in place.
+///
+/// `base` is the whole name without the extension. Notes must not contain dots
+/// (the dot separates the extension); free-text names such as a contact
+/// ("Dr. Smith-c_ab12") keep theirs. `ext` is stored separately so a multi-part
+/// extension is never re-split; an empty `ext` removes the extension.
+///
+/// Moving the path does not touch FTS: rows are keyed by inode and resolve the
+/// current path from `inodes`.
+pub fn rename_file(vfs: &mut VirtualFs, id: i64, base: &str, ext: &str) -> Result<Doc, ToolError> {
+    let row = fetch_row(vfs.conn(), id, false)?;
+    let plan = plan_rename(vfs.conn(), &row, parent_dir(&row.path), base, ext)?;
+    if plan.target == row.path {
+        return get(vfs, id, false);
     }
     // Path and extension change in one transaction.
     let tx = vfs.conn_mut().transaction()?;
@@ -472,46 +578,60 @@ pub fn rename_file(vfs: &mut VirtualFs, id: i64, base: &str, ext: &str) -> Resul
     tx.execute(
         "UPDATE inodes SET path = ?1, ext = ?2, mtime = ?3
          WHERE inode = ?4 AND kind = 'file'",
-        params![target, ext, now, id],
+        params![plan.target, plan.ext, now, id],
     )?;
     // Keep the YAML title in sync with the file name: the editor shows the file
     // name, so a stale frontmatter title would reappear after a reload.
     let row = util::fetch_row(&tx, id, false)?;
-    if meta::is_markdown_ext(&row.ext) && !reserved::is_reserved_path(&row.path) {
-        let parts = meta::parse_document(&row.content);
-        if parts.title.is_some() && parts.title.as_deref() != Some(base.as_str()) {
-            let updates = std::collections::BTreeMap::from([(
-                "title".to_string(),
-                Value::String(base.clone()),
-            )]);
-            let rewritten =
-                meta::rewrite_document(&row.content, None, &updates, &row.ctime, &now);
-            tx.execute(
-                "UPDATE blobs SET content = ?1 WHERE inode = ?2 AND rev = ?3",
-                params![rewritten, id, row.head_rev],
-            )?;
-            tx.execute(
-                "UPDATE inodes SET size = ?1, hash = ?2 WHERE inode = ?3",
-                params![
-                    rewritten.len() as i64,
-                    crate::vfs::content_hash(&rewritten),
-                    id
-                ],
-            )?;
-            crate::vfs::fts::index_document(&tx, id, &rewritten)?;
-            // Auto snapshots carry the document title; keep the head snapshot
-            // in sync. Manual labels are user-authored and stay untouched.
-            if let Some(old_title) = parts.title.as_deref() {
-                tx.execute(
-                    "UPDATE version_meta SET title = ?1
-                     WHERE inode = ?2 AND rev = ?3 AND is_manual = 0 AND title = ?4",
-                    params![base, id, row.head_rev, old_title],
-                )?;
-            }
-        }
-    }
+    sync_title_to_file_name(&tx, &row, &plan.base, &now)?;
     tx.commit()?;
     get(vfs, id, false)
+}
+
+/// Rewrite a Markdown document's frontmatter title to match its new file name.
+///
+/// The editor shows the file name, so a stale title would reappear after a
+/// reload. Auto snapshots carry the title too; manual labels are user-authored
+/// and stay untouched.
+fn sync_title_to_file_name(
+    tx: &rusqlite::Connection,
+    row: &util::DocRow,
+    base: &str,
+    now: &str,
+) -> Result<(), ToolError> {
+    if !meta::is_markdown_ext(&row.ext) || reserved::is_reserved_path(&row.path) {
+        return Ok(());
+    }
+    let parts = meta::parse_document(&row.content);
+    if parts.title.is_none() || parts.title.as_deref() == Some(base) {
+        return Ok(());
+    }
+    let updates = std::collections::BTreeMap::from([(
+        "title".to_string(),
+        Value::String(base.to_string()),
+    )]);
+    let rewritten = meta::rewrite_document(&row.content, None, &updates, &row.ctime, now);
+    tx.execute(
+        "UPDATE blobs SET content = ?1 WHERE inode = ?2 AND rev = ?3",
+        params![rewritten, row.inode, row.head_rev],
+    )?;
+    tx.execute(
+        "UPDATE inodes SET size = ?1, hash = ?2 WHERE inode = ?3",
+        params![
+            rewritten.len() as i64,
+            crate::vfs::content_hash(&rewritten),
+            row.inode
+        ],
+    )?;
+    crate::vfs::fts::index_document(tx, row.inode, &rewritten)?;
+    if let Some(old_title) = parts.title.as_deref() {
+        tx.execute(
+            "UPDATE version_meta SET title = ?1
+             WHERE inode = ?2 AND rev = ?3 AND is_manual = 0 AND title = ?4",
+            params![base, row.inode, row.head_rev, old_title],
+        )?;
+    }
+    Ok(())
 }
 
 /// 批量软删除（进入回收站）。

@@ -36,8 +36,16 @@ interface Props {
   initial?: string | null
   /** Initial repeat interval. */
   initialRepeat?: RepeatValue
+  /**
+   * What the value means. A reminder notifies and can repeat; a deadline is a
+   * plain timestamp that only drives the "已过期" badge, so it gets no repeat
+   * row and can be cleared.
+   */
+  variant?: 'remind' | 'due'
   /** Resolves the picked local datetime and repeat interval. */
   onConfirm: (value: string, repeat: RepeatValue) => void
+  /** Only offered in `due` mode: clears the value instead of picking one. */
+  onClear?: () => void
   onCancel: () => void
 }
 
@@ -163,10 +171,21 @@ function WheelColumn({
 }
 
 /**
- * Wheel-style reminder time picker (date / hour / minute columns), themed via
- * CSS variables. Resolves to a local `YYYY-MM-DDTHH:mm` string.
+ * Wheel-style datetime picker (date / hour / minute columns), themed via CSS
+ * variables. Resolves to a local `YYYY-MM-DDTHH:mm` string.
+ *
+ * Used for both the reminder and the deadline: the wheels are identical, but a
+ * deadline has no repeat and can be cleared, so those controls only render in
+ * the matching variant.
  */
-export default function ReminderPicker({ initial, initialRepeat = 'none', onConfirm, onCancel }: Props) {
+export default function ReminderPicker({
+  initial,
+  initialRepeat = 'none',
+  variant = 'remind',
+  onConfirm,
+  onClear,
+  onCancel,
+}: Props) {
   const seed = useMemo<PickerValue>(() => {
     if (initial) {
       const [date, time] = initial.split('T')
@@ -199,7 +218,9 @@ export default function ReminderPicker({ initial, initialRepeat = 'none', onConf
     <OverlayPortal>
       <div className="modal-overlay picker-overlay" onClick={onCancel}>
         <div className="picker-dialog" onClick={(e) => e.stopPropagation()}>
-          <div className="picker-title">提醒时间</div>
+          <div className="picker-title">
+            {variant === 'due' ? '截止时间' : '提醒时间'}
+          </div>
           <div className="picker-subtitle">{subtitle}</div>
 
           <div className="wheel" style={{ height: ITEM_H * VISIBLE_ROWS }}>
@@ -237,48 +258,56 @@ export default function ReminderPicker({ initial, initialRepeat = 'none', onConf
             />
           </div>
 
-          <div className="picker-repeat">
-            <span className="picker-repeat-label">重复提醒</span>
-            <div className="picker-repeat-anchor">
-              <button
-                type="button"
-                className="picker-repeat-btn"
-                onClick={() => setRepeatOpen((v) => !v)}
-                aria-haspopup="menu"
-                aria-expanded={repeatOpen}
-              >
-                <span>{REPEAT_OPTIONS.find((o) => o.value === repeat)?.label ?? '不重复'}</span>
-                <IconChevronDown size={14} />
-              </button>
-              {repeatOpen && (
-                <>
-                  <div className="repeat-pop-backdrop" onClick={() => setRepeatOpen(false)} />
-                  <div className="repeat-pop" role="menu">
-                    {REPEAT_OPTIONS.map((option) => (
-                      <button
-                        key={option.value}
-                        type="button"
-                        role="menuitem"
-                        className={`sort-option ${repeat === option.value ? 'active' : ''}`}
-                        onClick={() => {
-                          setRepeat(option.value)
-                          setRepeatOpen(false)
-                        }}
-                      >
-                        {option.label}
-                        {repeat === option.value && <IconCheck size={16} />}
-                      </button>
-                    ))}
-                  </div>
-                </>
-              )}
+          {/* A deadline is a single timestamp: repeating it is meaningless. */}
+          {variant === 'remind' && (
+            <div className="picker-repeat">
+              <span className="picker-repeat-label">重复提醒</span>
+              <div className="picker-repeat-anchor">
+                <button
+                  type="button"
+                  className="picker-repeat-btn"
+                  onClick={() => setRepeatOpen((v) => !v)}
+                  aria-haspopup="menu"
+                  aria-expanded={repeatOpen}
+                >
+                  <span>{REPEAT_OPTIONS.find((o) => o.value === repeat)?.label ?? '不重复'}</span>
+                  <IconChevronDown size={14} />
+                </button>
+                {repeatOpen && (
+                  <>
+                    <div className="repeat-pop-backdrop" onClick={() => setRepeatOpen(false)} />
+                    <div className="repeat-pop" role="menu">
+                      {REPEAT_OPTIONS.map((option) => (
+                        <button
+                          key={option.value}
+                          type="button"
+                          role="menuitem"
+                          className={`sort-option ${repeat === option.value ? 'active' : ''}`}
+                          onClick={() => {
+                            setRepeat(option.value)
+                            setRepeatOpen(false)
+                          }}
+                        >
+                          {option.label}
+                          {repeat === option.value && <IconCheck size={16} />}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
-          </div>
+          )}
 
           <div className="picker-actions">
             <button type="button" className="btn picker-cancel" onClick={onCancel}>
               取消
             </button>
+            {onClear && (
+              <button type="button" className="btn picker-clear" onClick={onClear}>
+                清除
+              </button>
+            )}
             <button type="button" className="btn picker-confirm" onClick={confirm}>
               确定
             </button>

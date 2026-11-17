@@ -1369,6 +1369,174 @@ fn contact_file_name_keeps_dots_and_the_stable_id() {
     assert!(docs::rename_file(&mut vfs, note.id, "v1.2", "md").is_err());
 }
 
+/// A contact edit renames the file and rewrites its fields in one transaction,
+/// so a rejected name cannot leave the file renamed with stale frontmatter.
+#[test]
+fn save_can_rename_and_update_fields_atomically() {
+    let mut vfs = test_vfs();
+    let contact = docs::create_typed(
+        &mut vfs,
+        "contact",
+        "Dr. Smith-c_abc123",
+        "",
+        None,
+        Some(fields(&[
+            ("id", Value::String("c_abc123".into())),
+            ("name", Value::String("Dr. Smith".into())),
+        ])),
+        Some("md"),
+    )
+    .unwrap();
+
+    let receipt = docs::save_document(
+        &mut vfs,
+        contact.id,
+        docs::SaveRequest {
+            fields: Some(fields(&[
+                ("name", Value::String("Dr. Jane Smith".into())),
+                ("phone", Value::String("123".into())),
+            ])),
+            rename: Some(("Dr. Jane Smith-c_abc123".into(), "md".into())),
+            ..Default::default()
+        },
+    )
+    .expect("rename plus field update should succeed");
+    assert!(receipt.path.ends_with("Dr. Jane Smith-c_abc123.md"));
+
+    let stored = docs::get(&vfs, contact.id, false).unwrap();
+    assert_eq!(stored.ext, "md");
+    assert_eq!(stored.title, "Dr. Jane Smith-c_abc123");
+    assert_eq!(
+        stored.fields.get("name").and_then(|value| value.as_str()),
+        Some("Dr. Jane Smith")
+    );
+    assert_eq!(
+        stored.fields.get("phone").and_then(|value| value.as_str()),
+        Some("123")
+    );
+    // The frontmatter title follows the file name in the same write.
+    assert!(
+        stored.content.is_empty(),
+        "the body must stay untouched: {:?}",
+        stored.content
+    );
+
+    // A rejected name leaves both the path and the fields exactly as they were.
+    let error = docs::save_document(
+        &mut vfs,
+        contact.id,
+        docs::SaveRequest {
+            fields: Some(fields(&[("name", Value::String("坏/名字".into()))])),
+            rename: Some(("坏/名字-c_abc123".into(), "md".into())),
+            ..Default::default()
+        },
+    )
+    .expect_err("a path separator in the name must be refused");
+    assert!(
+        matches!(error, ToolError::InvalidArgument { .. }),
+        "{error:?}"
+    );
+    let unchanged = docs::get(&vfs, contact.id, false).unwrap();
+    assert_eq!(unchanged.path, stored.path);
+    assert_eq!(
+        unchanged.fields.get("name").and_then(|value| value.as_str()),
+        Some("Dr. Jane Smith"),
+        "a refused rename must not apply the field update either"
+    );
+}
+
+/// A rename that collides with another document is refused, not merged.
+#[test]
+fn save_rename_refuses_a_name_that_is_already_taken() {
+    let mut vfs = test_vfs();
+    let first = docs::create_typed(
+        &mut vfs,
+        "contact",
+        "甲-c_a",
+        "",
+        None,
+        Some(fields(&[("id", Value::String("c_a".into()))])),
+        Some("md"),
+    )
+    .unwrap();
+    let second = docs::create_typed(
+        &mut vfs,
+        "contact",
+        "乙-c_b",
+        "",
+        None,
+        Some(fields(&[("id", Value::String("c_b".into()))])),
+        Some("md"),
+    )
+    .unwrap();
+
+    let error = docs::save_document(
+        &mut vfs,
+        second.id,
+        docs::SaveRequest {
+            rename: Some(("甲-c_a".into(), "md".into())),
+            ..Default::default()
+        },
+    )
+    .expect_err("the name belongs to another document");
+    assert!(matches!(error, ToolError::AlreadyExists { .. }), "{error:?}");
+    assert!(docs::get(&vfs, second.id, false).unwrap().path.ends_with("乙-c_b.md"));
+    assert_eq!(docs::get(&vfs, first.id, false).unwrap().path, first.path);
+}
+
+/// A rename must not switch a document between Markdown and raw.
+#[test]
+fn save_rename_cannot_cross_the_markdown_boundary() {
+    let mut vfs = test_vfs();
+    let note = docs::create_typed(&mut vfs, "note", "说明", "正文", None, None, Some("md")).unwrap();
+    let error = docs::save_document(
+        &mut vfs,
+        note.id,
+        docs::SaveRequest {
+            rename: Some(("说明".into(), "txt".into())),
+            ..Default::default()
+        },
+    )
+    .expect_err("md -> txt would need a content conversion");
+    assert!(
+        matches!(error, ToolError::InvalidArgument { .. }),
+        "{error:?}"
+    );
+    assert_eq!(docs::get(&vfs, note.id, false).unwrap().ext, "md");
+}
+
+/// Saving without a rename keeps the existing name, even when only the body
+/// changes: the rename path must not leak into ordinary autosave.
+#[test]
+fn save_without_rename_keeps_the_file_name() {
+    let mut vfs = test_vfs();
+    let contact = docs::create_typed(
+        &mut vfs,
+        "contact",
+        "甲-c_a",
+        "",
+        None,
+        Some(fields(&[("id", Value::String("c_a".into()))])),
+        Some("md"),
+    )
+    .unwrap();
+    let receipt = docs::save_document(
+        &mut vfs,
+        contact.id,
+        docs::SaveRequest {
+            content: Some("新的备注".into()),
+            fields: Some(fields(&[("name", Value::String("乙".into()))])),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(receipt.path, contact.path);
+    let stored = docs::get(&vfs, contact.id, false).unwrap();
+    assert_eq!(stored.ext, "md");
+    assert_eq!(stored.content, "新的备注");
+    assert_eq!(stored.title, "甲-c_a");
+}
+
 /// The virtual namespace mirrors a case-insensitive host filesystem.
 #[test]
 fn write_rejects_a_case_only_duplicate() {

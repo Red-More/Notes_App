@@ -44,7 +44,6 @@ import {
   contactNameError,
   newContactId,
 } from './contacts/contactFile'
-import { baseNameOf } from './fileTypes'
 import { localStamp, newTodoId, todayLocal } from './todos/todoFile'
 import { TodoStore, type TodoDoc, type TodoPort } from './todos/todoStore'
 
@@ -88,6 +87,12 @@ export type DocSaveParams = {
   fields?: DocFields
   folderId?: number | null
   expectRev?: number
+  /**
+   * Rename in the same transaction as the write. Both halves are required, so a
+   * name that is rejected leaves the document and its fields untouched.
+   */
+  renameBase?: string
+  renameExt?: string
 }
 
 /**
@@ -610,12 +615,15 @@ export const api = {
     if (nameError) throw contactInputError(nameError)
     const doc = await docApi.get(params.id)
     const contactId = contactIdOf(doc.fields, doc.id)
-    const targetBase = contactBase(params.name, contactId)
-    if (targetBase !== baseNameOf(doc.path, doc.ext)) {
-      // The name is part of the file name; the id and the body stay untouched.
-      await docApi.rename({ id: params.id, base: targetBase, ext: doc.ext || 'md' })
-    }
-    await docApi.save({ id: params.id, fields: contactFields({ ...params, contactId }) })
+    // The name is part of the file name, and the id in that name is what keeps
+    // two contacts apart. Sending the rename with the fields means a rejected
+    // name cannot leave the file renamed with stale frontmatter behind.
+    await docApi.save({
+      id: params.id,
+      fields: contactFields({ ...params, contactId }),
+      renameBase: contactBase(params.name, contactId),
+      renameExt: doc.ext || 'md',
+    })
     return docToContact(await docApi.get(params.id))
   },
   deleteContact: async (id: number) => {
