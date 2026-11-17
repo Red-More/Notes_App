@@ -39,10 +39,10 @@
 | 场景 | 用户说 | Agent 做 |
 |---|---|---|
 | 随手记 | "今天跟王总聊了新项目，他提到预算可能要砍20%" | `write` → `/life/diary/2026-10-29.md` 追加一条 |
-| 待办管理 | "提醒我明天上午10点给张医生打电话确认预约" | `write` → `/life/todos/2026-W44.md` 加一条 `- [ ] 周四10:00 张医生预约确认` |
+| 待办管理 | "提醒我明天上午10点给张医生打电话确认预约" | `write` → `/life/todos/todo-2026-11-01.md` 加一条 `- [ ] {id: t_xxx} 张医生预约确认`（同一天的多条待办共用一个文件） |
 | 学习笔记 | "帮我整理一下今天学的Rust所有权概念" | `write` → `/life/notes/rust-ownership.md` 创建结构化笔记 |
 | 搜索回忆 | "上次那个餐厅叫什么来着，就是上周六跟李雷去的" | `grep` → 搜"餐厅"+"李雷"，返回匹配段落 |
-| 联系人管理 | "张医生的电话是多少？还有他擅长什么科室" | `read` → `/life/contacts/zhang-doctor.md` 返回信息 |
+| 联系人管理 | "张医生的电话是多少？还有他擅长什么科室" | `read` → `/life/contacts/张医生-c_ab12cd34.md` 返回信息 |
 | 行程规划 | "下周三要去北京出差，帮我列个清单" | `write` → `/life/schedule/2026-11-04.md` 生成行程模板 |
 | 每日回顾 | "帮我回顾一下今天做了什么" | `glob` + `read` → 读今天的日记和待办，生成总结 |
 | 周报生成 | "这周学了什么、完成了什么？" | `grep` + `glob` → 聚合本周笔记和待办，生成周报 |
@@ -76,7 +76,7 @@
 
 | 需求项 | 说明 |
 |---|---|
-| 目录结构 | `/life/` 下分 `diary/`, `notes/`, `todos/`, `contacts/`, `schedule/`, `.agents/` |
+| 目录结构 | `/life/` 下分 `diary/`, `notes/`, `todos/`, `contacts/`, `schedule/`, `.agents/`；待办按天 `todo-YYYY-MM-DD.md`，联系人 `{姓名}-{id}.md` |
 | 版本控制 | 每次 write/edit 生成新 rev，支持回溯 |
 | 文件格式 | Markdown（默认），其他格式可选 |
 | 容量限制 | 单文件 ≤ 1MB，总数据库 ≤ 512MB（可配置） |
@@ -175,6 +175,15 @@
 
 ### 6.1 虚拟 FS 表结构
 
+> **实现现状（schema v7）**：下面这段是立项时的草案，实际落地与它不同——`inodes`
+> 以完整 `path` 为唯一键（没有 `parent_inode` / `name`），用 `head_rev` 指向当前
+> 版本，生命周期是 `status`（active / archived / deleted）而不是布尔删除位，并新增
+> `ext` 与预留的 `hash`。文档 frontmatter **没有镜像表**：它本身就是 Markdown 正文
+> 的一部分；目录显示名单独存在 `dir_titles`。跨维度交叉索引 `index_entries` 已在
+> v7 移除，检索只保留 FTS5。
+>
+> 以这里的 SQL 当作当前结构会误导实现，请以 `src-tauri/src/db/schema.rs` 为准。
+
 ```sql
 -- 文件/目录 inode
 CREATE TABLE inodes (
@@ -243,8 +252,8 @@ CREATE TABLE messages (
 /life/
   diary/           # 日记，按日期：YYYY-MM-DD.md
   notes/           # 笔记，按主题/自由命名
-  todos/           # 待办，按周/项目/标签
-  contacts/        # 联系人，每人一个 .md
+  todos/           # 待办，按天：todo-YYYY-MM-DD.md（同一天多条共用一个文件）
+  contacts/        # 联系人，每人一个 {姓名}-{id}.md（id 稳定，改名不变）
   schedule/        # 行程，按日期
   inbox/           # 快速捕获，未分类的临时记录
   .agents/
@@ -275,8 +284,8 @@ CREATE TABLE messages (
 - 所有数据在 /life/ 目录下
 - 日记：/life/diary/YYYY-MM-DD.md
 - 笔记：/life/notes/主题名.md
-- 待办：/life/todos/组织方式.md（用 - [ ] 未完成 / - [x] 已完成）
-- 联系人：/life/contacts/姓名.md（含电话/邮箱/备注/交往记录）
+- 待办：/life/todos/todo-YYYY-MM-DD.md（同一天多条共用一个文件；条目形如 `- [ ] {id: t_xxx} 内容`，属性写在缩进子项里）
+- 联系人：/life/contacts/{姓名}-{id}.md（frontmatter 存 id/name/phone/email/company/notes/tag；姓名可含点号，id 改名不变）
 - 行程：/life/schedule/YYYY-MM-DD.md
 - 快速记录：/life/inbox/ 临时存放
 

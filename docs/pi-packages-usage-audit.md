@@ -182,10 +182,10 @@
 | 工具 | 参数 schema | `executionMode` | Rust 命令 | 自定义行为 |
 |---|---|---|---|---|
 | `fs_read` | `path`、`rev`、`startLine`、`endLine`、`includeMeta` | 默认（并行） | `api.fsRead` | 读取前拦截 `/life/.agents` |
-| `fs_write` | `path`、`content`、`createParents`、`autoFrontmatter` | `sequential` | `api.fsWrite` | 只允许新建，默认补父目录与 frontmatter |
+| `fs_write` | `path`、`content`、`createParents` | `sequential` | `api.fsWrite` | 只允许新建，按原样写入路径（不补扩展名）；Markdown 只由系统校验/覆盖 `created_at`、`updated_at`，其余字段原样保留 |
 | `fs_edit` | `path`、`oldString`、`newString`、`replaceAll`、`expectRev` | `sequential` | `api.fsEdit` | 字符串唯一命中 + 乐观锁 |
 | `fs_glob` | `pattern`、`root`、`caseSensitive` | 默认（并行） | `api.fsGlob` | 相对 pattern 与 root 归一化后做只读校验 |
-| `fs_grep` | `pattern`、`path`、`type`、`maxResults`、`contextLines` | 默认（并行） | `api.fsGrep` | 限定路径时拦截 `.agents` |
+| `fs_grep` | `pattern`、`path`、`extension`、`maxResults`、`contextLines` | 默认（并行） | `api.fsGrep` | 扩展名过滤（基础层 `inodes.ext`）；限定路径时拦截 `.agents` |
 | `load_skill` | `name` | `parallel` | `skillApi.read` | 按已启用技能 id/名称读取正文 |
 
 统一封装：
