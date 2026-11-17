@@ -69,27 +69,25 @@ async function checkReminders() {
   const now = Date.now()
   try {
     // Remind on todos whose due time has just passed (within 30 min window).
-    const todos = await api.listTodos()
+    // `migrate: false`: a periodic timer must never trigger the one-time
+    // legacy rewrite; the Todo page owns that trigger.
+    const todos = await api.listTodos(undefined, { migrate: false })
     for (const t of todos) {
-      if (t.reminder !== 1 || t.isCompleted === 1 || !t.dueDate) continue
-      const due = parseDbTime(t.dueDate).getTime()
-      const age = now - due
+      // Only the reminder notifies. The deadline is a separate value and never
+      // reaches this loop, so a due date alone cannot produce a notification.
+      if (t.isCompleted === 1 || !t.remindAt) continue
+      const at = parseDbTime(t.remindAt).getTime()
+      const age = now - at
       if (age >= 0 && age < TODO_WINDOW_MS) {
-        const key = `todo:${t.id}:${due}`
+        const key = `todo:${t.id}:${at}`
         if (!notified(key)) {
           markNotified(key)
           await notify(`⏰ 待办提醒：${t.title}`)
           // Repeating todos roll forward to the next occurrence after firing.
           if (t.repeat && t.repeat !== 'none') {
-            const next = nextDue(t.dueDate, t.repeat)
+            const next = nextDue(t.remindAt, t.repeat)
             if (next) {
-              await api.updateTodo({
-                id: t.id,
-                title: t.title,
-                dueDate: next,
-                reminder: true,
-                repeat: t.repeat,
-              })
+              await api.updateTodo(t, { title: t.title, remindAt: next, repeat: t.repeat })
             }
           }
         }

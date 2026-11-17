@@ -24,22 +24,50 @@ const RESERVED =
 
 /** Human-readable type label, e.g. `Markdown（.md）`. */
 export function fileTypeLabel(ext: string): string {
-  const known = COMMON_FILE_TYPES.find((type) => type.ext === ext)
+  if (!ext) return '无扩展名'
+  // Extensions keep their original case, so `.MD` must still match Markdown.
+  const known = COMMON_FILE_TYPES.find((type) => type.ext.toLowerCase() === ext.toLowerCase())
   return `${known?.label ?? '自定义'}（.${ext}）`
 }
 
-/** Extension of a virtual path, without the dot (lower-case). */
-export function extensionOf(path: string): string {
-  const base = path.split('/').pop() ?? ''
-  const index = base.lastIndexOf('.')
-  return index > 0 ? base.slice(index + 1).toLowerCase() : ''
+/**
+ * Default name of a single-document export.
+ *
+ * `base` is the editor title (file name without its extension) and `ext` is the
+ * persisted extension, so `spec.draft` stays one extension and an empty one adds
+ * no separator dot. The result always matches the name shown in the editor;
+ * only the image bundle changes the container to `.zip`.
+ */
+export function exportFileName(base: string, ext: string, withImages: boolean): string {
+  const name = base.trim() || '未命名'
+  const document = ext ? `${name}.${ext}` : name
+  // The image bundle only wraps the document, so the document name survives.
+  return withImages ? `${document}.zip` : document
 }
 
-/** File name without its last extension. */
-export function baseNameOf(path: string): string {
+/**
+ * Extension of a virtual path. The first dot separates the extension, which may
+ * contain further dots (`tar.gz`).
+ *
+ * Legacy helper for rows that predate the persisted `ext`; prefer the stored
+ * value so names are never re-split.
+ */
+export function extensionOf(path: string): string {
   const base = path.split('/').pop() ?? ''
-  const index = base.lastIndexOf('.')
-  return index > 0 ? base.slice(0, index) : base
+  const index = base.indexOf('.')
+  return index > 0 ? base.slice(index + 1) : ''
+}
+
+/**
+ * File name without its persisted extension.
+ *
+ * When `ext` is empty the whole name is the base, so `v1.2` keeps its dot.
+ */
+export function baseNameOf(path: string, ext?: string): string {
+  const base = path.split('/').pop() ?? ''
+  if (!ext) return base
+  const suffix = `.${ext.toLowerCase()}`
+  return base.toLowerCase().endsWith(suffix) ? base.slice(0, -suffix.length) : base
 }
 
 /**
@@ -47,37 +75,41 @@ export function baseNameOf(path: string): string {
  * `allowEmpty` keeps the input usable while the user is still typing.
  */
 export function fileNameError(name: string, allowEmpty = true): string | null {
-  const error = fileNameTypingError(name, allowEmpty)
-  if (error) return error
-  // The trailing rule is deferred while typing: "v1.2" must pass through "v1.".
-  const value = name.trim()
-  if (value.endsWith('.') || value.endsWith(' ')) {
-    return '文件名不能以点或空格结尾'
-  }
-  return null
+  return fileNameTypingError(name, allowEmpty)
 }
 
 /**
- * Typing-time validation: every rule except the trailing dot/space one, so
- * intermediate keystrokes are not swallowed by the controlled input.
+ * Base-name validation: dots belong to the extension picker, so the base must
+ * not contain any.
  */
 export function fileNameTypingError(name: string, allowEmpty = true): string | null {
   const value = name.trim()
   if (!value) return allowEmpty ? null : '文件名不能为空'
   if (value.length > 120) return '文件名最多 120 个字符'
-  if (value === '.' || value === '..') return '文件名不能是 . 或 ..'
   if (FORBIDDEN.test(value) || /[\u0000-\u001f]/.test(value)) {
     return '文件名不能包含 / \\ : * ? " < > | 等字符'
   }
-  if (RESERVED.test(value.split('.')[0] ?? value)) return '该文件名是系统保留名称'
+  if (value.includes('.')) return '文件名不能包含点号，扩展名请单独选择'
+  if (RESERVED.test(value)) return '该文件名是系统保留名称'
   return null
 }
 
-/** Normalize a custom extension; accepts a leading dot. */
-export function normalizeExtension(raw: string): { ext?: string; error?: string } {
-  const ext = raw.trim().replace(/^\.+/, '').toLowerCase()
-  if (!ext) return { error: '请输入扩展名' }
-  if (ext.length > 16) return { error: '扩展名最多 16 个字符' }
-  if (!/^[a-z0-9]+$/.test(ext)) return { error: '扩展名只能包含字母和数字' }
+/**
+ * Normalize a custom extension; accepts a leading dot.
+ *
+ * The extension may contain further dots (`tar.gz`) and its case is preserved
+ * exactly as typed. `allowEmpty` lets the caller pick "no extension".
+ */
+export function normalizeExtension(
+  raw: string,
+  allowEmpty = false,
+): { ext?: string; error?: string } {
+  const ext = raw.trim().replace(/^\.+/, '')
+  if (!ext) return allowEmpty ? { ext: '' } : { error: '请输入扩展名' }
+  if ([...ext].length > 16) return { error: '扩展名最多 16 个字符' }
+  if (/[\s\\/:*?"<>|]/.test(ext) || /[\u0000-\u001f]/.test(ext)) {
+    return { error: '扩展名不能包含空格或 / \\ : * ? " < > | 等字符' }
+  }
+  if (ext.endsWith('.')) return { error: '扩展名不能以点结尾' }
   return { ext }
 }

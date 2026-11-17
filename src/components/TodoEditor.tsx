@@ -4,33 +4,36 @@ import { formatDueLabel, friendlyError } from '../utils'
 import type { Todo } from '../types'
 import ReminderPicker, { REPEAT_OPTIONS, type RepeatValue } from './ReminderPicker'
 import { OverlayPortal } from './ui'
-import { IconClock, IconCollapse, IconExpand } from './Icons'
+import { IconCalendar, IconClock, IconCollapse, IconExpand } from './Icons'
 import { toast } from '../toast'
 
 interface Props {
   /** Existing todo to edit, or null to create one. */
   todo: Todo | null
-  /** Pre-filled due date (local `YYYY-MM-DDTHH:mm`) for a new todo. */
-  initialDue?: string | null
+  /** Pre-filled reminder time (local `YYYY-MM-DDTHH:mm`) for a new todo. */
+  initialRemind?: string | null
   onClose: () => void
   onSaved: () => void | Promise<void>
 }
 
 /**
  * Compact bottom-sheet todo editor: content only. The text doubles as the
- * title, there is no category, and a due time doubles as the reminder switch
- * (set time = remind, clear = mute). No header or close button — tapping the
- * overlay dismisses it.
+ * title, there is no category, and the reminder time is the only value that
+ * notifies (the deadline is tracked separately and has no control here yet).
+ * No header or close button — tapping the overlay dismisses it.
  */
-export default function TodoEditor({ todo, initialDue, onClose, onSaved }: Props) {
+export default function TodoEditor({ todo, initialRemind, onClose, onSaved }: Props) {
   const [content, setContent] = useState(todo?.title ?? '')
-  const [due, setDue] = useState<string | null>(todo?.dueDate ?? initialDue ?? null)
+  // Only the reminder notifies; the deadline is a separate value with no UI yet.
+  const [remind, setRemind] = useState<string | null>(todo?.remindAt ?? initialRemind ?? null)
   const [repeat, setRepeat] = useState<RepeatValue>(
     REPEAT_OPTIONS.some((o) => o.value === todo?.repeat)
       ? (todo?.repeat as RepeatValue)
       : 'none',
   )
   const [pickerOpen, setPickerOpen] = useState(false)
+  /** Day file the todo belongs to; only editable for an existing todo. */
+  const [day, setDay] = useState(todo?.date ?? '')
   const [saving, setSaving] = useState(false)
   const [expanded, setExpanded] = useState(false)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -57,18 +60,12 @@ export default function TodoEditor({ todo, initialDue, onClose, onSaved }: Props
     setSaving(true)
     try {
       if (todo) {
-        await api.updateTodo({
-          id: todo.id,
-          title,
-          // Preserve the legacy category field; the UI no longer exposes it.
-          category: todo.category,
-          dueDate: due,
-          // Reminder follows the due time; no separate switch anymore.
-          reminder: due != null,
-          repeat,
-        })
+        await api.updateTodo(todo, { title, remindAt: remind, repeat })
+        // The day is the file the todo lives in — an explicit move, never a
+        // side effect of changing the reminder time.
+        if (day && day !== todo.date) await api.moveTodoDate(todo, day)
       } else {
-        await api.createTodo({ title, dueDate: due, reminder: due != null, repeat })
+        await api.createTodo({ title, remindAt: remind, repeat })
       }
       toast(todo ? '已保存' : '待办已创建')
       await onSaved()
@@ -108,11 +105,11 @@ export default function TodoEditor({ todo, initialDue, onClose, onSaved }: Props
         <div className="todo-quick-actions">
           <button
             type="button"
-            className={`todo-quick-time ${due ? 'set' : ''}`}
+            className={`todo-quick-time ${remind ? 'set' : ''}`}
             onClick={() => setPickerOpen(true)}
           >
             <IconClock size={16} />
-            <span>{due ? formatDueLabel(due) : '设置提醒'}</span>
+            <span>{remind ? formatDueLabel(remind) : '设置提醒'}</span>
           </button>
           <button
             type="button"
@@ -123,14 +120,32 @@ export default function TodoEditor({ todo, initialDue, onClose, onSaved }: Props
             {todo ? '保存' : '创建'}
           </button>
         </div>
+        {todo && (
+          // Day file the entry lives in. Native date input keeps the picker
+          // free; changing it moves the entry and keeps its id.
+          <label
+            className={`todo-quick-date ${day && day !== todo.date ? 'changed' : ''}`}
+            title="改变归属日期会把这条待办移动到对应日期的文件"
+          >
+            <span>
+              <IconCalendar size={14} /> 归属日期
+            </span>
+            <input
+              type="date"
+              value={day}
+              onChange={(e) => setDay(e.target.value)}
+              aria-label="归属日期"
+            />
+          </label>
+        )}
       </div>
 
       {pickerOpen && (
         <ReminderPicker
-          initial={due}
+          initial={remind}
           initialRepeat={repeat}
           onConfirm={(v, rp) => {
-            setDue(v)
+            setRemind(v)
             setRepeat(rp)
             setPickerOpen(false)
           }}

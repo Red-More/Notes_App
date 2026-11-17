@@ -3219,6 +3219,27 @@ body.split-resizing {
   color: var(--accent);
 }
 
+/* Pin toggle: muted until pinned, then it matches the badge. */
+.todo-pin {
+  color: var(--text-3);
+  opacity: 0.45;
+}
+
+.todo-pin.on {
+  color: var(--accent);
+  opacity: 1;
+}
+
+.todo-title .pin-badge {
+  margin-right: 4px;
+}
+
+/* Snippet insert: a secondary action under the rules counter. */
+.rules-insert {
+  margin-top: 8px;
+  font-size: 13px;
+}
+
 .section-title {
   font-size: 13px;
   color: var(--text-2);
@@ -3734,6 +3755,43 @@ body.split-resizing {
 
 .todo-quick-save:disabled {
   opacity: 0.6;
+}
+
+/* Day file the entry belongs to; accent when it will move on save. */
+.todo-quick-date {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 0 2px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.todo-quick-date > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.todo-quick-date input {
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-family: inherit;
+}
+
+.todo-quick-date input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.todo-quick-date.changed {
+  color: var(--accent);
 }
 
 /* ============ Wheel reminder picker ============ */

@@ -94,12 +94,12 @@ export function exportTs(d = new Date()): string {
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`
 }
 
-/** Replace illegal filename chars /\\:*?"<>| and control chars with _, fallback on empty, truncate to 60 chars. */
-export function safeFileName(name: string, fallback = '未命名'): string {
+/** Replace illegal filename chars /\\:*?"<>| and control chars with _, fallback on empty, truncate (60 by default). */
+export function safeFileName(name: string, fallback = '未命名', maxLength = 60): string {
   // \p{Cc} covers control characters; literal control escapes trip no-control-regex.
   const cleaned = name.replace(/[\\/:*?"<>|\p{Cc}]/gu, '_').trim()
   const base = cleaned || fallback
-  return base.slice(0, 60)
+  return base.slice(0, maxLength)
 }
 
 /** Map a structured backend ToolError to a user-facing message. */

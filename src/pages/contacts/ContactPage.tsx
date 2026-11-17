@@ -10,6 +10,7 @@ import PageHeader from '../../components/PageHeader'
 import FAB from '../../components/FAB'
 import EmptyState from '../../components/EmptyState'
 import ChipRow from '../../components/ChipRow'
+import { contactNameError } from '../../contacts/contactFile'
 
 const PRESET_TAGS = ['默认', '客户', '朋友', '同事']
 
@@ -126,8 +127,11 @@ export default function ContactPage({
 
   const handleSave = async () => {
     const name = form.name.trim()
-    if (!name) {
-      toast('请输入联系人姓名')
+    // The name becomes part of the file name: report an unusable character
+    // instead of rewriting the user's name behind their back.
+    const nameError = contactNameError(name)
+    if (nameError) {
+      toast(nameError)
       return
     }
     const customTag = form.tag.trim() || '默认'

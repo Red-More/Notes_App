@@ -15,7 +15,6 @@ import type {
   Contact,
   Doc,
   DocFields,
-  DocRef,
   DocSaveReceipt,
   DocVersion,
   Folder,
@@ -38,6 +37,16 @@ import type {
   VfsReadResult,
   VfsWriteReceipt,
 } from './types'
+import {
+  contactBase,
+  contactDisplayName,
+  contactIdOf,
+  contactNameError,
+  newContactId,
+} from './contacts/contactFile'
+import { baseNameOf } from './fileTypes'
+import { localStamp, newTodoId, todayLocal } from './todos/todoFile'
+import { TodoStore, type TodoDoc, type TodoPort } from './todos/todoStore'
 
 /** Legacy note list ordering, now implemented by the generic doc layer. */
 export type NoteSort = 'updated' | 'created' | 'title'
@@ -89,7 +98,8 @@ export const docApi = {
   list: (params: DocListParams) => invoke<Doc[]>('doc_list', params),
   get: (id: number, includeDeleted = false) => invoke<Doc>('doc_get', { id, includeDeleted }),
   create: (params: DocCreateParams) => invoke<Doc>('doc_create', params),
-  rename: (params: { id: number; name: string }) => invoke<Doc>('doc_rename', params),
+  rename: (params: { id: number; base: string; ext: string }) =>
+    invoke<Doc>('doc_rename', params),
   save: (params: DocSaveParams) => invoke<DocSaveReceipt>('doc_save', params),
   delete: (ids: number[]) => invoke<void>('doc_delete', { ids }),
   restore: (ids: number[]) => invoke<void>('doc_restore', { ids }),
@@ -131,11 +141,63 @@ export const docApi = {
   exportDocs: (params: { ids: number[]; destPath: string }) => invoke<void>('export_docs', params),
   exportFolder: (params: { folderId: number; destPath: string }) =>
     invoke<void>('export_folder', params),
-
-  /** 交叉索引：person / date / time / location / tag / type / due。 */
-  indexQuery: (params: { dimension: string; value: string; kind?: string; limit?: number }) =>
-    invoke<DocRef[]>('index_query', params),
 }
+
+/**
+ * Todo port: the generic document API adapted to the day-file model.
+ *
+ * The backend stores documents only — grouping todos into `todo-{date}.md` is a
+ * frontend policy, so no todo-specific table or column ever enters the database.
+ */
+function toTodoDoc(doc: Doc): TodoDoc {
+  return {
+    id: doc.id,
+    rev: doc.rev,
+    path: doc.path,
+    title: doc.title,
+    content: doc.content,
+    fields: doc.fields,
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
+  }
+}
+
+const todoPort: TodoPort = {
+  async listDocuments() {
+    const docs = await docApi.list({ kind: 'todo' })
+    return docs.map(toTodoDoc)
+  },
+  async createDayFile(date, body) {
+    // The path already encodes the day (`todo-{date}.md`), so no `date` field is
+    // written: it would be a second copy that nothing reads back.
+    const doc = await docApi.create({
+      kind: 'todo',
+      title: `todo-${date}`,
+      content: body,
+      ext: 'md',
+    })
+    return toTodoDoc(doc)
+  },
+  async saveDayFile(doc, body) {
+    // `expectRev` keeps a concurrent (Agent) edit from being clobbered.
+    await docApi.save({ id: doc.id, content: body, expectRev: doc.rev })
+  },
+  async deleteDocument(id) {
+    // Todos have no trash entry: delete then purge keeps "gone means gone".
+    await docApi.delete([id])
+    await docApi.purge([id])
+  },
+  async archiveDocument(id) {
+    // Soft delete only: the migrated legacy todo stays restorable from the trash
+    // (a purge here would be the one irreversible step of the todo model).
+    await docApi.delete([id])
+  },
+  now: () => localStamp(),
+  today: () => todayLocal(),
+  newId: () => newTodoId(),
+}
+
+const todoStore = new TodoStore(todoPort)
 
 function str(value: unknown, fallback = ''): string {
   if (typeof value === 'string') return value
@@ -148,17 +210,12 @@ function nullableStr(value: unknown): string | null {
   return text === '' ? null : text
 }
 
-function bool(value: unknown, fallback = false): boolean {
-  if (typeof value === 'boolean') return value
-  if (typeof value === 'number') return value !== 0
-  if (typeof value === 'string') return value === 'true' || value === '1'
-  return fallback
-}
-
 function docToNote(doc: Doc): Note {
   return {
     id: doc.id,
     path: doc.path,
+    ext: doc.ext ?? '',
+    format: doc.format === 'raw' ? 'raw' : 'markdown',
     title: doc.title,
     content: doc.content,
     folderId: doc.folderId,
@@ -175,41 +232,6 @@ function docDate(doc: Doc): string {
   const date = doc.fields.date
   if (typeof date === 'string' && date) return date.slice(0, 10)
   return doc.updatedAt.slice(0, 10)
-}
-
-/** Derive completion from Markdown checkboxes when an Agent edited the body. */
-function checkboxCompleted(content: string): boolean | null {
-  let found = false
-  let allDone = true
-  for (const line of content.split('\n')) {
-    const trimmed = line.trimStart()
-    if (!trimmed.startsWith('- [')) continue
-    const mark = trimmed[3]
-    if (trimmed[4] !== ']') continue
-    if (mark !== ' ' && mark !== 'x' && mark !== 'X') continue
-    found = true
-    if (mark === ' ') allDone = false
-  }
-  return found ? allDone : null
-}
-
-function docToTodo(doc: Doc): Todo {
-  // Frontmatter wins (UI toggle); otherwise fall back to body checkboxes
-  // so Agent edits and UI ticks stay consistent.
-  const explicit = doc.fields.completed
-  const completed =
-    typeof explicit === 'boolean' ? explicit : (checkboxCompleted(doc.content) ?? false)
-  return {
-    id: doc.id,
-    title: doc.title,
-    category: str(doc.fields.category) || '默认',
-    isCompleted: completed ? 1 : 0,
-    dueDate: nullableStr(doc.fields.dueDate),
-    reminder: bool(doc.fields.reminder) ? 1 : 0,
-    repeat: str(doc.fields.repeat) || 'none',
-    createdAt: doc.createdAt,
-    updatedAt: doc.updatedAt,
-  }
 }
 
 /** Restore the revision before the current head; returns the refreshed doc. */
@@ -232,9 +254,11 @@ async function docByPath(path: string) {
 }
 
 function docToContact(doc: Doc): Contact {
+  const contactId = contactIdOf(doc.fields, doc.id)
   return {
     id: doc.id,
-    name: doc.title,
+    contactId,
+    name: contactDisplayName(doc.fields, doc.title, contactId),
     phone: nullableStr(doc.fields.phone),
     email: nullableStr(doc.fields.email),
     company: nullableStr(doc.fields.company),
@@ -242,6 +266,32 @@ function docToContact(doc: Doc): Contact {
     tag: str(doc.fields.tag) || '默认',
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
+  }
+}
+
+/** Surface a name-validation message through `friendlyError`, not a generic one. */
+function contactInputError(message: string): Error {
+  return Object.assign(new Error(message), { code: 'invalidArgument' })
+}
+
+/** Frontmatter of a contact: the stable id and the display name are the source. */
+function contactFields(input: {
+  contactId: string
+  name: string
+  phone?: string | null
+  email?: string | null
+  company?: string | null
+  notes?: string | null
+  tag?: string
+}): DocFields {
+  return {
+    id: input.contactId,
+    name: input.name.trim(),
+    phone: input.phone ?? null,
+    email: input.email ?? null,
+    company: input.company ?? null,
+    notes: input.notes ?? null,
+    tag: input.tag ?? '默认',
   }
 }
 
@@ -275,7 +325,6 @@ export const api = {
     path: string
     content: string
     createParents?: boolean
-    autoFrontmatter?: boolean
   }) => invoke<VfsWriteReceipt>('fs_write', params),
   fsEdit: (params: {
     path: string
@@ -292,15 +341,19 @@ export const api = {
   fsGrep: (params: {
     pattern: string
     path?: string
-    type?: string
+    extension?: string
     maxResults?: number
     contextLines?: number
   }) => invoke<VfsGrepResponse>('fs_grep', params),
   // 界面面命令：身份在 Rust 侧固定为 User，前端不声明 principal。
   userRead: (params: { path: string; includeMeta?: boolean }) =>
     invoke<VfsReadResult>('user_read', params),
-  userSearch: (params: { pattern: string; type?: string; path?: string; maxResults?: number }) =>
-    invoke<VfsGrepResponse>('user_search', params),
+  userSearch: (params: {
+    pattern: string
+    extension?: string
+    path?: string
+    maxResults?: number
+  }) => invoke<VfsGrepResponse>('user_search', params),
 
   // ---- Notes (doc kind = note) ----
   listNotes: async (
@@ -321,7 +374,7 @@ export const api = {
   searchNotes: async (params: { search: string; folderId?: number; unclassified?: boolean }) => {
     const hits = await api.userSearch({
       pattern: params.search,
-      type: 'note',
+      path: '/life/notes',
       maxResults: 200,
     })
     const paths = hits.hits.map((hit) => hit.path)
@@ -340,7 +393,8 @@ export const api = {
   },
   getNote: async (id: number) => docToNote(await docApi.get(id)),
   /** Rename the backing file (title + extension) in place. */
-  renameNoteFile: async (id: number, name: string) => docToNote(await docApi.rename({ id, name })),
+  renameNoteFile: async (id: number, base: string, ext: string) =>
+    docToNote(await docApi.rename({ id, base, ext })),
   createNote: async (params: {
     title: string
     content: string
@@ -479,63 +533,40 @@ export const api = {
   /** 手动重建检索索引（M1-5）；正常写入时索引自动维护。 */
   rebuildSearchIndex: () => invoke<number>('search_reindex'),
 
-  // ---- Todos (doc kind = todo) ----
-  listTodos: async (search?: string) => {
-    const docs = await docApi.list({ kind: 'todo', search: search || undefined })
-    return docs.map(docToTodo)
-  },
-  createTodo: async (params: {
+  // ---- Todos: one `todo-{date}.md` VFS file per day (no DB-side model) ----
+  /**
+   * Load todos, folding legacy single-todo documents in on first use.
+   *
+   * `migrate: false` makes it a pure read; the reminder poller uses that so a
+   * background timer never triggers the one-time write.
+   */
+  listTodos: (search?: string, options?: { migrate?: boolean }) =>
+    todoStore.list(search, options),
+  createTodo: (params: {
     title: string
-    category?: string
     dueDate?: string | null
-    reminder?: boolean
+    remindAt?: string | null
     repeat?: string
-  }) =>
-    docToTodo(
-      await docApi.create({
-        kind: 'todo',
-        title: params.title,
-        content: '',
-        fields: {
-          category: params.category ?? '默认',
-          completed: false,
-          dueDate: params.dueDate ?? null,
-          reminder: params.reminder ?? false,
-          repeat: params.repeat ?? 'none',
-        },
-      }),
-    ),
-  updateTodo: async (params: {
-    id: number
-    title: string
-    category?: string
-    dueDate?: string | null
-    reminder?: boolean
-    repeat?: string
-  }) =>
-    docApi.save({
-      id: params.id,
-      title: params.title,
-      fields: {
-        category: params.category ?? '默认',
-        dueDate: params.dueDate ?? null,
-        reminder: params.reminder ?? false,
-        repeat: params.repeat ?? 'none',
-      },
-    }),
-  toggleTodo: async (id: number) => {
-    const doc = await docApi.get(id)
-    return docApi.save({ id, fields: { completed: !bool(doc.fields.completed) } })
-  },
-  deleteTodo: async (id: number) => {
-    // 待办没有回收站入口：先软删再物理删除，保持旧版“删除即消失”的语义。
-    await docApi.delete([id])
-    await docApi.purge([id])
-  },
+  }) => todoStore.create(params),
+  updateTodo: (
+    todo: Todo,
+    patch: {
+      title?: string
+      dueDate?: string | null
+      remindAt?: string | null
+      repeat?: string
+    },
+  ) => todoStore.update(todo, patch),
+  toggleTodo: (todo: Todo) => todoStore.toggle(todo),
+  /** Pin/unpin one todo; pinned entries sort above the rest. */
+  setTodoPinned: (todo: Todo, pinned: boolean) => todoStore.setPinned(todo, pinned),
+  deleteTodo: (todo: Todo) => todoStore.remove(todo),
+  /** Move a todo to another day file, keeping its id (deadline/reminder never move it). */
+  moveTodoDate: (todo: Todo, date: string) => todoStore.moveToDate(todo, date),
 
 
 
-  // ---- Contacts (doc kind = contact) ----
+  // ---- Contacts: one `{name}-{id}.md` VFS file per contact ----
   listContacts: async (params: { tag?: string; search?: string }) => {
     const docs = await docApi.list({
       kind: 'contact',
@@ -552,21 +583,20 @@ export const api = {
     company?: string | null
     notes?: string | null
     tag?: string
-  }) =>
-    docToContact(
-      await docApi.create({
-        kind: 'contact',
-        title: params.name,
-        content: '',
-        fields: {
-          phone: params.phone ?? null,
-          email: params.email ?? null,
-          company: params.company ?? null,
-          notes: params.notes ?? null,
-          tag: params.tag ?? '默认',
-        },
-      }),
-    ),
+  }) => {
+    const nameError = contactNameError(params.name)
+    if (nameError) throw contactInputError(nameError)
+    const contactId = newContactId()
+    const doc = await docApi.create({
+      kind: 'contact',
+      // The name is free text and may contain dots; the id keeps duplicates apart.
+      title: contactBase(params.name, contactId),
+      content: '',
+      fields: contactFields({ ...params, contactId }),
+      ext: 'md',
+    })
+    return docToContact(doc)
+  },
   updateContact: async (params: {
     id: number
     name: string
@@ -575,18 +605,19 @@ export const api = {
     company?: string | null
     notes?: string | null
     tag?: string
-  }) =>
-    docApi.save({
-      id: params.id,
-      title: params.name,
-      fields: {
-        phone: params.phone ?? null,
-        email: params.email ?? null,
-        company: params.company ?? null,
-        notes: params.notes ?? null,
-        tag: params.tag ?? '默认',
-      },
-    }),
+  }) => {
+    const nameError = contactNameError(params.name)
+    if (nameError) throw contactInputError(nameError)
+    const doc = await docApi.get(params.id)
+    const contactId = contactIdOf(doc.fields, doc.id)
+    const targetBase = contactBase(params.name, contactId)
+    if (targetBase !== baseNameOf(doc.path, doc.ext)) {
+      // The name is part of the file name; the id and the body stay untouched.
+      await docApi.rename({ id: params.id, base: targetBase, ext: doc.ext || 'md' })
+    }
+    await docApi.save({ id: params.id, fields: contactFields({ ...params, contactId }) })
+    return docToContact(await docApi.get(params.id))
+  },
   deleteContact: async (id: number) => {
     await docApi.delete([id])
     await docApi.purge([id])

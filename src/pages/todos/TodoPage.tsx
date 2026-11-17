@@ -5,7 +5,7 @@ import { formatDueLabel, friendlyError, parseDbTime } from '../../utils'
 import type { Todo } from '../../types'
 import { ConfirmDialog } from '../../components/ui'
 import { toast } from '../../toast'
-import { IconCheck, IconSettings, IconTodo, IconTrash } from '../../components/Icons'
+import { IconCheck, IconPin, IconSettings, IconTodo, IconTrash } from '../../components/Icons'
 import PageHeader from '../../components/PageHeader'
 import FAB from '../../components/FAB'
 import EmptyState from '../../components/EmptyState'
@@ -95,7 +95,17 @@ export default function TodoPage({ isActive, onOpenSettings }: Props) {
 
   const handleToggle = async (t: Todo) => {
     try {
-      await api.toggleTodo(t.id)
+      await api.toggleTodo(t)
+      await load()
+    } catch (e) {
+      console.error(e)
+      toast(friendlyError(e))
+    }
+  }
+
+  const handleTogglePin = async (t: Todo) => {
+    try {
+      await api.setTodoPinned(t, t.isPinned === 0)
       await load()
     } catch (e) {
       console.error(e)
@@ -108,7 +118,7 @@ export default function TodoPage({ isActive, onOpenSettings }: Props) {
     setDeleteConfirm(null)
     if (!target) return
     try {
-      await api.deleteTodo(target.id)
+      await api.deleteTodo(target)
       toast('已删除')
       await load()
     } catch (e) {
@@ -118,14 +128,20 @@ export default function TodoPage({ isActive, onOpenSettings }: Props) {
   }
 
   const rowMeta = (t: Todo) => {
-    if (!t.dueDate) return null
-    const overdue = t.isCompleted === 0 && parseDbTime(t.dueDate).getTime() < now
-    return (
-      <>
-        <span className={overdue ? 'overdue' : ''}>{formatDueLabel(t.dueDate)}</span>
-        {overdue && <span className="overdue-badge">已过期</span>}
-      </>
-    )
+    // Deadline first: it owns the "overdue" semantics.
+    if (t.dueDate) {
+      const overdue = t.isCompleted === 0 && parseDbTime(t.dueDate).getTime() < now
+      return (
+        <>
+          <span className={overdue ? 'overdue' : ''}>{formatDueLabel(t.dueDate)}</span>
+          {overdue && <span className="overdue-badge">已过期</span>}
+        </>
+      )
+    }
+    // No deadline: show when it will remind instead (a reminder can be in the past
+    // without the todo being "overdue").
+    if (t.remindAt) return <span>⏰ {formatDueLabel(t.remindAt)}</span>
+    return null
   }
 
   const renderRow = (t: Todo) => (
@@ -149,9 +165,23 @@ export default function TodoPage({ isActive, onOpenSettings }: Props) {
         {t.isCompleted === 1 && <IconCheck size={14} />}
       </button>
       <div className="todo-main">
-        <div className="todo-title">{t.title}</div>
-        {t.dueDate && <div className="todo-meta">{rowMeta(t)}</div>}
+        <div className="todo-title">
+          {t.isPinned === 1 && <span className="pin-badge">📌</span>}
+          {t.title}
+        </div>
+        {(t.dueDate || t.remindAt) && <div className="todo-meta">{rowMeta(t)}</div>}
       </div>
+      <button
+        type="button"
+        className={`icon-btn todo-pin ${t.isPinned === 1 ? 'on' : ''}`}
+        aria-label={t.isPinned === 1 ? '取消置顶' : '置顶'}
+        onClick={(e) => {
+          e.stopPropagation()
+          void handleTogglePin(t)
+        }}
+      >
+        <IconPin size={17} />
+      </button>
       <button
         type="button"
         className="icon-btn"

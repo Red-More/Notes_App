@@ -81,21 +81,20 @@ export default function DiaryPage({ isActive, version, onOpenSettings, onOpenDia
     )
   }, [viewMonth])
 
-  /** Todos due on the selected day, sorted by time. */
-  const dayTodos = useMemo(
-    () =>
-      todos
-        .filter((t) => (t.dueDate ?? '').slice(0, 10) === selectedDate)
-        .sort((a, b) => (a.dueDate ?? '').localeCompare(b.dueDate ?? '')),
-    [todos, selectedDate],
-  )
+  /** Todos scheduled on the selected day, sorted by time. Deadline wins. */
+  const dayTodos = useMemo(() => {
+    const when = (t: Todo) => t.dueDate ?? t.remindAt ?? ''
+    return todos
+      .filter((t) => when(t).slice(0, 10) === selectedDate)
+      .sort((a, b) => when(a).localeCompare(when(b)))
+  }, [todos, selectedDate])
 
   const today = dateStr(new Date())
   const now = Date.now()
 
   const handleToggle = async (t: Todo) => {
     try {
-      await api.toggleTodo(t.id)
+      await api.toggleTodo(t)
       await load()
     } catch (e) {
       console.error(e)
@@ -261,7 +260,7 @@ export default function DiaryPage({ isActive, version, onOpenSettings, onOpenDia
       {createTodoOpen && (
         <TodoEditor
           todo={null}
-          initialDue={`${selectedDate}T09:00`}
+          initialRemind={`${selectedDate}T09:00`}
           onClose={() => setCreateTodoOpen(false)}
           onSaved={load}
         />

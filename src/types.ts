@@ -65,6 +65,10 @@ export interface Note {
   id: number
   /** Virtual path; its extension is the displayed file type. */
   path: string
+  /** Persisted extension without the dot; empty means "no extension". */
+  ext: string
+  /** Storage model derived from the extension. */
+  format: 'markdown' | 'raw'
   title: string
   content: string
   folderId: number | null
@@ -88,20 +92,30 @@ export interface NoteVersion {
 }
 
 export interface Todo {
-  id: number
+  /** Stable item id (`t_...`), unique across every day file. */
+  id: string
+  /** inode of the backing `todo-{date}.md` VFS file. */
+  fileId: number
+  /** Day the todo belongs to (`YYYY-MM-DD`); the backing file's date. */
+  date: string
   title: string
-  category: string
   isCompleted: number
+  /** Deadline: when the todo is due. Never triggers a notification. */
   dueDate: string | null
-  reminder: number
+  /** Reminder time; independent from the deadline and the only notifying value. */
+  remindAt: string | null
   /** Repeat interval: none | daily | weekday | weekly | monthly | yearly. */
   repeat: string
+  isPinned: number
   createdAt: string
   updatedAt: string
 }
 
 export interface Contact {
+  /** inode of the backing `{name}-{id}.md` VFS file. */
   id: number
+  /** Stable `c_...` id: part of the file name, survives every rename. */
+  contactId: string
   name: string
   phone: string | null
   email: string | null
@@ -211,6 +225,10 @@ export type DocFields = Record<string, unknown>
 export interface Doc {
   id: number
   path: string
+  /** Persisted extension without the dot; empty means "no extension". */
+  ext: string
+  /** markdown | raw — raw documents are stored verbatim (no frontmatter). */
+  format: 'markdown' | 'raw'
   /** note | todo | event | contact | diary */
   kind: string
   title: string
@@ -245,15 +263,6 @@ export interface DocVersion {
   labelDescription: string | null
   isManual: number
   createdAt: string
-}
-
-/** 交叉索引查询结果。 */
-export interface DocRef {
-  id: number
-  path: string
-  kind: string
-  title: string
-  updatedAt: string
 }
 
 // ---- Skills (M3, skill_*) ----
