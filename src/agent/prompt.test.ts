@@ -1,7 +1,12 @@
 //! Prompt payload transparency: composition must only use visible settings.
 
 import { describe, expect, it } from 'vitest'
-import { composeSystemPrompt, DEFAULT_SYSTEM_PROMPT } from './prompt'
+import {
+  composeSystemPrompt,
+  DEFAULT_SYSTEM_PROMPT,
+  insertRules,
+  TODO_FORMAT_RULES,
+} from './prompt'
 
 const TODAY = '2026-11-14'
 const DATE_BLOCK = `Today is ${TODAY}.`
@@ -45,5 +50,32 @@ describe('system prompt composition', () => {
 
   it('derives the local date when no override is supplied', () => {
     expect(composeSystemPrompt({})).toMatch(/Today is \d{4}-\d{2}-\d{2}\.$/)
+  })
+})
+
+describe('rules snippets', () => {
+  it('inserts a snippet into an empty box as-is', () => {
+    expect(insertRules('', TODO_FORMAT_RULES)).toBe(TODO_FORMAT_RULES)
+    expect(insertRules('   \n', TODO_FORMAT_RULES)).toBe(TODO_FORMAT_RULES)
+  })
+
+  it('appends after the rules the user already wrote', () => {
+    const next = insertRules('回答要简短。', TODO_FORMAT_RULES)
+    expect(next.startsWith('回答要简短。')).toBe(true)
+    expect(next).toContain(TODO_FORMAT_RULES)
+    expect(next).toBe(`回答要简短。\n\n${TODO_FORMAT_RULES}`)
+  })
+
+  it('does not paste the same snippet twice', () => {
+    const once = insertRules('规则', TODO_FORMAT_RULES)
+    expect(insertRules(once, TODO_FORMAT_RULES)).toBe(once)
+  })
+
+  it('describes the format the store actually enforces', () => {
+    // The snippet is guidance for the agent; it must not drift from the parser.
+    expect(TODO_FORMAT_RULES).toContain('/life/todos/todo-YYYY-MM-DD.md')
+    expect(TODO_FORMAT_RULES).toContain('{id: t_')
+    expect(TODO_FORMAT_RULES).toContain('- due:')
+    expect(TODO_FORMAT_RULES).toContain('- remind:')
   })
 })

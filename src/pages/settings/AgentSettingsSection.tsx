@@ -12,7 +12,13 @@ import { friendlyError } from '../../utils'
 import { ConfirmDialog, Modal } from '../../components/ui'
 import ChipRow from '../../components/ChipRow'
 import { buildSkillsIndex } from '../../agent/skills'
-import { composeSystemPrompt, DEFAULT_SYSTEM_PROMPT, MAX_SYSTEM_PROMPT_BYTES } from '../../agent/prompt'
+import {
+  composeSystemPrompt,
+  DEFAULT_SYSTEM_PROMPT,
+  insertRules,
+  MAX_SYSTEM_PROMPT_BYTES,
+  TODO_FORMAT_RULES,
+} from '../../agent/prompt'
 
 const FORMAT_OPTIONS: Array<{ key: ModelApiFormat; label: string }> = [
   { key: 'openai-chat', label: 'OpenAI Chat Completions' },
@@ -810,6 +816,13 @@ export default function AgentSettingsSection() {
           <p className="settings-note">仅发送你填写的规则，不含任何系统预设。</p>
           <span className="counter-text">{rulesBytes}/32768</span>
         </div>
+        <button
+          type="button"
+          className="btn btn-plain rules-insert"
+          onClick={() => setRulesText((text) => insertRules(text, TODO_FORMAT_RULES))}
+        >
+          插入待办格式说明
+        </button>
       </div>
 
       <div className="form-field">
