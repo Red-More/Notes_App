@@ -24,7 +24,7 @@ import { hasAssetRefs } from '../../assets'
 import {
   COMMON_FILE_TYPES,
   baseNameOf,
-  extensionOf,
+  exportFileName,
   fileNameError,
   fileNameTypingError,
   fileTypeLabel,
@@ -177,6 +177,8 @@ export default function NoteEditorPage({
   const [content, setContent] = useState('')
   /** Extension of the backing file, shown in the type picker. */
   const [fileExt, setFileExt] = useState('md')
+  /** Storage model: only Markdown documents carry frontmatter. */
+  const [fileFormat, setFileFormat] = useState<'markdown' | 'raw'>('markdown')
   const [typeMenuOpen, setTypeMenuOpen] = useState(false)
   const [customExt, setCustomExt] = useState('')
   const [typeError, setTypeError] = useState('')
@@ -289,16 +291,18 @@ export default function NoteEditorPage({
           // Generic doc load: every kind opens editable, frontmatter stays
           // system-owned and is rendered read-only below the toolbar.
           const doc = await docApi.get(noteIdRef.current)
-          // The title input mirrors the file name: show the path stem and keep
-          // the extension in the dedicated type picker.
-          const fileTitle = baseNameOf(doc.path) || doc.title
+          // The title input mirrors the file name: show the base name and keep
+          // the persisted extension in the dedicated type picker.
+          const fileTitle = baseNameOf(doc.path, doc.ext) || doc.title
           setTitle(fileTitle)
           setContent(doc.content)
           setCurrentFolderId(doc.folderId)
           setUpdatedAt(doc.updatedAt)
           setDocPath(doc.path)
-          setFileExt(extensionOf(doc.path) || 'md')
-          setMetaYaml(docMetaYaml(doc))
+          setFileExt(doc.ext ?? '')
+          setFileFormat(doc.format === 'raw' ? 'raw' : 'markdown')
+          // Raw documents have no frontmatter: never render a YAML panel for them.
+          setMetaYaml(doc.format === 'raw' ? '' : docMetaYaml(doc))
           lastSavedRef.current = {
             title: fileTitle,
             content: doc.content,
@@ -373,7 +377,8 @@ export default function NoteEditorPage({
         setHasNote(true)
         setUpdatedAt(note.updatedAt)
         setDocPath(note.path)
-        setFileExt(extensionOf(note.path) || fileExt)
+        setFileExt(note.ext ?? fileExt)
+        setFileFormat(note.format === 'raw' ? 'raw' : 'markdown')
       } else if (mode === 'diary') {
         const receipt = await api.saveDiary({ id: noteIdRef.current, title: t, content: c })
         setUpdatedAt(receipt.updatedAt)
@@ -403,7 +408,7 @@ export default function NoteEditorPage({
     }
   }, [title, content, isBlank, mode, diaryDate, currentFolderId, fileExt])
 
-  /** Rename the backing file (base name + extension) once, not per keystroke. */
+  /** Rename the backing file once on blur, never per keystroke. */
   const commitFileName = useCallback(
     async (nextTitle: string, nextExt: string) => {
       if (noteIdRef.current == null) {
@@ -411,22 +416,28 @@ export default function NoteEditorPage({
         return true
       }
       // Strip trailing dots/spaces left over from lenient typing validation.
-      const base =
-        (nextTitle.trim() || baseNameOf(docPath) || 'untitled').replace(/[. ]+$/, '') || 'untitled'
-      const name = `${base}.${nextExt}`
-      const error = fileNameError(name, false)
+      const fallback = baseNameOf(docPath, fileExt) || 'untitled'
+      const typed = nextTitle.trim() || fallback
+      const base = typed.replace(/[. ]+$/, '') || 'untitled'
+      if (/[. ]$/.test(nextTitle)) {
+        // Tell the user why the stored name differs from what was typed.
+        toast('已移除文件名结尾的点或空格')
+      }
+      // Validate the base only: the extension is a separate, validated value.
+      const error = fileNameError(base, false)
       if (error) {
         toast(error)
         return false
       }
-      if (name === `${baseNameOf(docPath)}.${extensionOf(docPath)}`) {
+      if (base === baseNameOf(docPath, fileExt) && nextExt === fileExt) {
         setFileExt(nextExt)
         return true
       }
       try {
-        const doc = await api.renameNoteFile(noteIdRef.current, name)
+        const doc = await api.renameNoteFile(noteIdRef.current, base, nextExt)
+        setTitle(base)
         setDocPath(doc.path)
-        setFileExt(extensionOf(doc.path) || nextExt)
+        setFileExt(doc.ext ?? nextExt)
         setUpdatedAt(doc.updatedAt)
         toast('文件名已更新')
         return true
@@ -436,7 +447,7 @@ export default function NoteEditorPage({
         return false
       }
     },
-    [docPath],
+    [docPath, fileExt],
   )
 
   const handleTitleChange = (raw: string) => {
@@ -455,7 +466,8 @@ export default function NoteEditorPage({
   }
 
   const applyFileType = async (rawExt: string) => {
-    const parsed = normalizeExtension(rawExt)
+    // An empty value is a valid choice: "no extension".
+    const parsed = normalizeExtension(rawExt, true)
     if (parsed.error) {
       setTypeError(parsed.error)
       return
@@ -930,13 +942,14 @@ export default function NoteEditorPage({
     setRestoreConfirm(null)
     try {
       const note = await api.restoreVersion(v.id)
-      const fileTitle = baseNameOf(note.path) || note.title
+      const fileTitle = baseNameOf(note.path, note.ext) || note.title
       setTitle(fileTitle)
       setContent(note.content)
       setCurrentFolderId(note.folderId)
       setUpdatedAt(note.updatedAt)
       setDocPath(note.path)
-      setFileExt(extensionOf(note.path) || 'md')
+      setFileExt(note.ext ?? '')
+      setFileFormat(note.format === 'raw' ? 'raw' : 'markdown')
       lastSavedRef.current = { title: fileTitle, content: note.content }
       setDirty(false)
       setSaveState('clean')
@@ -953,13 +966,14 @@ export default function NoteEditorPage({
     if (noteIdRef.current == null) return
     try {
       const note = await api.restorePreviousRevision(noteIdRef.current)
-      const fileTitle = baseNameOf(note.path) || note.title
+      const fileTitle = baseNameOf(note.path, note.ext) || note.title
       setTitle(fileTitle)
       setContent(note.content)
       setCurrentFolderId(note.folderId)
       setUpdatedAt(note.updatedAt)
       setDocPath(note.path)
-      setFileExt(extensionOf(note.path) || 'md')
+      setFileExt(note.ext ?? '')
+      setFileFormat(note.format === 'raw' ? 'raw' : 'markdown')
       lastSavedRef.current = { title: fileTitle, content: note.content }
       setDirty(false)
       setSaveState('clean')
@@ -1069,15 +1083,25 @@ export default function NoteEditorPage({
     }
     try {
       // Notes with images export as a ZIP so the Markdown and its images stay
-      // together; plain Markdown stays a single `.md` file.
-      const withImages = hasAssetRefs(content)
+      // together. Otherwise the file keeps the document's own name and
+      // extension: no `.md` is appended, the case stays as typed, and a
+      // document without an extension exports without one.
+      const withImages = fileFormat === 'markdown' && hasAssetRefs(content)
+      // The exported name mirrors the editor: title + persisted extension. The
+      // stored extension is authoritative, so a multi-dot one (`spec.draft`)
+      // never gets re-split at the wrong dot. 120 is the document name limit.
+      const base = safeFileName(baseNameOf(docPath, fileExt) || title, '未命名', 120)
+      const defaultPath = exportFileName(base, fileExt, withImages)
+      // Native save dialogs expect one suffix segment; multi-dot extensions
+      // (`spec.draft`) keep the default file name but skip the filter.
+      const filterable = fileExt && !fileExt.includes('.')
       const path = await save({
-        defaultPath: `${safeFileName(title || '未命名')}.${withImages ? 'zip' : 'md'}`,
-        filters: [
-          withImages
-            ? { name: 'ZIP（含图片）', extensions: ['zip'] }
-            : { name: 'Markdown', extensions: ['md'] },
-        ],
+        defaultPath,
+        filters: withImages
+          ? [{ name: 'ZIP（含图片）', extensions: ['zip'] }]
+          : filterable
+            ? [{ name: fileTypeLabel(fileExt), extensions: [fileExt] }]
+            : undefined,
       })
       if (path == null) return
       await api.exportNoteTo({
@@ -1107,6 +1131,8 @@ export default function NoteEditorPage({
    * hidden) opens the full preview instead of staying invisible.
    */
   const openPreview = () => {
+    // Only Markdown is rendered; other extensions are edit-only.
+    if (fileFormat !== 'markdown') return
     if (previewCloseTimerRef.current) {
       window.clearTimeout(previewCloseTimerRef.current)
       previewCloseTimerRef.current = 0
@@ -1152,6 +1178,13 @@ export default function NoteEditorPage({
     if (previewOpen) closePreview()
     else openPreview()
   }
+
+  // Switching to a raw document (or renaming one) hides the rendered pane.
+  useEffect(() => {
+    if (fileFormat !== 'markdown') closePreview()
+    // closePreview only touches refs and local state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fileFormat])
 
   /** Live drag update: move the panes without touching localStorage. */
   const handleRatioChange = (ratio: number) => {
@@ -1357,14 +1390,16 @@ export default function NoteEditorPage({
           >
             <IconExport size={20} />
           </button>
-          <button
-            type="button"
-            className={`icon-btn ${previewOpen ? 'accent' : ''}`}
-            onClick={togglePreview}
-            aria-label={previewOpen ? '关闭预览' : '打开预览'}
-          >
-            <IconEye size={20} />
-          </button>
+          {fileFormat === 'markdown' && (
+            <button
+              type="button"
+              className={`icon-btn ${previewOpen ? 'accent' : ''}`}
+              onClick={togglePreview}
+              aria-label={previewOpen ? '关闭预览' : '打开预览'}
+            >
+              <IconEye size={20} />
+            </button>
+          )}
         </div>
       )}
 
@@ -1437,7 +1472,7 @@ export default function NoteEditorPage({
                 if (
                   noteIdRef.current != null &&
                   title.trim() &&
-                  title !== baseNameOf(docPath)
+                  title !== baseNameOf(docPath, fileExt)
                 ) {
                   void commitFileName(title, fileExt)
                 }
@@ -1484,6 +1519,16 @@ export default function NoteEditorPage({
                           <span className="type-ext">.{type.ext}</span>
                         </button>
                       ))}
+                      {/* Explicit "no extension": the name keeps every dot of its own. */}
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className={`type-option ${fileExt === '' ? 'active' : ''}`}
+                        onClick={() => void applyFileType('')}
+                      >
+                        <span>无扩展名</span>
+                        <span className="type-ext">—</span>
+                      </button>
                       <div className="type-popover-divider" />
                       <div className="type-custom">
                         <input
@@ -1532,7 +1577,7 @@ export default function NoteEditorPage({
                   />
                 </div>
               </div>
-              {previewMounted && (
+              {fileFormat === 'markdown' && previewMounted && (
                 <>
                   <SplitHandle
                     ratio={renderedRatio}

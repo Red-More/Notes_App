@@ -160,21 +160,37 @@ function isTerminalSynthetic(message: { content?: unknown; stopReason?: string }
   return !hasRenderableContent(message)
 }
 
+/**
+ * Virtual document path: `/life/...` with a non-empty last segment.
+ *
+ * The extension is optional in this app, so a path without one is still a
+ * document. Text scanning below keeps requiring a dot to avoid matching prose;
+ * only an explicit `path` argument gets the permissive rule.
+ */
+function isDocumentPath(value: string): boolean {
+  if (!value.startsWith('/life/')) return false
+  return value.slice(value.lastIndexOf('/') + 1).length > 0
+}
+
+/**
+ * `/life/...<ext>` inside free text; any extension, never a trailing dot.
+ * Punctuation that cannot appear in a file name ends the match, so a path
+ * followed by `:`,`，` or a quote is captured without the separator.
+ */
+const DOC_PATH_IN_TEXT =
+  /\/life\/[^\s，。；、,:;!?*|"'<>\\（(）)]*\.[^\s，。；、,:;!?*|"'<>\\（(）).]+/g
+
 /** Find the document path touched by a tool card (args first, then result text). */
 export function documentPath(card: ToolCard): string | null {
   try {
     const args = JSON.parse(card.args || '{}') as { path?: unknown }
-    if (
-      typeof args.path === 'string' &&
-      args.path.startsWith('/life/') &&
-      args.path.endsWith('.md')
-    ) {
+    if (typeof args.path === 'string' && isDocumentPath(args.path)) {
       return args.path
     }
   } catch {
     // Persisted cards have no args; fall back to the result text.
   }
-  const match = card.text.match(/\/life\/[^\s，。；、"'<>（(）)]+\.md/)
+  const match = card.text.match(DOC_PATH_IN_TEXT)
   return match ? match[0] : null
 }
 
@@ -186,7 +202,7 @@ export function documentPath(card: ToolCard): string | null {
 export function documentPaths(card: ToolCard): string[] {
   const paths = new Set<string>()
   const remember = (value: unknown) => {
-    if (typeof value === 'string' && value.startsWith('/life/') && value.endsWith('.md')) {
+    if (typeof value === 'string' && isDocumentPath(value)) {
       paths.add(value)
     }
   }
@@ -201,7 +217,7 @@ export function documentPaths(card: ToolCard): string[] {
   }
   const search = card.toolName === 'fs_glob' || card.toolName === 'fs_grep'
   if (search || paths.size === 0) {
-    for (const match of card.text.matchAll(/\/life\/[^\s，。；、"'<>（(）)]+\.md/g)) {
+    for (const match of card.text.matchAll(DOC_PATH_IN_TEXT)) {
       paths.add(match[0])
     }
   }

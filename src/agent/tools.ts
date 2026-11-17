@@ -6,14 +6,13 @@
 //! `load_skill` 的 scope 交由 Rust 侧按 `.lifeos` 鉴权，并拒绝已停用技能。
 
 import type { AgentTool } from '@earendil-works/pi-agent-core'
-import { StringEnum, Type } from '@earendil-works/pi-ai'
+import { Type } from '@earendil-works/pi-ai'
 import type { TSchema } from '@earendil-works/pi-ai'
 import { api, mcpApi, skillApi } from '../api'
 import type { McpToolInfo } from '../types'
 import {
-  GREP_TYPES,
   argBoolean,
-  argGrepType,
+  argExtension,
   argNumber,
   argString,
   argsObject,
@@ -163,14 +162,15 @@ export function createTools(
   const read: AgentTool = {
     name: 'fs_read',
     label: TOOL_DESCRIPTORS.fs_read,
-    description:
-      '读取一个文件，或列出目录。文件返回正文、行数与 rev。默认只能访问自己的工作目录 /life/ai_default；其它目录需用户授权。修改前先 read 拿到最新 rev。',
+    description: '读取文件内容，或列出目录下的条目。',
     parameters: Type.Object({
-      path: Type.String({ description: '虚拟路径，如 /life/ai_default/2026-10-30.md' }),
+      path: Type.String({ description: '文件或目录路径' }),
       rev: Type.Optional(Type.Number({ description: '指定历史版本；省略读当前版本' })),
       startLine: Type.Optional(Type.Number({ description: '起始行（1 起）' })),
       endLine: Type.Optional(Type.Number({ description: '结束行（含）' })),
-      includeMeta: Type.Optional(Type.Boolean({ description: '是否返回 frontmatter 元数据' })),
+      includeMeta: Type.Optional(
+        Type.Boolean({ description: '是否返回元数据（Markdown 为 frontmatter，其它取文件名）' }),
+      ),
     }),
     // Weak models often send "10" as a string or a JSON string for args.
     prepareArguments: (raw) => {
@@ -210,15 +210,11 @@ export function createTools(
   const write: AgentTool = {
     name: 'fs_write',
     label: TOOL_DESCRIPTORS.fs_write,
-    description:
-      '新建一个 Markdown 文档。只能新建，不能覆盖：目标已存在会返回 alreadyExists。默认只能写自己的工作目录 /life/ai_default；其它目录需用户授权。追加内容请先 read 文件尾部，再用 fs_edit 锚定追加。',
+    description: '新建一个文件并写入内容；目标已存在时返回错误。',
     parameters: Type.Object({
-      path: Type.String({ description: '虚拟路径；省略 .md 会自动补' }),
-      content: Type.String({ description: 'Markdown 正文（可含 frontmatter）' }),
+      path: Type.String({ description: '文件路径，按原样写入，不补扩展名' }),
+      content: Type.String({ description: '文件内容' }),
       createParents: Type.Optional(Type.Boolean({ description: '自动创建父目录，默认 true' })),
-      autoFrontmatter: Type.Optional(
-        Type.Boolean({ description: '按路径自动补 frontmatter，默认 true' }),
-      ),
     }),
     prepareArguments: (raw) => {
       const args = argsObject(raw)
@@ -226,7 +222,6 @@ export function createTools(
         path: argString(args.path) ?? '',
         content: typeof args.content === 'string' ? args.content : String(args.content ?? ''),
         createParents: argBoolean(args.createParents),
-        autoFrontmatter: argBoolean(args.autoFrontmatter),
       }
     },
     executionMode: 'sequential',
@@ -235,14 +230,12 @@ export function createTools(
         path: string
         content: string
         createParents?: boolean
-        autoFrontmatter?: boolean
       }
       const outcome = await runTool(() =>
         api.fsWrite({
           path: input.path,
           content: input.content,
           createParents: input.createParents ?? true,
-          autoFrontmatter: input.autoFrontmatter ?? true,
         }),
       )
       if (!outcome.ok) return toolFailure(outcome.text)
@@ -254,10 +247,9 @@ export function createTools(
   const edit: AgentTool = {
     name: 'fs_edit',
     label: TOOL_DESCRIPTORS.fs_edit,
-    description:
-      '按字符串替换修改已有文档，追加新 rev。old_string 必须唯一命中；追加内容时把它设为文件末尾附近的一段原文。带上 expectRev 可在版本冲突时被拒绝。默认只能改自己的工作目录 /life/ai_default；其它目录需用户授权。',
+    description: '用字符串替换的方式修改文件内容。',
     parameters: Type.Object({
-      path: Type.String({ description: '虚拟路径' }),
+      path: Type.String({ description: '文件路径' }),
       oldString: Type.String({ description: '要被替换的原文，必须唯一命中' }),
       newString: Type.String({ description: '替换后的文本；可包含追加内容' }),
       replaceAll: Type.Optional(Type.Boolean({ description: '是否替换全部命中，默认 false' })),
@@ -308,12 +300,12 @@ export function createTools(
   const glob: AgentTool = {
     name: 'fs_glob',
     label: TOOL_DESCRIPTORS.fs_glob,
-    description: '按路径模式查找文件或目录，最多 200 条。默认只能看到自己的工作目录 /life/ai_default；其它目录需用户授权。',
+    description: '按 glob 模式查找文件与目录。',
     parameters: Type.Object({
       pattern: Type.String({
         description: 'GLOB 模式：绝对路径（如 /life/ai_default/*.md）或相对模式（配合 root）',
       }),
-      root: Type.Optional(Type.String({ description: '相对模式的根目录，默认 /life（结果按授权过滤）' })),
+      root: Type.Optional(Type.String({ description: '相对模式的根目录' })),
       caseSensitive: Type.Optional(Type.Boolean({ description: '是否区分大小写' })),
     }),
     prepareArguments: (raw) => {
@@ -344,13 +336,14 @@ export function createTools(
   const grep: AgentTool = {
     name: 'fs_grep',
     label: TOOL_DESCRIPTORS.fs_grep,
-    description: '按内容搜索，返回 path:line 与上下文片段。默认最多 50 条；默认只能搜到已授权目录（/life/ai_default），其它目录需用户授权。',
+    description: '按内容搜索文件，返回命中行与上下文。',
     parameters: Type.Object({
       pattern: Type.String({ description: '要搜索的文字' }),
-      path: Type.Optional(Type.String({ description: '限定路径或目录，默认全库（结果按授权过滤）' })),
-      type: Type.Optional(
-        StringEnum(GREP_TYPES, {
-          description: '限定文档类型：note/todo/event/contact/diary',
+      path: Type.Optional(Type.String({ description: '限定路径或目录' })),
+      extension: Type.Optional(
+        Type.String({
+          description:
+            '限定文件扩展名，如 md、py、json；可带或不带点，大小写不敏感。省略表示搜索全部类型',
         }),
       ),
       maxResults: Type.Optional(Type.Number({ description: '最多返回条数，上限 200' })),
@@ -361,7 +354,11 @@ export function createTools(
       return {
         pattern: argString(args.pattern) ?? '',
         path: argString(args.path),
-        type: argGrepType(args.type),
+        extension: argExtension(args.extension),
+        // `type` was the removed document-kind filter. Keep it only so the tool
+        // can tell the model why it no longer applies, instead of silently
+        // matching zero files.
+        legacyType: argString(args.type),
         maxResults: argNumber(args.maxResults),
         contextLines: argNumber(args.contextLines),
       }
@@ -370,9 +367,15 @@ export function createTools(
       const input = params as {
         pattern: string
         path?: string
-        type?: string
+        extension?: string
+        legacyType?: string
         maxResults?: number
         contextLines?: number
+      }
+      if (input.legacyType) {
+        return toolFailure(
+          'fs_grep 的 type 参数已移除；请改用 extension（例如 md、json），省略则搜索全部类型',
+        )
       }
       if (input.path) assertReadable(input.path)
       // Rebuild the request explicitly so model-supplied extras never reach the command.
@@ -380,7 +383,7 @@ export function createTools(
         api.fsGrep({
           pattern: input.pattern,
           path: input.path,
-          type: input.type,
+          extension: input.extension,
           maxResults: input.maxResults,
           contextLines: input.contextLines,
         }),

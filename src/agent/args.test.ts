@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { argBoolean, argGrepType, argNumber, argString, argsObject } from './args'
+import { argBoolean, argExtension, argNumber, argString, argsObject } from './args'
 
 describe('tool argument normalization', () => {
   it('parses JSON-string arguments and rejects malformed payloads', () => {
@@ -19,11 +19,13 @@ describe('tool argument normalization', () => {
     expect(argBoolean('maybe')).toBeUndefined()
   })
 
-  it('trims strings and maps enum aliases', () => {
+  it('trims strings and normalizes extensions', () => {
     expect(argString('  /life ')).toBe('/life')
-    expect(argGrepType('TODO')).toBe('todo')
-    expect(argGrepType('日记')).toBe('diary')
-    expect(argGrepType('schedule')).toBeUndefined()
-    expect(argGrepType('unknown-kind')).toBeUndefined()
+    expect(argExtension(' MD ')).toBe('md')
+    expect(argExtension('.py')).toBe('py')
+    expect(argExtension('..tar.gz')).toBe('tar.gz')
+    expect(argExtension('')).toBeUndefined()
+    expect(argExtension('  .  ')).toBeUndefined()
+    expect(argExtension(undefined)).toBeUndefined()
   })
 })

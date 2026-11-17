@@ -380,6 +380,20 @@ describe('tool payload paths', () => {
       '/life/b.md',
     ])
   })
+
+  it('recognizes a document without an extension from the arguments', () => {
+    // The extension is optional in this app, so a bare leaf is a document.
+    const card: ToolCard = {
+      id: 't4',
+      kind: 'tool',
+      toolName: 'fs_write',
+      args: JSON.stringify({ path: '/life/notes/无扩展名' }),
+      status: 'done',
+      text: '',
+    }
+    expect(documentPaths(card)).toEqual(['/life/notes/无扩展名'])
+    expect(documentPaths({ ...card, id: 't5', args: JSON.stringify({ path: '/life/notes/' }) })).toEqual([])
+  })
 })
 
 describe('history projection', () => {

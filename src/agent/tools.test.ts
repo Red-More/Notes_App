@@ -95,3 +95,33 @@ describe('agent tools cannot forge their principal', () => {
     expect(mocks.userSearch).not.toHaveBeenCalled()
   })
 })
+
+describe('fs_grep arguments', () => {
+  /** Execute through `prepareArguments`, which is where raw args are normalized. */
+  async function runPrepared(args: unknown) {
+    const grep = tool('fs_grep')
+    const prepared = grep.prepareArguments!(args)
+    const execute = grep.execute as (
+      id: string,
+      params: unknown,
+    ) => Promise<{ isError?: boolean; content: { text: string }[] }>
+    return execute('call', prepared)
+  }
+
+  it('reports the removed `type` filter instead of silently matching nothing', async () => {
+    const result = await runPrepared({ pattern: 'body', type: 'note' })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0]?.text).toContain('type 参数已移除')
+    expect(mocks.fsGrep).not.toHaveBeenCalled()
+  })
+
+  it('normalizes the extension filter for the agent command', async () => {
+    await runPrepared({ pattern: 'body', extension: '.MD' })
+
+    expect(mocks.fsGrep.mock.calls[0]?.[0]).toMatchObject({
+      pattern: 'body',
+      extension: 'md',
+    })
+  })
+})

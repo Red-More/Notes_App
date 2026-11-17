@@ -43,28 +43,10 @@ export function argBoolean(value: unknown): boolean | undefined {
   return undefined
 }
 
-/** Document kinds accepted by `fs_grep.type`, matching `meta.kind` in Rust. */
-export const GREP_TYPES = ['note', 'todo', 'contact', 'diary'] as const
-
-const GREP_TYPE_ALIASES: Record<string, (typeof GREP_TYPES)[number]> = {
-  note: 'note',
-  notes: 'note',
-  笔记: 'note',
-  todo: 'todo',
-  todos: 'todo',
-  task: 'todo',
-  待办: 'todo',
-  contact: 'contact',
-  contacts: 'contact',
-  联系人: 'contact',
-  diary: 'diary',
-  journal: 'diary',
-  日记: 'diary',
-}
-
-/** Map loose aliases (including Chinese) onto a canonical document kind. */
-export function argGrepType(value: unknown): (typeof GREP_TYPES)[number] | undefined {
+/** Normalize a file extension: trim, drop leading dots, lowercase. */
+export function argExtension(value: unknown): string | undefined {
   const raw = argString(value)
   if (!raw) return undefined
-  return GREP_TYPE_ALIASES[raw.toLowerCase()] ?? GREP_TYPE_ALIASES[raw]
+  const extension = raw.trim().replace(/^\.+/, '').trim().toLowerCase()
+  return extension || undefined
 }

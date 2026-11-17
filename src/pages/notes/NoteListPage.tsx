@@ -64,7 +64,7 @@ function noteRow(note: Note): Row {
     title: note.title,
     preview: note.content,
     meta: `${formatAmPmDateTime(note.updatedAt)} · ${note.content.length}字`,
-    ext: extensionOf(note.path),
+    ext: note.ext ?? extensionOf(note.path),
     isPinned: note.isPinned,
     createdAt: note.createdAt,
     updatedAt: note.updatedAt,
@@ -78,7 +78,7 @@ function docRow(doc: Doc): Row {
     title: doc.title,
     preview: doc.content,
     meta: `${formatAmPmDateTime(doc.updatedAt)} · ${doc.content.length}字`,
-    ext: extensionOf(doc.path),
+    ext: doc.ext ?? extensionOf(doc.path),
     isPinned: doc.pinned,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
@@ -728,9 +728,7 @@ export default function NoteListPage({
                     </div>
                     <div className="note-card-meta">
                       <span className="note-card-time">{row.meta}</span>
-                      {row.ext && (
-                        <span className="note-card-ext">类型：{fileTypeLabel(row.ext)}</span>
-                      )}
+                      <span className="note-card-ext">类型：{fileTypeLabel(row.ext)}</span>
                     </div>
                   </div>
                 ))}
