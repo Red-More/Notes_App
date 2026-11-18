@@ -19,6 +19,9 @@ export const COMMON_FILE_TYPES: FileTypeOption[] = [
 ]
 
 const FORBIDDEN = /[\\/:*?"<>|]/
+// \p{Cc} covers every control character (C0, DEL and C1) and matches the Rust
+// side's `char::is_control`, so the UI never accepts a name the backend rejects.
+const CONTROL = /\p{Cc}/u
 const RESERVED =
   /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i
 
@@ -43,19 +46,6 @@ export function exportFileName(base: string, ext: string, withImages: boolean): 
   const document = ext ? `${name}.${ext}` : name
   // The image bundle only wraps the document, so the document name survives.
   return withImages ? `${document}.zip` : document
-}
-
-/**
- * Extension of a virtual path. The first dot separates the extension, which may
- * contain further dots (`tar.gz`).
- *
- * Legacy helper for rows that predate the persisted `ext`; prefer the stored
- * value so names are never re-split.
- */
-export function extensionOf(path: string): string {
-  const base = path.split('/').pop() ?? ''
-  const index = base.indexOf('.')
-  return index > 0 ? base.slice(index + 1) : ''
 }
 
 /**
@@ -86,7 +76,7 @@ export function fileNameTypingError(name: string, allowEmpty = true): string | n
   const value = name.trim()
   if (!value) return allowEmpty ? null : '文件名不能为空'
   if (value.length > 120) return '文件名最多 120 个字符'
-  if (FORBIDDEN.test(value) || /[\u0000-\u001f]/.test(value)) {
+  if (FORBIDDEN.test(value) || CONTROL.test(value)) {
     return '文件名不能包含 / \\ : * ? " < > | 等字符'
   }
   if (value.includes('.')) return '文件名不能包含点号，扩展名请单独选择'
@@ -107,7 +97,7 @@ export function normalizeExtension(
   const ext = raw.trim().replace(/^\.+/, '')
   if (!ext) return allowEmpty ? { ext: '' } : { error: '请输入扩展名' }
   if ([...ext].length > 16) return { error: '扩展名最多 16 个字符' }
-  if (/[\s\\/:*?"<>|]/.test(ext) || /[\u0000-\u001f]/.test(ext)) {
+  if (/[\s\\/:*?"<>|]/.test(ext) || CONTROL.test(ext)) {
     return { error: '扩展名不能包含空格或 / \\ : * ? " < > | 等字符' }
   }
   if (ext.endsWith('.')) return { error: '扩展名不能以点结尾' }

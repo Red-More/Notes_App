@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import {
   baseNameOf,
   exportFileName,
-  extensionOf,
   fileNameError,
   fileTypeLabel,
   normalizeExtension,
@@ -22,15 +21,6 @@ describe('baseNameOf', () => {
     expect(baseNameOf('/life/notes/A.MD', 'md')).toBe('A')
     // A suffix that does not match the stored extension stays in the name.
     expect(baseNameOf('/life/notes/notes.2026', 'md')).toBe('notes.2026')
-  })
-})
-
-describe('extensionOf', () => {
-  it('splits at the first dot so multi-segment extensions survive', () => {
-    expect(extensionOf('/life/notes/a.md')).toBe('md')
-    expect(extensionOf('/life/notes/a.tar.gz')).toBe('tar.gz')
-    expect(extensionOf('/life/notes/.gitignore')).toBe('')
-    expect(extensionOf('/life/notes/noext')).toBe('')
   })
 })
 
@@ -84,5 +74,14 @@ describe('labels and base names', () => {
     expect(fileNameError('报告', false)).toBeNull()
     expect(fileNameError('版本 v1.2', false)).toBeTruthy()
     expect(fileNameError('.', false)).toBeTruthy()
+  })
+
+  it('rejects every control character the backend rejects', () => {
+    // C0, DEL and C1 all fail `char::is_control` on the Rust side. The control
+    // character sits mid-string because both validators trim the edges first.
+    for (const c of ['\u0001', '\u000a', '\u001f', '\u007f', '\u0085', '\u009f']) {
+      expect(fileNameError(`报${c}告`, false)).toBeTruthy()
+      expect(normalizeExtension(`md${c}x`).error).toBeTruthy()
+    }
   })
 })

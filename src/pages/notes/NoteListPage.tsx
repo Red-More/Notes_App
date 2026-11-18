@@ -8,7 +8,7 @@ import {
   useLongPress,
 } from '../../hooks'
 import { exportTs, formatAmPmDateTime, friendlyError } from '../../utils'
-import { extensionOf, fileTypeLabel } from '../../fileTypes'
+import { fileTypeLabel } from '../../fileTypes'
 import { hapticTap } from '../../system/haptics'
 import type { Doc, Folder, FolderScope, Note } from '../../types'
 import { NOTES_ROOT_SCOPE } from '../../types'
@@ -64,7 +64,7 @@ function noteRow(note: Note): Row {
     title: note.title,
     preview: note.content,
     meta: `${formatAmPmDateTime(note.updatedAt)} · ${note.content.length}字`,
-    ext: note.ext ?? extensionOf(note.path),
+    ext: note.ext,
     isPinned: note.isPinned,
     createdAt: note.createdAt,
     updatedAt: note.updatedAt,
@@ -78,7 +78,7 @@ function docRow(doc: Doc): Row {
     title: doc.title,
     preview: doc.content,
     meta: `${formatAmPmDateTime(doc.updatedAt)} · ${doc.content.length}字`,
-    ext: doc.ext ?? extensionOf(doc.path),
+    ext: doc.ext,
     isPinned: doc.pinned,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,

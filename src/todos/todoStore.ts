@@ -145,6 +145,12 @@ export class TodoStore {
    * `migrate` defaults to true and is the documented trigger for the one-time
    * legacy fold-in. A background caller (the reminder poller) passes false so a
    * periodic read never writes.
+   *
+   * This reads every day file, bodies included, because a reminder may live in a
+   * file written months ago. Narrowing the window by date would be wrong (a todo
+   * created in January can legitimately remind next year) and there is no cheap
+   * change signal yet, so the poller pays a full read every 30s. Revisit only
+   * together with a "todos changed" event from the backend.
    */
   async list(search?: string, options: TodoListOptions = {}): Promise<Todo[]> {
     let docs = await this.port.listDocuments()
