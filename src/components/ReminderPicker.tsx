@@ -1,29 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { dateStr } from '../utils'
+import { REPEAT_OPTIONS, type RepeatValue } from '../todos/repeat'
+import { buildDateOptions } from './pickerDates'
 import { OverlayPortal } from './ui'
 import { IconChevronDown, IconCheck } from './Icons'
 
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
 
-/** Supported repeat intervals; persisted on the todo frontmatter. */
-export const REPEAT_OPTIONS = [
-  { value: 'none', label: '不重复' },
-  { value: 'daily', label: '每天' },
-  { value: 'weekday', label: '周一至周五' },
-  { value: 'weekly', label: '每周' },
-  { value: 'monthly', label: '每月' },
-  { value: 'yearly', label: '每年' },
-] as const
-
-export type RepeatValue = (typeof REPEAT_OPTIONS)[number]['value']
-
 /** Wheel column geometry: one item per step, three rows visible. */
 const ITEM_H = 52
 const VISIBLE_ROWS = 3
-
-/** How many days back / forward the date column offers. */
-const DAYS_BACK = 7
-const DAYS_FORWARD = 90
 
 interface PickerValue {
   date: string
@@ -60,20 +46,10 @@ function labelForDate(date: string): string {
 
 /** Build the scrollable option lists for the three wheel columns. */
 function buildColumns(initial: PickerValue) {
-  const today = new Date(`${dateStr(new Date())}T00:00:00`)
-  const dates: string[] = []
-  for (let offset = -DAYS_BACK; offset <= DAYS_FORWARD; offset += 1) {
-    const d = new Date(today)
-    d.setDate(d.getDate() + offset)
-    dates.push(dateStr(d))
-  }
+  const { dates, dateIndex } = buildDateOptions(dateStr(new Date()), initial.date)
   return {
     dates,
-    // Out-of-range initial dates (e.g. far past/future) fall back to today.
-    dateIndex: (() => {
-      const idx = dates.indexOf(initial.date === '' ? dateStr(new Date()) : initial.date)
-      return idx >= 0 ? idx : dates.indexOf(dateStr(new Date()))
-    })(),
+    dateIndex,
     hours: Array.from({ length: 24 }, (_, i) => i),
     minutes: Array.from({ length: 60 }, (_, i) => i),
   }
