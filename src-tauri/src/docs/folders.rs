@@ -14,7 +14,9 @@ use crate::vfs::error::ToolError;
 use crate::vfs::{cap_gate, reserved, VirtualFs};
 
 use super::types::{Folder, FolderCrumb, FolderStats};
-use super::util::{basename, now, parent_dir, safe_segment, stem, unique_dir_path, unique_file_path};
+use super::util::{
+    basename, now, parent_dir, safe_segment, stem, unique_dir_path, unique_file_path,
+};
 
 const MAX_FOLDER_NAME_CHARS: usize = 50;
 
@@ -54,9 +56,10 @@ pub fn root_dirs(vfs: &VirtualFs) -> Result<Vec<RootDir>, ToolError> {
            AND i.path NOT GLOB '*/.lifeos'
          ORDER BY i.path",
     )?;
-    let rows = stmt.query_map(params![format!("{}%", cap_gate::escape_like(&prefix)), prefix], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-    })?;
+    let rows = stmt.query_map(
+        params![format!("{}%", cap_gate::escape_like(&prefix)), prefix],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    )?;
 
     let mut dirs = Vec::new();
     for row in rows {
@@ -74,8 +77,10 @@ pub fn root_dirs(vfs: &VirtualFs) -> Result<Vec<RootDir>, ToolError> {
     dirs.sort_by_key(|d| {
         let rank = if d.path == "/life/notes" {
             0
-        } else if matches!(d.path.as_str(), "/life/diary" | "/life/todos" | "/life/contacts" | "/life/ai_default")
-        {
+        } else if matches!(
+            d.path.as_str(),
+            "/life/diary" | "/life/todos" | "/life/contacts" | "/life/ai_default"
+        ) {
             1
         } else {
             2
@@ -492,10 +497,7 @@ pub fn path(
 }
 
 /// 解析作用域根：返回 (虚拟路径, 显示名)，必须是 /life 下的目录。
-fn resolve_root(
-    conn: &Connection,
-    root: Option<&str>,
-) -> Result<(String, String), ToolError> {
+fn resolve_root(conn: &Connection, root: Option<&str>) -> Result<(String, String), ToolError> {
     let path = root.unwrap_or(NOTES_ROOT).trim_end_matches('/');
     if path != cap_gate::ROOT && !path.starts_with("/life/") {
         return Err(ToolError::invalid("作用域必须位于 /life 下"));

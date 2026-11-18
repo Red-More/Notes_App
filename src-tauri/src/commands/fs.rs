@@ -153,7 +153,9 @@ pub fn user_search(
 
 /// 顶层虚拟目录列表（笔记页「浏览其他文件夹」菜单数据源）。
 #[tauri::command]
-pub fn root_dirs(state: State<'_, VfsState>) -> Result<Vec<crate::docs::folders::RootDir>, ToolError> {
+pub fn root_dirs(
+    state: State<'_, VfsState>,
+) -> Result<Vec<crate::docs::folders::RootDir>, ToolError> {
     let vfs = crate::lock(&state.0);
     crate::docs::folders::root_dirs(&vfs)
 }

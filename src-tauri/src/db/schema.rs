@@ -357,9 +357,7 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     }
     // Reasoning duration joined the message row later; old databases keep
     // their data and gain the column in place.
-    if table_exists(&tx, "messages")?
-        && !column_exists(&tx, "messages", "thinking_duration_ms")?
-    {
+    if table_exists(&tx, "messages")? && !column_exists(&tx, "messages", "thinking_duration_ms")? {
         tx.execute(
             "ALTER TABLE messages ADD COLUMN thinking_duration_ms INTEGER",
             [],
@@ -462,7 +460,9 @@ pub(crate) fn migrate_file_layers(conn: &Connection) -> rusqlite::Result<()> {
              WHERE i.kind = 'file' AND i.hash IS NULL",
         )?;
         let rows = stmt
-            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows
     };

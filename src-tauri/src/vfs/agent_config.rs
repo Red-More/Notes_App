@@ -94,7 +94,11 @@ pub fn merged_rules(configs: &BTreeMap<String, AgentConfig>, path: &str) -> Stri
         let Some(config) = configs.get(&dir) else {
             continue;
         };
-        if let Some(rules) = config.rules.as_deref().filter(|text| !text.trim().is_empty()) {
+        if let Some(rules) = config
+            .rules
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+        {
             blocks.push(rules.trim().to_string());
         }
     }

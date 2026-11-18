@@ -9,7 +9,6 @@
 //! 因此历史链上的 `content(rev) = replay(baseline, diffs[2..=rev])`，除基线
 //! 与 head 外不再有任何整份正文副本。
 
-
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::vfs::error::ToolError;

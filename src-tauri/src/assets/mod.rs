@@ -95,7 +95,14 @@ impl AssetStore {
         conn.execute(
             "INSERT INTO assets (sha256, mime, size, width, height, created_at, source)
              VALUES (?1, ?2, ?3, ?4, ?5, datetime('now','localtime'), ?6)",
-            params![sha, mime, bytes.len() as i64, width as i64, height as i64, source],
+            params![
+                sha,
+                mime,
+                bytes.len() as i64,
+                width as i64,
+                height as i64,
+                source
+            ],
         )
         .map_err(storage)?;
         Ok(AssetInfo {
@@ -264,10 +271,7 @@ fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
 
 /// GIF logical screen descriptor (little-endian, offset 6 and 8).
 fn gif_size(bytes: &[u8]) -> Option<(u32, u32)> {
-    Some((
-        u32::from(le_u16(bytes, 6)?),
-        u32::from(le_u16(bytes, 8)?),
-    ))
+    Some((u32::from(le_u16(bytes, 6)?), u32::from(le_u16(bytes, 8)?)))
 }
 
 /// Walk JPEG segments until a start-of-frame marker, where the frame size lives.

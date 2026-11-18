@@ -396,9 +396,11 @@ pub fn insert_message(
     let image_ids = if item.image_asset_ids.is_empty() {
         None
     } else {
-        Some(serde_json::to_string(&item.image_asset_ids).map_err(|e| ToolError::Storage {
-            message: format!("图片引用序列化失败：{e}"),
-        })?)
+        Some(
+            serde_json::to_string(&item.image_asset_ids).map_err(|e| ToolError::Storage {
+                message: format!("图片引用序列化失败：{e}"),
+            })?,
+        )
     };
     tx.execute(
         "INSERT INTO messages

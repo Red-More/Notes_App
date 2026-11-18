@@ -91,11 +91,7 @@ pub fn collect_folder(
 }
 
 /// 收集单个文档，并把图片引用改写为归档内的相对路径。
-pub fn collect_one(
-    vfs: &VirtualFs,
-    id: i64,
-    store: &AssetStore,
-) -> Result<ExportEntry, ToolError> {
+pub fn collect_one(vfs: &VirtualFs, id: i64, store: &AssetStore) -> Result<ExportEntry, ToolError> {
     let row = fetch_row(vfs.conn(), id, false)?;
     let is_markdown = meta::is_markdown_ext(&row.ext);
     let title = if is_markdown {
@@ -209,7 +205,8 @@ pub fn zip_entries(entries: &[ExportEntry]) -> Result<Vec<u8>, ToolError> {
             (true, count) => format!("{base}-{count}"),
         };
         zip.start_file(name, options).map_err(zip_error)?;
-        zip.write_all(entry.markdown.as_bytes()).map_err(zip_error)?;
+        zip.write_all(entry.markdown.as_bytes())
+            .map_err(zip_error)?;
     }
 
     zip.finish()

@@ -10,9 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::vfs::agent_config::{self, AgentConfig};
 use crate::vfs::cap_gate;
 use crate::vfs::error::ToolError;
-use crate::vfs::lifeos::{
-    self, Decision, DirectoryPolicy, PolicyFile, PolicyPermission,
-};
+use crate::vfs::lifeos::{self, Decision, DirectoryPolicy, PolicyFile, PolicyPermission};
 use crate::vfs::VirtualFs;
 
 /// Hard cap for one directory's model rules block.
@@ -93,11 +91,7 @@ pub fn ensure_defaults(vfs: &mut VirtualFs) -> Result<(), ToolError> {
     Ok(())
 }
 
-fn ensure_file<T: Serialize>(
-    vfs: &mut VirtualFs,
-    path: &str,
-    config: &T,
-) -> Result<(), ToolError> {
+fn ensure_file<T: Serialize>(vfs: &mut VirtualFs, path: &str, config: &T) -> Result<(), ToolError> {
     let exists: i64 = vfs.conn().query_row(
         "SELECT COUNT(*) FROM inodes WHERE path = ?1 AND kind = 'file' AND status = 'active'",
         params![path],
@@ -189,7 +183,11 @@ pub fn save_agent_config(
     if crate::vfs::reserved::is_config_path(&path) {
         return Err(ToolError::invalid("配置目录本身不能设置模型配置"));
     }
-    if input.rules.as_deref().is_some_and(|text| text.len() > MAX_RULES_BYTES) {
+    if input
+        .rules
+        .as_deref()
+        .is_some_and(|text| text.len() > MAX_RULES_BYTES)
+    {
         return Err(ToolError::ContentTooLarge {
             limit: MAX_RULES_BYTES,
             actual: input.rules.as_deref().map(str::len).unwrap_or(0),

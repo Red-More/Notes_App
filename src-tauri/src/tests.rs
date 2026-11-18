@@ -54,7 +54,10 @@ fn decision(allow: bool) -> &'static str {
 
 fn seed_policy(vfs: &VirtualFs, config_path: &str, body: &str) {
     let conn = vfs.conn();
-    let config_dir = config_path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("/life");
+    let config_dir = config_path
+        .rsplit_once('/')
+        .map(|(dir, _)| dir)
+        .unwrap_or("/life");
     conn.execute(
         "INSERT OR IGNORE INTO inodes (path, kind, head_rev, size, ctime, mtime)
          VALUES (?1, 'directory', 0, 0, datetime('now','localtime'), datetime('now','localtime'))",
@@ -309,9 +312,13 @@ fn agent_skill_read_enforces_scope_acl_and_enabled_state() {
     assert!(allowed.body.contains("工作区正文"));
 
     // A file scope resolves to its parent folder.
-    write_file(&mut vfs, "/life/ai_default/daily", "text", WriteSource::User);
-    let via_file =
-        skills::read_for_agent(&vfs, "demo", Some("/life/ai_default/daily.md")).unwrap();
+    write_file(
+        &mut vfs,
+        "/life/ai_default/daily",
+        "text",
+        WriteSource::User,
+    );
+    let via_file = skills::read_for_agent(&vfs, "demo", Some("/life/ai_default/daily.md")).unwrap();
     assert!(via_file.body.contains("工作区正文"));
 
     skills::set_enabled(&vfs, "demo", false).unwrap();
@@ -365,12 +372,7 @@ fn acl_hides_existence_inside_denied_folders() {
 
     // Writing to a denied directory must deny instead of alreadyExists. The
     // directory name carries an extension so fs_write does not append `.md`.
-    write_file(
-        &mut vfs,
-        "/life/archive.v1/inside",
-        "x",
-        WriteSource::User,
-    );
+    write_file(&mut vfs, "/life/archive.v1/inside", "x", WriteSource::User);
     seed_visibility(&vfs, "/life/archive.v1", false, false);
     let dir_write = agent_write(&mut vfs, "/life/archive.v1").unwrap_err();
     assert!(matches!(dir_write, ToolError::PermissionDenied { .. }));
@@ -466,11 +468,7 @@ fn acl_policy_silent_fields_inherit_and_no_declaration_denies() {
     write_file(&mut vfs, "/life/notes/a", "a", WriteSource::User);
 
     seed_policy(&vfs, "/life/.lifeos/ai.policy", r#"{"read":"allow"}"#);
-    seed_policy(
-        &vfs,
-        "/life/notes/.lifeos/ai.policy",
-        r#"{"write":"deny"}"#,
-    );
+    seed_policy(&vfs, "/life/notes/.lifeos/ai.policy", r#"{"write":"deny"}"#);
     // `read` is silent at the child level, so the root allow is inherited.
     assert!(agent_read(&vfs, "/life/notes/a.md").is_ok());
     // `write` is explicitly denied.
@@ -538,11 +536,7 @@ fn acl_directory_and_file_targets_use_expected_scope() {
 fn reserved_policy_paths_are_model_invisible() {
     let mut vfs = test_vfs();
     write_file(&mut vfs, "/life/notes/a", "needle", WriteSource::User);
-    seed_policy(
-        &vfs,
-        "/life/notes/.lifeos/ai.policy",
-        r#"{"read":"allow"}"#,
-    );
+    seed_policy(&vfs, "/life/notes/.lifeos/ai.policy", r#"{"read":"allow"}"#);
     seed_policy(
         &vfs,
         "/life/notes/ai.policy",
@@ -702,8 +696,14 @@ fn ordinary_folder_delete_still_moves_notes_to_root() {
     assert_eq!(kind, "file");
     let doc = docs::get(&vfs, note.id, false).unwrap();
     assert_eq!(doc.kind, "note");
-    assert!(path.starts_with("/life/notes/"), "note moved to the root: {path}");
-    assert!(!path.starts_with("/life/notes/项目/"), "note left the folder: {path}");
+    assert!(
+        path.starts_with("/life/notes/"),
+        "note moved to the root: {path}"
+    );
+    assert!(
+        !path.starts_with("/life/notes/项目/"),
+        "note left the folder: {path}"
+    );
     let folder_left: i64 = vfs
         .conn()
         .query_row(
@@ -806,7 +806,10 @@ fn folder_list_can_include_system_directories() {
         .iter()
         .find(|folder| folder.path == "/life/.agent")
         .expect(".agent must be browsable when requested");
-    assert!(agent.has_children, ".agent/skills is a real child directory");
+    assert!(
+        agent.has_children,
+        ".agent/skills is a real child directory"
+    );
     assert!(visible
         .folders
         .iter()
@@ -939,7 +942,11 @@ fn grep_finds_moved_documents_without_reindexing() {
 #[test]
 fn reserved_config_files_are_listable_and_editable_by_the_user() {
     let mut vfs = test_vfs();
-    seed_policy(&vfs, "/life/.lifeos/ai.policy", r#"{"version":1,"read":"deny"}"#);
+    seed_policy(
+        &vfs,
+        "/life/.lifeos/ai.policy",
+        r#"{"version":1,"read":"deny"}"#,
+    );
     let id = inode_of(&vfs, "/life/.lifeos/ai.policy");
 
     let listed = docs::list(
@@ -971,7 +978,8 @@ fn reserved_config_files_are_listable_and_editable_by_the_user() {
     // Renaming a policy file (in or out) would silently change ACL
     // enforcement, so it must be rejected on both sides.
     assert!(docs::rename_file(&mut vfs, id, "old-policy", "json").is_err());
-    let other = docs::create_typed(&mut vfs, "note", "普通", "正文", None, None, Some("md")).unwrap();
+    let other =
+        docs::create_typed(&mut vfs, "note", "普通", "正文", None, None, Some("md")).unwrap();
     assert!(docs::rename_file(&mut vfs, other.id, "ai", "policy").is_err());
 }
 
@@ -984,7 +992,11 @@ fn folder_reorder_persists_and_is_listed_first() {
 
     docs::folders::reorder(&vfs, None, None, &[gamma.id, alpha.id, beta.id]).unwrap();
     let stats = docs::folders::list_scoped(&vfs, None, None, false).unwrap();
-    let names: Vec<&str> = stats.folders.iter().map(|folder| folder.name.as_str()).collect();
+    let names: Vec<&str> = stats
+        .folders
+        .iter()
+        .map(|folder| folder.name.as_str())
+        .collect();
     assert_eq!(names, vec!["丙", "甲", "乙"]);
     assert_eq!(stats.folders[0].sort_order, 0);
     assert_eq!(stats.folders[2].sort_order, 2);
@@ -1130,9 +1142,21 @@ fn folder_names_keep_dots() {
 #[test]
 fn typed_create_and_rename_reject_illegal_names() {
     let mut vfs = test_vfs();
-    let doc = docs::create_typed(&mut vfs, "note", "说明", "正文内容", None, None, Some("txt"))
-        .unwrap();
-    assert!(doc.path.ends_with("说明.txt"), "typed extension: {}", doc.path);
+    let doc = docs::create_typed(
+        &mut vfs,
+        "note",
+        "说明",
+        "正文内容",
+        None,
+        None,
+        Some("txt"),
+    )
+    .unwrap();
+    assert!(
+        doc.path.ends_with("说明.txt"),
+        "typed extension: {}",
+        doc.path
+    );
 
     let renamed = docs::rename_file(&mut vfs, doc.id, "说明-v2", "js").unwrap();
     assert!(renamed.path.ends_with("说明-v2.js"));
@@ -1142,7 +1166,8 @@ fn typed_create_and_rename_reject_illegal_names() {
     assert_eq!(renamed.title, "说明-v2");
 
     // Markdown frontmatter tracks the file name on rename.
-    let note = docs::create_typed(&mut vfs, "note", "会议", "正文", None, None, Some("md")).unwrap();
+    let note =
+        docs::create_typed(&mut vfs, "note", "会议", "正文", None, None, Some("md")).unwrap();
     let renamed = docs::rename_file(&mut vfs, note.id, "会议纪要", "md").unwrap();
     assert_eq!(renamed.title, "会议纪要");
     let body: String = vfs
@@ -1163,7 +1188,11 @@ fn typed_create_and_rename_reject_illegal_names() {
 
     // Multi-segment extensions are allowed and keep their case.
     let packed = docs::rename_file(&mut vfs, doc.id, "版本", "spec.DRAFT").unwrap();
-    assert!(packed.path.ends_with("版本.spec.DRAFT"), "multi-dot ext: {}", packed.path);
+    assert!(
+        packed.path.ends_with("版本.spec.DRAFT"),
+        "multi-dot ext: {}",
+        packed.path
+    );
     assert_eq!(packed.ext, "spec.DRAFT");
     assert_eq!(packed.title, "版本");
 
@@ -1181,15 +1210,31 @@ fn typed_create_and_rename_reject_illegal_names() {
     // Any character legal in a file name is a valid extension, dots included.
     let chinese =
         docs::create_typed(&mut vfs, "note", "中文类型", "", None, None, Some("笔记")).unwrap();
-    assert!(chinese.path.ends_with("中文类型.笔记"), "custom ext: {}", chinese.path);
+    assert!(
+        chinese.path.ends_with("中文类型.笔记"),
+        "custom ext: {}",
+        chinese.path
+    );
     let multi =
         docs::create_typed(&mut vfs, "note", "规格", "", None, None, Some("spec.draft")).unwrap();
-    assert!(multi.path.ends_with("规格.spec.draft"), "multi-dot ext: {}", multi.path);
+    assert!(
+        multi.path.ends_with("规格.spec.draft"),
+        "multi-dot ext: {}",
+        multi.path
+    );
     assert_eq!(multi.ext, "spec.draft");
     // Binary formats cannot be stored as text documents.
     assert!(docs::create_typed(&mut vfs, "note", "报表", "", None, None, Some("pdf")).is_err());
-    assert!(docs::create_typed(&mut vfs, "note", "备份", "", None, None, Some("backup.tar.gz"))
-        .is_err());
+    assert!(docs::create_typed(
+        &mut vfs,
+        "note",
+        "备份",
+        "",
+        None,
+        None,
+        Some("backup.tar.gz")
+    )
+    .is_err());
     assert!(docs::rename_file(&mut vfs, doc.id, "版本", "docx").is_err());
     // A dot in the title is rejected instead of silently becoming an extension.
     assert!(docs::create_typed(&mut vfs, "note", "版本 v1.2", "", None, None, Some("md")).is_err());
@@ -1211,7 +1256,11 @@ fn typed_create_and_rename_reject_illegal_names() {
 fn write_file(vfs: &mut VirtualFs, path: &str, content: &str, source: WriteSource) -> WriteReceipt {
     // Tests use extension-less convenience paths; the write layer no longer
     // rewrites paths, so the `.md` suffix is made explicit here.
-    let target = if path.rsplit('/').next().is_some_and(|name| name.contains('.')) {
+    let target = if path
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| name.contains('.'))
+    {
         path.to_string()
     } else {
         format!("{path}.md")
@@ -1350,8 +1399,7 @@ fn contact_file_name_keeps_dots_and_the_stable_id() {
     assert!(second.path.ends_with("Dr. Smith-c_def456.md"));
 
     // Renaming the display name keeps the id and the document.
-    let renamed =
-        docs::rename_file(&mut vfs, first.id, "Dr. Jane Smith-c_abc123", "md").unwrap();
+    let renamed = docs::rename_file(&mut vfs, first.id, "Dr. Jane Smith-c_abc123", "md").unwrap();
     assert!(
         renamed.path.ends_with("Dr. Jane Smith-c_abc123.md"),
         "renamed path: {}",
@@ -1361,7 +1409,9 @@ fn contact_file_name_keeps_dots_and_the_stable_id() {
     assert_eq!(renamed.id, first.id);
 
     // Path separators are reported, never rewritten into a silent `_`.
-    assert!(docs::create_typed(&mut vfs, "contact", "A/B-c_1", "", None, None, Some("md")).is_err());
+    assert!(
+        docs::create_typed(&mut vfs, "contact", "A/B-c_1", "", None, None, Some("md")).is_err()
+    );
     assert!(docs::rename_file(&mut vfs, first.id, "A/B-c_abc123", "md").is_err());
     // Notes keep the stricter rule: the dot belongs to the extension.
     assert!(docs::create_typed(&mut vfs, "note", "v1.2", "", None, None, Some("md")).is_err());
@@ -1439,7 +1489,10 @@ fn save_can_rename_and_update_fields_atomically() {
     let unchanged = docs::get(&vfs, contact.id, false).unwrap();
     assert_eq!(unchanged.path, stored.path);
     assert_eq!(
-        unchanged.fields.get("name").and_then(|value| value.as_str()),
+        unchanged
+            .fields
+            .get("name")
+            .and_then(|value| value.as_str()),
         Some("Dr. Jane Smith"),
         "a refused rename must not apply the field update either"
     );
@@ -1479,8 +1532,14 @@ fn save_rename_refuses_a_name_that_is_already_taken() {
         },
     )
     .expect_err("the name belongs to another document");
-    assert!(matches!(error, ToolError::AlreadyExists { .. }), "{error:?}");
-    assert!(docs::get(&vfs, second.id, false).unwrap().path.ends_with("乙-c_b.md"));
+    assert!(
+        matches!(error, ToolError::AlreadyExists { .. }),
+        "{error:?}"
+    );
+    assert!(docs::get(&vfs, second.id, false)
+        .unwrap()
+        .path
+        .ends_with("乙-c_b.md"));
     assert_eq!(docs::get(&vfs, first.id, false).unwrap().path, first.path);
 }
 
@@ -1488,7 +1547,8 @@ fn save_rename_refuses_a_name_that_is_already_taken() {
 #[test]
 fn save_rename_cannot_cross_the_markdown_boundary() {
     let mut vfs = test_vfs();
-    let note = docs::create_typed(&mut vfs, "note", "说明", "正文", None, None, Some("md")).unwrap();
+    let note =
+        docs::create_typed(&mut vfs, "note", "说明", "正文", None, None, Some("md")).unwrap();
     let error = docs::save_document(
         &mut vfs,
         note.id,
@@ -2016,9 +2076,16 @@ fn export_markdown_and_zip_regression() {
     let _ = std::fs::remove_dir_all(root);
 
     // A typed document keeps its own extension inside the archive.
-    let typed =
-        docs::create_typed(&mut vfs, "note", "脚本", "console.log(1)", None, None, Some("js"))
-            .unwrap();
+    let typed = docs::create_typed(
+        &mut vfs,
+        "note",
+        "脚本",
+        "console.log(1)",
+        None,
+        None,
+        Some("js"),
+    )
+    .unwrap();
     let typed_bytes =
         docs::export::zip_entries(&docs::export::collect(&vfs, &[typed.id], &store).unwrap())
             .unwrap();
@@ -2030,8 +2097,8 @@ fn export_markdown_and_zip_regression() {
     );
 
     // An extension-less document exports without an invented suffix.
-    let bare = docs::create_typed(&mut vfs, "note", "版本", "原始正文", None, None, Some(""))
-        .unwrap();
+    let bare =
+        docs::create_typed(&mut vfs, "note", "版本", "原始正文", None, None, Some("")).unwrap();
     assert!(bare.path.ends_with("版本"), "no extension: {}", bare.path);
     assert_eq!(bare.ext, "");
     let bare_bytes =
@@ -3823,9 +3890,16 @@ fn fts_recalls_two_character_chinese_words() {
 fn grep_extension_filter_uses_the_base_layer() {
     let mut vfs = test_vfs();
     let note = docs::create(&mut vfs, "note", "预算笔记", "预算复盘", None, None).unwrap();
-    let script =
-        docs::create_typed(&mut vfs, "note", "预算脚本", "print('预算')", None, None, Some("py"))
-            .unwrap();
+    let script = docs::create_typed(
+        &mut vfs,
+        "note",
+        "预算脚本",
+        "print('预算')",
+        None,
+        None,
+        Some("py"),
+    )
+    .unwrap();
 
     let all = grep_vfs(&vfs, "预算", None, None);
     assert!(all.hits.iter().any(|hit| hit.path == note.path));
@@ -3885,7 +3959,9 @@ fn todo_checkbox_edits_keep_meta_status_in_sync() {
     .expect("UI toggle should save completed field");
     let doc = docs::get(&vfs, inode, false).unwrap();
     assert_eq!(
-        doc.fields.get("completed").and_then(|value| value.as_bool()),
+        doc.fields
+            .get("completed")
+            .and_then(|value| value.as_bool()),
         Some(true)
     );
 }
@@ -3961,10 +4037,7 @@ fn temp_db_dir(tag: &str) -> std::path::PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "notes-app-{tag}-{}-{unique}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("notes-app-{tag}-{}-{unique}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -4477,7 +4550,10 @@ fn real_v6_database_copy_upgrades() {
     );
     let columns = table_columns(&conn, "inodes");
     for expected in ["ext", "hash", "status"] {
-        assert!(columns.contains(&expected.to_string()), "missing {expected}");
+        assert!(
+            columns.contains(&expected.to_string()),
+            "missing {expected}"
+        );
     }
     assert!(!columns.contains(&"deleted".to_string()));
 
@@ -4931,7 +5007,8 @@ fn prompt_config_rejects_oversized_blocks_without_partial_writes() {
     let oversized = "x".repeat(33 * 1024);
     model_store::save_prompt_config(vfs.conn(), "原文", "原规则", true).unwrap();
 
-    match model_store::save_prompt_config(vfs.conn(), "新提示词", &oversized, false).unwrap_err() {
+    match model_store::save_prompt_config(vfs.conn(), "新提示词", &oversized, false).unwrap_err()
+    {
         ToolError::InvalidArgument { message } => assert_eq!(message, "Rules 超过 32 KB"),
         other => panic!("unexpected rules error: {other:?}"),
     }
@@ -4987,19 +5064,39 @@ fn markdown_writes_only_sync_the_system_dates() {
     let content = stored_body(&vfs, inode_of(&vfs, "/life/ai_default/custom.md"));
     // User-owned keys are replayed byte-for-byte: no injected kind/title and no
     // value reshaping.
-    assert!(content.contains("kind: note"), "kind keeps the user spelling");
+    assert!(
+        content.contains("kind: note"),
+        "kind keeps the user spelling"
+    );
     assert!(content.contains("custom: keep"), "unknown field preserved");
-    assert!(!content.contains("title:"), "the system must not add a title");
+    assert!(
+        !content.contains("title:"),
+        "the system must not add a title"
+    );
 
     // Only the two system dates are added.
-    assert!(content.contains("created_at: \""), "missing created_at filled");
-    assert!(content.contains("updated_at: \""), "missing updated_at filled");
+    assert!(
+        content.contains("created_at: \""),
+        "missing created_at filled"
+    );
+    assert!(
+        content.contains("updated_at: \""),
+        "missing updated_at filled"
+    );
     assert!(content.ends_with("---\n正文"), "the body is untouched");
     // Dates written by the caller never win.
     let forged = "---\nkind: note\ncreated_at: 2020-01-01T00:00:00+08:00\nupdated_at: 2020-01-01T00:00:00+08:00\nnote: keep\n---\nbody";
-    write_file(&mut vfs, "/life/ai_default/forged.md", forged, WriteSource::User);
+    write_file(
+        &mut vfs,
+        "/life/ai_default/forged.md",
+        forged,
+        WriteSource::User,
+    );
     let stored = stored_body(&vfs, inode_of(&vfs, "/life/ai_default/forged.md"));
-    assert!(!stored.contains("2020-01-01"), "caller dates are overwritten");
+    assert!(
+        !stored.contains("2020-01-01"),
+        "caller dates are overwritten"
+    );
     assert!(stored.contains("note: keep"), "unknown field preserved");
 }
 
@@ -5009,9 +5106,11 @@ fn saving_and_editing_keep_the_base_layer_creation_time() {
     let doc = docs::create_typed(&mut vfs, "note", "时间", "正文", None, None, Some("md")).unwrap();
     let created: String = vfs
         .conn()
-        .query_row("SELECT ctime FROM inodes WHERE inode = ?1", params![doc.id], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT ctime FROM inodes WHERE inode = ?1",
+            params![doc.id],
+            |r| r.get(0),
+        )
         .unwrap();
 
     // Simulate a caller that forged the dates in the stored frontmatter.
@@ -5024,12 +5123,32 @@ fn saving_and_editing_keep_the_base_layer_creation_time() {
         )
         .unwrap();
 
-    docs::save(&mut vfs, doc.id, None, Some("新正文".into()), None, None, None).unwrap();
+    docs::save(
+        &mut vfs,
+        doc.id,
+        None,
+        Some("新正文".into()),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     let stored = stored_body(&vfs, doc.id);
-    assert!(!stored.contains("1999-01-01"), "created_at comes from inodes.ctime");
+    assert!(
+        !stored.contains("1999-01-01"),
+        "created_at comes from inodes.ctime"
+    );
     assert!(stored.contains(&format!("created_at: \"{created}\"")));
 
-    edit_file(&mut vfs, &doc.path, "新正文", "再改", None, WriteSource::User).unwrap();
+    edit_file(
+        &mut vfs,
+        &doc.path,
+        "新正文",
+        "再改",
+        None,
+        WriteSource::User,
+    )
+    .unwrap();
     let edited = stored_body(&vfs, doc.id);
     assert!(
         edited.contains(&format!("created_at: \"{created}\"")),
@@ -5043,8 +5162,16 @@ fn saving_a_document_refreshes_the_base_layer_hash() {
     let mut vfs = test_vfs();
     let doc =
         docs::create_typed(&mut vfs, "note", "哈希", "第一版", None, None, Some("md")).unwrap();
-    docs::save(&mut vfs, doc.id, None, Some("第二版".into()), None, None, None)
-        .expect("save should succeed");
+    docs::save(
+        &mut vfs,
+        doc.id,
+        None,
+        Some("第二版".into()),
+        None,
+        None,
+        None,
+    )
+    .expect("save should succeed");
 
     let (content, hash): (String, String) = vfs
         .conn()
@@ -5164,16 +5291,8 @@ fn todo_day_file_round_trips_through_the_document_layer() {
 
     // A second todo on the same day appends to the same file: no second document.
     let appended = format!("{}- [ ] {{id: t_b2}} 写周报\n", first.content);
-    docs::save(
-        &mut vfs,
-        first.id,
-        None,
-        Some(appended),
-        None,
-        None,
-        None,
-    )
-    .expect("appending to the day file must succeed");
+    docs::save(&mut vfs, first.id, None, Some(appended), None, None, None)
+        .expect("appending to the day file must succeed");
 
     let listed = docs::list(
         &vfs,
@@ -5305,7 +5424,10 @@ fn legacy_meta_table_migrates_to_the_base_layer_only() {
             ("/life/notes/会议.md".to_string(), "md".to_string()),
             ("/life/notes/旧.md".to_string(), "md".to_string()),
             // The first dot separates, so a multi-part extension survives.
-            ("/life/notes/archive.tar.gz".to_string(), "tar.gz".to_string()),
+            (
+                "/life/notes/archive.tar.gz".to_string(),
+                "tar.gz".to_string()
+            ),
         ],
         "directories stay extension-less and files are backfilled from their path"
     );

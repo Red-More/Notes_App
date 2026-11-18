@@ -209,7 +209,11 @@ pub fn rewrite_document(
         None => {
             // No frontmatter yet: create one holding only the system dates plus
             // the caller's explicit updates. The original content is the body.
-            let bom = if content.starts_with('\u{feff}') { "\u{feff}" } else { "" };
+            let bom = if content.starts_with('\u{feff}') {
+                "\u{feff}"
+            } else {
+                ""
+            };
             let source = content.strip_prefix('\u{feff}').unwrap_or(content);
             let new_body = body.unwrap_or(source);
             let header = render_header(&[], &updates, created_at, updated_at);
@@ -582,7 +586,8 @@ fn is_safe_key(key: &str) -> bool {
     !key.is_empty()
         && key
             .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))}
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
 
 fn parse_value(raw: &str) -> Value {
     let raw = raw.trim();

@@ -153,8 +153,13 @@ pub(super) fn validate_file_name(name: &str, allow_dots: bool) -> Result<String,
     if name.chars().count() > 120 {
         return Err(ToolError::invalid("文件名最多 120 个字符"));
     }
-    if name.chars().any(|c| c.is_control() || "/\\:*?\"<>|".contains(c)) {
-        return Err(ToolError::invalid("文件名不能包含 / \\ : * ? \" < > | 等字符"));
+    if name
+        .chars()
+        .any(|c| c.is_control() || "/\\:*?\"<>|".contains(c))
+    {
+        return Err(ToolError::invalid(
+            "文件名不能包含 / \\ : * ? \" < > | 等字符",
+        ));
     }
     if allow_dots {
         // A trailing dot would merge into the extension separator.
@@ -169,8 +174,8 @@ pub(super) fn validate_file_name(name: &str, allow_dots: bool) -> Result<String,
     }
     let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
     const RESERVED: &[&str] = &[
-        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
-        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     ];
     if RESERVED.contains(&stem.as_str()) {
         return Err(ToolError::invalid("该文件名是系统保留名称"));
@@ -204,11 +209,11 @@ pub(super) fn normalize_extension(raw: &str) -> Result<String, ToolError> {
 /// Creating one would silently corrupt the file on save/export, so the document
 /// API rejects them instead of storing a textual placeholder.
 const BINARY_EXTENSIONS: &[&str] = &[
-    "pdf", "doc", "docx", "odt", "rtf", "xls", "xlsx", "ods", "ppt", "pptx", "odp", "epub",
-    "zip", "gz", "tgz", "bz2", "xz", "tar", "7z", "rar", "png", "jpg", "jpeg", "gif", "webp",
-    "bmp", "tif", "tiff", "heic", "ico", "mp3", "wav", "flac", "ogg", "m4a", "mp4", "mov", "avi",
-    "mkv", "webm", "exe", "dll", "so", "dylib", "bin", "iso", "dmg", "msi", "apk", "woff",
-    "woff2", "ttf", "otf", "sqlite", "db",
+    "pdf", "doc", "docx", "odt", "rtf", "xls", "xlsx", "ods", "ppt", "pptx", "odp", "epub", "zip",
+    "gz", "tgz", "bz2", "xz", "tar", "7z", "rar", "png", "jpg", "jpeg", "gif", "webp", "bmp",
+    "tif", "tiff", "heic", "ico", "mp3", "wav", "flac", "ogg", "m4a", "mp4", "mov", "avi", "mkv",
+    "webm", "exe", "dll", "so", "dylib", "bin", "iso", "dmg", "msi", "apk", "woff", "woff2", "ttf",
+    "otf", "sqlite", "db",
 ];
 
 /// Reject document extensions that cannot be stored as text.

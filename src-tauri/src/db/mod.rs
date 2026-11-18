@@ -185,7 +185,11 @@ fn backup_database(db_path: &Path, version: i64) {
         .map(|value| value.to_string_lossy().into_owned())
         .unwrap_or_else(|| DB_FILE_NAME.to_string());
     for n in 0..100 {
-        let suffix = if n == 0 { String::new() } else { format!("-{n}") };
+        let suffix = if n == 0 {
+            String::new()
+        } else {
+            format!("-{n}")
+        };
         let target = db_path.with_file_name(format!("{name}.bak-v{version}{suffix}"));
         if target.exists() {
             continue;

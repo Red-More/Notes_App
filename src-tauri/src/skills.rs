@@ -366,8 +366,7 @@ fn parse_skill_path(path: &str) -> Option<(String, String)> {
 
 /// Normalize a scope path; invalid input falls back to the default workspace.
 fn normalize_scope(scope: &str) -> String {
-    crate::vfs::cap_gate::normalize_path(scope)
-        .unwrap_or_else(|_| AGENT_ROOT.to_string())
+    crate::vfs::cap_gate::normalize_path(scope).unwrap_or_else(|_| AGENT_ROOT.to_string())
 }
 
 /// List skills effective for one directory scope.

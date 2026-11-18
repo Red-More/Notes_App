@@ -225,7 +225,11 @@ pub fn save_prompt_config(
         Some(text) => write_setting(&tx, KEY_RULES, &text)?,
         None => delete_setting(&tx, KEY_RULES)?,
     }
-    write_setting(&tx, KEY_INJECT_SKILLS, if inject_skills { "1" } else { "0" })?;
+    write_setting(
+        &tx,
+        KEY_INJECT_SKILLS,
+        if inject_skills { "1" } else { "0" },
+    )?;
     tx.commit()?;
     Ok(())
 }

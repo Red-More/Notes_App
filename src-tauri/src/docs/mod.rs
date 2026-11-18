@@ -24,8 +24,7 @@ use crate::db::schema::NOTES_ROOT;
 use crate::vfs::cap_gate;
 use crate::vfs::{
     error::ToolError,
-    meta,
-    reserved,
+    meta, reserved,
     types::{WriteRequest, WriteSource},
     VirtualFs,
 };
@@ -33,8 +32,8 @@ use crate::vfs::{
 use types::{Doc, DocFields, DocSaveReceipt, ListQuery};
 use util::{
     doc_date, doc_from_row, ensure_text_extension, fetch_row, folder_map, folder_path,
-    folder_path_any, head_content, normalize_extension_or_empty, parent_dir, root_for, safe_segment,
-    stem, unique_file_path, validate_file_name,
+    folder_path_any, head_content, normalize_extension_or_empty, parent_dir, root_for,
+    safe_segment, stem, unique_file_path, validate_file_name,
 };
 
 /// 读取单个文档。
@@ -548,11 +547,7 @@ fn plan_rename(
             return Err(ToolError::AlreadyExists { path: target });
         }
     }
-    Ok(RenamePlan {
-        target,
-        base,
-        ext,
-    })
+    Ok(RenamePlan { target, base, ext })
 }
 
 /// Rename one document file in place.
@@ -604,10 +599,8 @@ fn sync_title_to_file_name(
     if parts.title.is_none() || parts.title.as_deref() == Some(base) {
         return Ok(());
     }
-    let updates = std::collections::BTreeMap::from([(
-        "title".to_string(),
-        Value::String(base.to_string()),
-    )]);
+    let updates =
+        std::collections::BTreeMap::from([("title".to_string(), Value::String(base.to_string()))]);
     let rewritten = meta::rewrite_document(&row.content, None, &updates, &row.ctime, now);
     tx.execute(
         "UPDATE blobs SET content = ?1 WHERE inode = ?2 AND rev = ?3",
@@ -694,8 +687,10 @@ pub fn purge_many(vfs: &mut VirtualFs, ids: &[i64]) -> Result<(), ToolError> {
 /// 清空回收站。
 pub fn empty_trash(vfs: &mut VirtualFs) -> Result<(), ToolError> {
     crate::vfs::fts::remove_deleted(vfs.conn_mut())?;
-    vfs.conn_mut()
-        .execute("DELETE FROM inodes WHERE kind = 'file' AND status = 'deleted'", [])?;
+    vfs.conn_mut().execute(
+        "DELETE FROM inodes WHERE kind = 'file' AND status = 'deleted'",
+        [],
+    )?;
     Ok(())
 }
 

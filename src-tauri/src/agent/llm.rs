@@ -585,9 +585,7 @@ fn decoded_base64_len(data: &str) -> usize {
         .take(2)
         .filter(|byte| **byte == b'=')
         .count();
-    (data.len() / 4)
-        .saturating_mul(3)
-        .saturating_sub(padding)
+    (data.len() / 4).saturating_mul(3).saturating_sub(padding)
 }
 
 /// Base64 payload bytes of all user images; kept out of the text-context budget.
@@ -1584,8 +1582,10 @@ async fn responses_stream(
                 }
                 let block = next_index;
                 next_index += 1;
-                let call_id =
-                    provider_tool_call_id(item.get("call_id").or_else(|| item.get("id")), output_index);
+                let call_id = provider_tool_call_id(
+                    item.get("call_id").or_else(|| item.get("id")),
+                    output_index,
+                );
                 let name = item
                     .get("name")
                     .and_then(Value::as_str)
@@ -2573,9 +2573,6 @@ mod tests {
         let mut image = part("image/png", b"not an image");
         let error = shrink_image(&mut image).unwrap_err();
         let json = serde_json::to_value(&error).unwrap();
-        assert!(json["message"]
-            .as_str()
-            .unwrap()
-            .contains("图片解析失败"));
+        assert!(json["message"].as_str().unwrap().contains("图片解析失败"));
     }
 }

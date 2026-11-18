@@ -163,12 +163,7 @@ impl VirtualFs {
             return Err(ToolError::NotFound { path });
         };
         let is_dir = kind == "directory";
-        policies.ensure(
-            &path,
-            is_dir,
-            acl::AclPermission::Read,
-            req.principal,
-        )?;
+        policies.ensure(&path, is_dir, acl::AclPermission::Read, req.principal)?;
 
         if is_dir {
             let entries = self.list_dir(&path, &policies, &agent_configs, req.principal)?;
@@ -699,12 +694,7 @@ impl VirtualFs {
         entries.retain(|entry| {
             let is_dir = entry.kind == "directory";
             reserved_entry_visible(&agent_configs, &entry.path, principal)
-                && policies.allows_as(
-                    &entry.path,
-                    is_dir,
-                    acl::AclPermission::Read,
-                    principal,
-                )
+                && policies.allows_as(&entry.path, is_dir, acl::AclPermission::Read, principal)
         });
         Ok(entries)
     }
@@ -907,12 +897,7 @@ impl VirtualFs {
         entries.retain(|entry| {
             let is_dir = entry.kind == "directory";
             reserved_entry_visible(agent_configs, &entry.path, principal)
-                && policies.allows_as(
-                    &entry.path,
-                    is_dir,
-                    acl::AclPermission::Read,
-                    principal,
-                )
+                && policies.allows_as(&entry.path, is_dir, acl::AclPermission::Read, principal)
         });
         Ok(entries)
     }
@@ -1100,7 +1085,13 @@ fn advance_head(
     )?;
     conn.execute(
         "UPDATE inodes SET head_rev = ?1, size = ?2, mtime = ?3, hash = ?4 WHERE inode = ?5",
-        params![next, content.len() as i64, now, content_hash(content), inode],
+        params![
+            next,
+            content.len() as i64,
+            now,
+            content_hash(content),
+            inode
+        ],
     )?;
     Ok(next)
 }

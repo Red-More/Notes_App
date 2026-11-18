@@ -57,7 +57,11 @@ pub fn agent_owner(path: &str) -> Option<&str> {
         let after = start + marker.len();
         // Only a full segment counts: `/.agent` or `/.agent/...`.
         if after == path.len() || path.as_bytes().get(after) == Some(&b'/') {
-            return if start == 0 { None } else { Some(&path[..start]) };
+            return if start == 0 {
+                None
+            } else {
+                Some(&path[..start])
+            };
         }
         from = after;
     }

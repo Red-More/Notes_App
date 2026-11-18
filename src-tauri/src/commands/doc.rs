@@ -110,11 +110,7 @@ pub fn doc_save(
     let rename = match (rename_base, rename_ext) {
         (Some(base), Some(ext)) => Some((base, ext)),
         (None, None) => None,
-        _ => {
-            return Err(ToolError::invalid(
-                "改名需要同时提供文件名与扩展名",
-            ))
-        }
+        _ => return Err(ToolError::invalid("改名需要同时提供文件名与扩展名")),
     };
     docs::save_document(
         &mut vfs,

@@ -106,9 +106,7 @@ impl PolicySet {
             return true;
         }
         // `.lifeos` and `ai.policy` never grant visibility, regardless of config.
-        if reserved::is_policy_file(target)
-            || reserved::has_segment(target, reserved::LIFEOS_DIR)
-        {
+        if reserved::is_policy_file(target) || reserved::has_segment(target, reserved::LIFEOS_DIR) {
             return false;
         }
         // `.agent` is model-internal config, but it still belongs to a folder:
@@ -137,9 +135,7 @@ impl PolicySet {
         permission: AclPermission,
         principal: Principal,
     ) -> bool {
-        if reserved::is_policy_file(target)
-            || reserved::has_segment(target, reserved::LIFEOS_DIR)
-        {
+        if reserved::is_policy_file(target) || reserved::has_segment(target, reserved::LIFEOS_DIR) {
             return false;
         }
         principal == Principal::User || self.allows(target, is_dir, permission)
