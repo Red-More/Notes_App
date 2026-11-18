@@ -1505,6 +1505,110 @@ fn save_rename_cannot_cross_the_markdown_boundary() {
     assert_eq!(docs::get(&vfs, note.id, false).unwrap().ext, "md");
 }
 
+/// Naming and location rules follow where the file lives, not the frontmatter:
+/// a note claiming `kind: todo` must not escape the dot rule or move folders.
+#[test]
+fn a_note_cannot_dodge_the_note_rules_by_claiming_another_kind() {
+    let mut vfs = test_vfs();
+    let note =
+        docs::create_typed(&mut vfs, "note", "说明", "正文", None, None, Some("md")).unwrap();
+    edit_file(
+        &mut vfs,
+        &note.path,
+        "kind: \"note\"",
+        "kind: \"todo\"",
+        None,
+        WriteSource::Agent,
+    )
+    .expect("rewriting the frontmatter kind must succeed");
+    assert_eq!(
+        docs::get(&vfs, note.id, false).unwrap().kind,
+        "todo",
+        "frontmatter still wins for display"
+    );
+
+    // The dot rule belongs to the /life/notes location.
+    let error = docs::save_document(
+        &mut vfs,
+        note.id,
+        docs::SaveRequest {
+            rename: Some(("v1.2".into(), "md".into())),
+            ..Default::default()
+        },
+    )
+    .expect_err("a note keeps the no-dots rule whatever its frontmatter says");
+    assert!(
+        matches!(error, ToolError::InvalidArgument { .. }),
+        "{error:?}"
+    );
+
+    // Folder moves are notes-only too, and this file is not in /life/notes.
+    let folder = vfs
+        .conn()
+        .query_row(
+            "SELECT inode FROM inodes WHERE kind = 'directory' AND path = '/life/notes/待办归档'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .ok();
+    if let Some(folder_id) = folder {
+        let error = docs::save_document(
+            &mut vfs,
+            note.id,
+            docs::SaveRequest {
+                folder_id: Some(folder_id),
+                ..Default::default()
+            },
+        )
+        .expect_err("only notes in /life/notes can be moved between folders");
+        assert!(
+            matches!(error, ToolError::InvalidArgument { .. }),
+            "{error:?}"
+        );
+    }
+    assert_eq!(docs::get(&vfs, note.id, false).unwrap().path, note.path);
+}
+
+/// A document whose frontmatter disagrees with its folder stays visible under
+/// the folder it actually lives in, instead of vanishing from every list.
+#[test]
+fn a_mislabelled_document_stays_listed_under_its_folder() {
+    let mut vfs = test_vfs();
+    let todo = docs::create(
+        &mut vfs,
+        "todo",
+        "待办",
+        "- [ ] {id: t_x} 买牛奶",
+        None,
+        None,
+    )
+    .unwrap();
+    edit_file(
+        &mut vfs,
+        &todo.path,
+        "kind: \"todo\"",
+        "kind: \"note\"",
+        None,
+        WriteSource::Agent,
+    )
+    .expect("rewriting the frontmatter kind must succeed");
+    assert_eq!(docs::get(&vfs, todo.id, false).unwrap().kind, "note");
+
+    let listed = docs::list(
+        &vfs,
+        docs::types::ListQuery {
+            kind: Some("todo".into()),
+            ..Default::default()
+        },
+    )
+    .expect("listing todos must succeed");
+    assert_eq!(
+        listed.iter().filter(|doc| doc.id == todo.id).count(),
+        1,
+        "the day file must not disappear from the todo list: {listed:?}"
+    );
+}
+
 /// Saving without a rename keeps the existing name, even when only the body
 /// changes: the rename path must not leak into ordinary autosave.
 #[test]

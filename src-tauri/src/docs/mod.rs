@@ -126,12 +126,8 @@ pub fn list(vfs: &VirtualFs, query: ListQuery) -> Result<Vec<Doc>, ToolError> {
         docs.push(doc_from_row(row?, &folders));
     }
 
-    // Kind lives in frontmatter, so filter after parsing instead of in SQL.
-    if query.folder_id.is_none() && query.root.is_none() {
-        if let Some(kind) = kind_filter.as_deref() {
-            docs.retain(|doc| doc.kind == kind);
-        }
-    }
+    // 类型由 SQL 里的根目录过滤决定，不再按 frontmatter 二次筛选：正文写着
+    // `kind: note` 的 `todo-*.md` 仍然留在待办里，不会从两个列表同时消失。
 
     if let Some(raw) = query.tag.as_deref() {
         let tag = raw.trim();
@@ -354,12 +350,15 @@ pub fn save_document(
             ..Default::default()
         }
     };
-    let kind = meta::doc_kind(&parts, &row.path);
+    // 命名与存放规则看文件所在位置，不看 frontmatter：一个自称 `kind: todo` 的
+    // 笔记仍然放在 /life/notes 下，就必须遵守笔记的点号规则，也不能借 folder_id
+    // 移动文件夹。frontmatter 的 kind 只用于展示与版本历史。
+    let location_kind = meta::infer_kind(&row.path);
 
     // Saving follows the same naming rule as creating: a note's title is its
     // file name, so it must not contain the extension separator. Free-text kinds
     // (todo/contact) keep their dots.
-    if kind == "note" {
+    if location_kind == "note" {
         if let Some(next_title) = title.as_deref() {
             if next_title.contains('.') {
                 return Err(ToolError::invalid("文件名不能包含点号，扩展名请单独选择"));
@@ -380,7 +379,7 @@ pub fn save_document(
     // decides the base name and extension. Both are validated before anything
     // is written so a rejected name leaves the document untouched.
     let mut target_dir = parent_dir(&row.path).to_string();
-    if kind == "note" {
+    if location_kind == "note" {
         if let Some(target_id) = folder_id {
             target_dir = if target_id < 0 {
                 NOTES_ROOT.to_string()
@@ -486,14 +485,13 @@ pub fn save_document(
     Ok(receipt)
 }
 
-/// Document kind of a stored row, resolved like the rest of the layer: Markdown
-/// frontmatter wins, otherwise the path root decides.
-fn doc_kind_of_row(row: &util::DocRow) -> String {
-    if meta::is_markdown_ext(&row.ext) {
-        meta::doc_kind(&meta::parse_document(&row.content), &row.path)
-    } else {
-        meta::infer_kind(&row.path).to_string()
-    }
+/// 文件所在位置决定的文档类型。
+///
+/// 命名规则只关心"这个文件住在哪个根目录下"，因此这里刻意不看 frontmatter：
+/// `/life/notes/x.md` 无论写着 `kind: todo` 还是 `kind: note`，都必须遵守笔记的
+/// 点号规则；反之 `/life/todos/todo-*.md` 里写 `kind: note` 也不会变成可移动的笔记。
+fn location_kind_of_row(row: &util::DocRow) -> &'static str {
+    meta::infer_kind(&row.path)
 }
 
 /// A validated rename: the new path plus the normalized parts it was built from.
@@ -520,7 +518,7 @@ fn plan_rename(
 ) -> Result<RenamePlan, ToolError> {
     let ext = normalize_extension_or_empty(ext)?;
     ensure_text_extension(&ext)?;
-    let base = validate_file_name(base, doc_kind_of_row(row) != "note")?;
+    let base = validate_file_name(base, location_kind_of_row(row) != "note")?;
     let name = if ext.is_empty() {
         base.clone()
     } else {
@@ -726,29 +724,25 @@ pub fn move_many(
         _ => NOTES_ROOT.to_string(),
     };
     for id in ids {
-        let row: Option<(String, String, String)> = {
+        // 只移动笔记：类型由路径根目录决定，因此不必读取正文。
+        let row: Option<(String, String)> = {
             let mut stmt = tx.prepare(
-                "SELECT i.path, i.ext, COALESCE(b.content, '')
+                "SELECT i.path, i.ext
                  FROM inodes i
-                 LEFT JOIN blobs b ON b.inode = i.inode AND b.rev = i.head_rev
                  WHERE i.inode = ?1 AND i.kind = 'file' AND i.status = 'active'",
             )?;
             let mut rows = stmt.query(params![id])?;
             match rows.next()? {
-                Some(r) => Some((r.get(0)?, r.get(1)?, r.get(2)?)),
+                Some(r) => Some((r.get(0)?, r.get(1)?)),
                 None => None,
             }
         };
-        let Some((path, ext, content)) = row else {
+        let Some((path, ext)) = row else {
             return Err(ToolError::NotFound {
                 path: format!("doc#{id}"),
             });
         };
-        let kind = if meta::is_markdown_ext(&ext) {
-            meta::doc_kind(&meta::parse_document(&content), &path)
-        } else {
-            meta::infer_kind(&path).to_string()
-        };
+        let kind = meta::infer_kind(&path);
         if kind != "note" {
             return Err(ToolError::invalid("只有笔记可以移动文件夹"));
         }
