@@ -5,6 +5,7 @@ import { ensureNotificationPermission } from '../notifications'
 import { toast } from '../toast'
 import { sendNotification } from '@tauri-apps/plugin-notification'
 import { parseDbTime } from '../utils'
+import { nextDue } from '../todos/repeat'
 
 const CHECK_INTERVAL_MS = 30_000
 const TODO_WINDOW_MS = 30 * 60_000
@@ -32,35 +33,6 @@ async function notify(text: string) {
   } else {
     toast(text)
   }
-}
-
-/** Advance a local "YYYY-MM-DDTHH:mm" due time by the repeat interval. */
-function nextDue(due: string, repeat: string): string | null {
-  const d = parseDbTime(due)
-  switch (repeat) {
-    case 'daily':
-      d.setDate(d.getDate() + 1)
-      break
-    case 'weekday': {
-      do {
-        d.setDate(d.getDate() + 1)
-      } while (d.getDay() === 0 || d.getDay() === 6)
-      break
-    }
-    case 'weekly':
-      d.setDate(d.getDate() + 7)
-      break
-    case 'monthly':
-      d.setMonth(d.getMonth() + 1)
-      break
-    case 'yearly':
-      d.setFullYear(d.getFullYear() + 1)
-      break
-    default:
-      return null
-  }
-  const p = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
 async function checkReminders() {
