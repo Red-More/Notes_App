@@ -22,6 +22,15 @@ use tauri::Manager;
 /// The one database file. Models never see it; VirtualFs owns the namespace.
 pub const DB_FILE_NAME: &str = "life.db";
 
+/// Marker recording an in-place upgrade that already failed once.
+///
+/// A failed migration rolls back, so `user_version` stays put and the *same*
+/// upgrade is retried on every launch — and fails identically every time, which
+/// would leave the application permanently unable to start. Recording the exact
+/// `from -> to` pair lets the next launch take the destructive path instead,
+/// once, with the original file already backed up.
+const MIGRATE_FAILED_MARKER: &str = "life.db.migrate-failed";
+
 /// Open `life.db`, applying WAL settings and the final schema.
 ///
 /// The startup integrity check only logs failures; it never blocks boot. A
@@ -61,12 +70,17 @@ pub fn init(app: &tauri::AppHandle) -> Result<Connection, Box<dyn std::error::Er
 /// by an older build is upgraded in place — one transaction, no rows dropped. A
 /// *newer* file, or one whose structure is broken beyond the migration, is
 /// copied aside and rebuilt; there is no way to downgrade those.
+///
+/// A failed in-place upgrade is retried exactly once: the first failure keeps the
+/// original file and records the attempt, and the next launch rebuilds instead of
+/// failing identically forever. The outgoing file is backed up on both paths.
 pub fn open_or_rebuild(dir: &Path) -> Result<Connection, Box<dyn std::error::Error>> {
     let db_path = dir.join(DB_FILE_NAME);
     let mut conn = Connection::open(&db_path)?;
     wal::configure(&conn)?;
 
     if schema::is_current(&conn)? {
+        clear_migration_failure(dir);
         return Ok(conn);
     }
 
@@ -74,6 +88,7 @@ pub fn open_or_rebuild(dir: &Path) -> Result<Connection, Box<dyn std::error::Err
     // preserve, so build the final schema in place.
     if !schema::has_user_tables(&conn)? {
         schema::create(&mut conn)?;
+        clear_migration_failure(dir);
         log::info!("life.db created (schema v{})", schema::SCHEMA_VERSION);
         return Ok(conn);
     }
@@ -84,25 +99,37 @@ pub fn open_or_rebuild(dir: &Path) -> Result<Connection, Box<dyn std::error::Err
     // failure it rolls back and we keep the original file (plus a backup copy)
     // instead of deleting user data.
     if version < schema::SCHEMA_VERSION {
-        match schema::migrate(&conn) {
-            Ok(()) => {
-                if schema::is_current(&conn)? {
-                    log::info!(
-                        "life.db upgraded in place (v{version} -> v{})",
-                        schema::SCHEMA_VERSION
-                    );
-                    return Ok(conn);
+        // This exact upgrade failed on an earlier launch: retrying it would fail
+        // the same way forever, so fall through to the rebuild instead. The
+        // original file is still on disk and gets backed up below.
+        if migration_failed_before(dir, version) {
+            log::error!(
+                "life.db upgrade v{version} -> v{} failed on a previous launch; rebuilding",
+                schema::SCHEMA_VERSION
+            );
+        } else {
+            match schema::migrate(&conn) {
+                Ok(()) => {
+                    if schema::is_current(&conn)? {
+                        clear_migration_failure(dir);
+                        log::info!(
+                            "life.db upgraded in place (v{version} -> v{})",
+                            schema::SCHEMA_VERSION
+                        );
+                        return Ok(conn);
+                    }
+                    // The upgrade completed but required tables are still missing:
+                    // the file was structurally broken before the upgrade.
+                    log::warn!("life.db upgrade left an incomplete schema; rebuilding");
                 }
-                // The upgrade completed but required tables are still missing:
-                // the file was structurally broken before the upgrade.
-                log::warn!("life.db upgrade left an incomplete schema; rebuilding");
-            }
-            Err(e) => {
-                // Rolled back: the file still has its previous structure.
-                log::error!("life.db in-place upgrade failed (rolled back): {e}");
-                wal::checkpoint(&conn).ok();
-                backup_database(&db_path, version);
-                return Err(e.into());
+                Err(e) => {
+                    // Rolled back: the file still has its previous structure.
+                    log::error!("life.db in-place upgrade failed (rolled back): {e}");
+                    wal::checkpoint(&conn).ok();
+                    backup_database(&db_path, version);
+                    record_migration_failure(dir, version);
+                    return Err(e.into());
+                }
             }
         }
     }
@@ -116,8 +143,36 @@ pub fn open_or_rebuild(dir: &Path) -> Result<Connection, Box<dyn std::error::Err
     let mut fresh = Connection::open(&db_path)?;
     wal::configure(&fresh)?;
     schema::create(&mut fresh)?;
+    clear_migration_failure(dir);
     log::info!("life.db rebuilt (schema v{})", schema::SCHEMA_VERSION);
     Ok(fresh)
+}
+
+/// Whether the upgrade out of `version` already failed once on this machine.
+fn migration_failed_before(dir: &Path, version: i64) -> bool {
+    std::fs::read_to_string(dir.join(MIGRATE_FAILED_MARKER))
+        .map(|stamp| stamp.trim() == version.to_string())
+        .unwrap_or(false)
+}
+
+/// Remember that the upgrade out of `version` failed, so the next launch stops
+/// retrying it. A marker that cannot be written only costs another failed boot.
+fn record_migration_failure(dir: &Path, version: i64) {
+    let path = dir.join(MIGRATE_FAILED_MARKER);
+    match std::fs::write(&path, version.to_string()) {
+        Ok(()) => log::warn!("life.db upgrade failure recorded in {}", path.display()),
+        Err(e) => log::error!("life.db failure marker {} not written: {e}", path.display()),
+    }
+}
+
+/// Drop the failure marker once the database is usable again.
+fn clear_migration_failure(dir: &Path) {
+    let path = dir.join(MIGRATE_FAILED_MARKER);
+    if path.exists() {
+        if let Err(e) = std::fs::remove_file(&path) {
+            log::warn!("life.db failure marker {} not removed: {e}", path.display());
+        }
+    }
 }
 
 /// Copy the outgoing database next to itself before a schema rebuild.

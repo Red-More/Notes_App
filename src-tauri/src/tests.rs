@@ -4160,6 +4160,95 @@ fn failed_upgrade_rolls_back_and_keeps_the_file_openable() {
 }
 
 #[test]
+fn a_failed_upgrade_is_not_retried_forever() {
+    let dir = temp_db_dir("upgrade-retry");
+    let db_path = dir.join(db::DB_FILE_NAME);
+    seed_v6_database(&db_path);
+    {
+        // Same poison as above: the meta -> dir_titles copy cannot succeed.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch("CREATE VIEW dir_titles AS SELECT 1 AS inode, 'x' AS title;")
+            .unwrap();
+    }
+
+    // First launch: the upgrade fails, rolls back and leaves a marker behind.
+    assert!(db::open_or_rebuild(&dir).is_err());
+    assert_eq!(
+        std::fs::read_to_string(dir.join("life.db.migrate-failed")).unwrap(),
+        "6",
+        "the failed upgrade must be recorded so it is not retried identically"
+    );
+    assert!(dir.join("life.db.bak-v6").exists());
+
+    // Second launch: retrying would fail the same way forever, so the file is
+    // backed up once more and rebuilt instead of leaving the app unusable.
+    let conn = db::open_or_rebuild(&dir).expect("a repeat failure must fall back to a rebuild");
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, db::schema::SCHEMA_VERSION);
+    let view: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'dir_titles'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(view, 0, "the rebuild must produce a clean schema");
+    drop(conn);
+
+    assert!(
+        !dir.join("life.db.migrate-failed").exists(),
+        "the marker is cleared once the database is usable again"
+    );
+    assert!(
+        dir.join("life.db.bak-v6").exists(),
+        "the pre-rebuild file must still be recoverable"
+    );
+
+    // A third launch is a plain open: no further rebuild, no marker.
+    drop(db::open_or_rebuild(&dir).expect("the rebuilt database must open normally"));
+    assert!(!dir.join("life.db.migrate-failed").exists());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_marker_from_another_version_does_not_force_a_rebuild() {
+    let dir = temp_db_dir("upgrade-stale-marker");
+    let db_path = dir.join(db::DB_FILE_NAME);
+    seed_v6_database(&db_path);
+    // The marker names the version the upgrade started from. A marker left by an
+    // upgrade that has since succeeded (v5) says nothing about this file, so the
+    // in-place upgrade must still be attempted.
+    std::fs::write(dir.join("life.db.migrate-failed"), "5").unwrap();
+
+    let conn = db::open_or_rebuild(&dir).expect("the upgrade must succeed in place");
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, db::schema::SCHEMA_VERSION);
+    let files: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM inodes WHERE kind = 'file'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(files, 3, "an in-place upgrade keeps every document");
+    drop(conn);
+
+    assert!(
+        !dir.join("life.db.migrate-failed").exists(),
+        "a successful upgrade clears the stale marker"
+    );
+    assert!(
+        !dir.join("life.db.bak-v6").exists(),
+        "an in-place upgrade must not back up and delete anything"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn future_schema_version_is_backed_up_and_rebuilt() {
     let dir = temp_db_dir("future-v12");
     let db_path = dir.join(db::DB_FILE_NAME);

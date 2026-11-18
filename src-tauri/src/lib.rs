@@ -184,5 +184,13 @@ pub fn run() {
             commands::mcp::mcp_tool_call,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .unwrap_or_else(|e| {
+            // 启动失败不能只留一行日志：桌面端窗口根本没起来，用户看不到任何
+            // 反馈。打印一条可操作的说明（含备份文件名）再退出，下次启动会
+            // 自动走重建路径。
+            log::error!("failed to run the application: {e}");
+            eprintln!("应用启动失败：{e}");
+            eprintln!("数据库副本保留在应用数据目录的 life.db.bak-v* 文件中。");
+            std::process::exit(1);
+        });
 }
