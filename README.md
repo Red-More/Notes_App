@@ -12,7 +12,7 @@
 ## 环境要求
 
 - Node.js 20+、pnpm 12
-- Rust 1.77.2+，并安装 `rustfmt` 与 `clippy`（`rustup component add rustfmt clippy`）
+- Rust 1.88+（见 `src-tauri/Cargo.toml` 的 `rust-version`），并安装 `rustfmt` 与 `clippy`（`rustup component add rustfmt clippy`）
 - Linux 桌面构建需要 Tauri 系统依赖（`libwebkit2gtk-4.1-dev` 等，见 `.github/workflows/ci.yml`）
 - Android 构建需要 Android SDK + NDK 26.2 + JDK 17+，并配置 `ANDROID_HOME`、`NDK_HOME`、`JAVA_HOME`
 
@@ -61,7 +61,7 @@ pnpm lint; pnpm test; pnpm build
 cd src-tauri; cargo fmt --check; cargo clippy --all-targets -- -D warnings; cargo test
 ```
 
-`cargo test` 当前覆盖 CapGate 非法路径、`write → edit → read → grep` 链路、`expect_rev` 冲突、软删/恢复/物理删、版本恢复、交叉索引刷新与写入 source 语义。
+`cargo test` 当前覆盖 CapGate 非法路径、`write → edit → read → grep` 链路、`expect_rev` 冲突、软删/恢复/物理删、版本恢复、schema v6 → v7 原地迁移与迁移失败后的重建、文档类型按路径根目录判定，以及写入 source 语义。
 
 ## 安全边界
 
@@ -80,7 +80,7 @@ cd src-tauri; cargo fmt --check; cargo clippy --all-targets -- -D warnings; carg
 src/                 React 前端（笔记/待办/日程/人脉/编辑器）
 src-tauri/src/
   db/                life.db 生命周期、WAL、schema 迁移
-  vfs/               VirtualFs 五工具、CapGate、frontmatter、交叉索引
+  vfs/               VirtualFs 五工具、CapGate、frontmatter、FTS5 索引
   docs/              通用文档层、文件夹、版本、导出
   commands/          Tauri command 边界层
 docs/                设计文档与执行计划
