@@ -44,6 +44,13 @@ import {
   contactNameError,
   newContactId,
 } from './contacts/contactFile'
+import {
+  DEFAULT_CONTACT_TAG,
+  composeContactBody,
+  mergeContactBody,
+  parseContactBody,
+  type ContactDetails,
+} from './contacts/contactBody'
 import { localStamp, newTodoId, todayLocal } from './todos/todoFile'
 import { TodoStore, type TodoDoc, type TodoPort } from './todos/todoStore'
 
@@ -260,15 +267,23 @@ async function docByPath(path: string) {
 
 function docToContact(doc: Doc): Contact {
   const contactId = contactIdOf(doc.fields, doc.id)
+  // 联系方式写在正文里；旧文件把字段放在 frontmatter，读取时仍然兼容，
+  // 正文有值就以正文为准，这样老联系人在第一次编辑前也能正常显示。
+  const body = parseContactBody(doc.content ?? '')
+  const pick = (key: keyof ContactDetails): string | null => {
+    const fromBody = body[key]
+    if (typeof fromBody === 'string' && fromBody.trim()) return fromBody.trim()
+    return nullableStr(doc.fields[key])
+  }
   return {
     id: doc.id,
     contactId,
     name: contactDisplayName(doc.fields, doc.title, contactId),
-    phone: nullableStr(doc.fields.phone),
-    email: nullableStr(doc.fields.email),
-    company: nullableStr(doc.fields.company),
-    notes: nullableStr(doc.fields.notes),
-    tag: str(doc.fields.tag) || '默认',
+    phone: pick('phone'),
+    email: pick('email'),
+    company: pick('company'),
+    notes: pick('notes'),
+    tag: pick('tag') ?? DEFAULT_CONTACT_TAG,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
   }
@@ -279,24 +294,42 @@ function contactInputError(message: string): Error {
   return Object.assign(new Error(message), { code: 'invalidArgument' })
 }
 
-/** Frontmatter of a contact: the stable id and the display name are the source. */
-function contactFields(input: {
-  contactId: string
-  name: string
+/** Trim the form input into the details written to the body. */
+function contactDetails(input: {
   phone?: string | null
   email?: string | null
   company?: string | null
   notes?: string | null
   tag?: string
-}): DocFields {
+}): ContactDetails {
+  const trimmed = (value?: string | null) => {
+    const text = (value ?? '').trim()
+    return text ? text : null
+  }
   return {
-    id: input.contactId,
-    name: input.name.trim(),
-    phone: input.phone ?? null,
-    email: input.email ?? null,
-    company: input.company ?? null,
-    notes: input.notes ?? null,
-    tag: input.tag ?? '默认',
+    phone: trimmed(input.phone),
+    email: trimmed(input.email),
+    company: trimmed(input.company),
+    notes: trimmed(input.notes),
+    tag: trimmed(input.tag) ?? DEFAULT_CONTACT_TAG,
+  }
+}
+
+/**
+ * Frontmatter of a contact: only the stable id survives there.
+ *
+ * The legacy keys are nulled out so an old file migrates in one write instead of
+ * keeping a stale copy of what now lives in the body.
+ */
+function contactFields(contactId: string): DocFields {
+  return {
+    id: contactId,
+    name: null,
+    phone: null,
+    email: null,
+    company: null,
+    notes: null,
+    tag: null,
   }
 }
 
@@ -575,11 +608,14 @@ export const api = {
   listContacts: async (params: { tag?: string; search?: string }) => {
     const docs = await docApi.list({
       kind: 'contact',
-      tag: params.tag,
       search: params.search,
-      includeContent: false,
+      // 联系方式写在正文里，列表必须带上正文才能解析；标签也在正文，
+      // 因此标签过滤在前端做，不再依赖 frontmatter 的 tag 字段。
+      includeContent: true,
     })
-    return docs.map(docToContact)
+    const contacts = docs.map(docToContact)
+    const tag = params.tag?.trim()
+    return tag ? contacts.filter((contact) => contact.tag === tag) : contacts
   },
   createContact: async (params: {
     name: string
@@ -596,8 +632,9 @@ export const api = {
       kind: 'contact',
       // The name is free text and may contain dots; the id keeps duplicates apart.
       title: contactBase(params.name, contactId),
-      content: '',
-      fields: contactFields({ ...params, contactId }),
+      // 用户输入全部落在正文，frontmatter 只保留稳定的 id。
+      content: composeContactBody(contactDetails(params)),
+      fields: contactFields(contactId),
       ext: 'md',
     })
     return docToContact(doc)
@@ -615,12 +652,15 @@ export const api = {
     if (nameError) throw contactInputError(nameError)
     const doc = await docApi.get(params.id)
     const contactId = contactIdOf(doc.fields, doc.id)
+    // 只重写标签行与「备注」小节，用户在编辑器里另加的段落原样保留。
+    const content = mergeContactBody(doc.content ?? '', contactDetails(params))
     // The name is part of the file name, and the id in that name is what keeps
-    // two contacts apart. Sending the rename with the fields means a rejected
-    // name cannot leave the file renamed with stale frontmatter behind.
+    // two contacts apart. Sending the rename with the body means a rejected
+    // name cannot leave the file renamed with a stale body behind.
     await docApi.save({
       id: params.id,
-      fields: contactFields({ ...params, contactId }),
+      content,
+      fields: contactFields(contactId),
       renameBase: contactBase(params.name, contactId),
       renameExt: doc.ext || 'md',
     })

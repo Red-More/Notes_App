@@ -5,7 +5,13 @@ import { friendlyError } from '../../utils'
 import type { Contact } from '../../types'
 import { ConfirmDialog, Modal } from '../../components/ui'
 import { toast } from '../../toast'
-import { IconSettings, IconUsers } from '../../components/Icons'
+import {
+  IconBuilding,
+  IconMail,
+  IconPhone,
+  IconSettings,
+  IconUsers,
+} from '../../components/Icons'
 import PageHeader from '../../components/PageHeader'
 import FAB from '../../components/FAB'
 import EmptyState from '../../components/EmptyState'
@@ -259,76 +265,106 @@ export default function ContactPage({
             </div>
           }
         >
-          <div className="form-field">
-            <label className="form-label" htmlFor="contact-name">
-              姓名（必填）
-            </label>
-            <input
-              id="contact-name"
-              className="form-input"
-              value={form.name}
-              onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-              placeholder="联系人姓名"
-            />
-          </div>
-          <div className="form-field">
-            <span className="form-label">标签</span>
-            <ChipRow
-              className="modal"
-              items={[...new Set([...PRESET_TAGS, form.tag])].map((t) => ({ key: t, label: t }))}
-              value={form.tag}
-              onChange={(t) => setForm((f) => ({ ...f, tag: t }))}
-            />
-          </div>
-          <div className="form-field">
-            <label className="form-label" htmlFor="contact-phone">
-              电话
-            </label>
-            <input
-              id="contact-phone"
-              type="tel"
-              className="form-input"
-              value={form.phone}
-              onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))}
-              placeholder="电话号码"
-            />
-          </div>
-          <div className="form-field">
-            <label className="form-label" htmlFor="contact-company">
-              公司
-            </label>
-            <input
-              id="contact-company"
-              className="form-input"
-              value={form.company}
-              onChange={(e) => setForm((f) => ({ ...f, company: e.target.value }))}
-              placeholder="公司 / 组织"
-            />
-          </div>
-          <div className="form-field">
-            <label className="form-label" htmlFor="contact-email">
-              邮箱
-            </label>
-            <input
-              id="contact-email"
-              type="email"
-              className="form-input"
-              value={form.email}
-              onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
-              placeholder="电子邮箱"
-            />
-          </div>
-          <div className="form-field">
-            <label className="form-label" htmlFor="contact-notes">
-              备注
-            </label>
-            <textarea
-              id="contact-notes"
-              className="form-textarea"
-              value={form.notes}
-              onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))}
-              placeholder="认识时间、场合等（可选）"
-            />
+          <div className="contact-form">
+            {/* 头像预览：用姓名首字生成，和列表里的头像保持一致 */}
+            <div className="contact-form-hero">
+              <div className="avatar large">{form.name.trim().charAt(0) || '新'}</div>
+              <div className="contact-form-hero-text">
+                <div className="contact-form-hero-name">{form.name.trim() || '新联系人'}</div>
+                <div className="contact-form-hero-hint">
+                  {[form.company.trim(), form.phone.trim()].filter(Boolean).join(' · ') ||
+                    '填写姓名后即可保存'}
+                </div>
+              </div>
+            </div>
+
+            <div className="form-field">
+              <label className="form-label" htmlFor="contact-name">
+                姓名（必填）
+              </label>
+              <input
+                id="contact-name"
+                className="form-input"
+                value={form.name}
+                onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                placeholder="联系人姓名"
+              />
+            </div>
+
+            <div className="form-field">
+              <span className="form-label">标签</span>
+              <ChipRow
+                className="modal"
+                items={[...new Set([...PRESET_TAGS, form.tag])].map((t) => ({ key: t, label: t }))}
+                value={form.tag}
+                onChange={(t) => setForm((f) => ({ ...f, tag: t }))}
+              />
+            </div>
+
+            <div className="form-row">
+              <div className="form-field">
+                <label className="form-label" htmlFor="contact-phone">
+                  电话
+                </label>
+                <div className="form-input-iconic">
+                  <IconPhone size={17} className="form-input-icon" />
+                  <input
+                    id="contact-phone"
+                    type="tel"
+                    className="form-input"
+                    value={form.phone}
+                    onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))}
+                    placeholder="电话号码"
+                  />
+                </div>
+              </div>
+              <div className="form-field">
+                <label className="form-label" htmlFor="contact-company">
+                  公司
+                </label>
+                <div className="form-input-iconic">
+                  <IconBuilding size={17} className="form-input-icon" />
+                  <input
+                    id="contact-company"
+                    className="form-input"
+                    value={form.company}
+                    onChange={(e) => setForm((f) => ({ ...f, company: e.target.value }))}
+                    placeholder="公司 / 组织"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="form-field">
+              <label className="form-label" htmlFor="contact-email">
+                邮箱
+              </label>
+              <div className="form-input-iconic">
+                <IconMail size={17} className="form-input-icon" />
+                <input
+                  id="contact-email"
+                  type="email"
+                  className="form-input"
+                  value={form.email}
+                  onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
+                  placeholder="电子邮箱"
+                />
+              </div>
+            </div>
+
+            <div className="form-field">
+              <label className="form-label" htmlFor="contact-notes">
+                备注
+              </label>
+              <textarea
+                id="contact-notes"
+                className="form-textarea"
+                rows={4}
+                value={form.notes}
+                onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))}
+                placeholder="认识时间、场合等（可选）"
+              />
+            </div>
           </div>
         </Modal>
       )}

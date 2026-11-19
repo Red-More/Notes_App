@@ -58,20 +58,21 @@ export function contactIdOf(fields: Record<string, unknown>, docId: number): str
 /**
  * Display name of a contact.
  *
- * New contacts keep it in frontmatter `name`. A legacy contact only has a title,
- * which the rename flow rewrites to `{name}-{id}`, so that suffix is stripped.
+ * The file name is authoritative (`{name}-{id}`), so the suffix is stripped.
+ * Frontmatter `name` is only read for contacts written before the details moved
+ * into the body; new files keep nothing but the id there.
  */
 export function contactDisplayName(
   fields: Record<string, unknown>,
   title: string,
   contactId: string,
 ): string {
-  const explicit = fields.name
-  if (typeof explicit === 'string' && explicit.trim()) return explicit.trim()
   const suffix = `-${contactId}`
   if (title.endsWith(suffix)) {
     const stripped = title.slice(0, -suffix.length).trim()
     if (stripped) return stripped
   }
+  const explicit = fields.name
+  if (typeof explicit === 'string' && explicit.trim()) return explicit.trim()
   return title
 }

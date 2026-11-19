@@ -344,3 +344,25 @@ export const IconCollapse = (p: IconProps) => (
     <path d="M10 14l-7 7" />
   </svg>
 )
+
+export const IconPhone = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z" />
+  </svg>
+)
+
+export const IconMail = (p: IconProps) => (
+  <svg {...base(p)}>
+    <rect x="2" y="4" width="20" height="16" rx="2" />
+    <path d="m2 7 10 6 10-6" />
+  </svg>
+)
+
+export const IconBuilding = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M3 21h18" />
+    <path d="M5 21V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v16" />
+    <path d="M15 9h2a2 2 0 0 1 2 2v10" />
+    <path d="M9 7h2M9 11h2M9 15h2" />
+  </svg>
+)

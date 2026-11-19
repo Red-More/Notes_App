@@ -52,18 +52,17 @@ describe('contactBase and ids', () => {
 })
 
 describe('contactDisplayName', () => {
-  it('prefers the frontmatter name', () => {
-    expect(contactDisplayName({ name: 'Dr. Smith' }, 'Dr. Smith-c_abc', 'c_abc')).toBe(
-      'Dr. Smith',
-    )
-  })
-
-  it('strips the id suffix from a legacy title', () => {
-    expect(contactDisplayName({}, 'Dr. Smith-c_abc', 'c_abc')).toBe('Dr. Smith')
+  it('reads the name from the file name, stripping the id suffix', () => {
+    expect(contactDisplayName({ id: 'c_abc' }, 'Dr. Smith-c_abc', 'c_abc')).toBe('Dr. Smith')
   })
 
   it('leaves a legacy title without a suffix alone', () => {
     expect(contactDisplayName({}, 'Dr. Smith', 'c_7')).toBe('Dr. Smith')
+  })
+
+  it('falls back to a legacy frontmatter name when the title has no id suffix', () => {
+    // 旧文件可能只把姓名写在 frontmatter 里，文件名没有 id 后缀。
+    expect(contactDisplayName({ name: 'Dr. Smith' }, '老联系人', 'c_7')).toBe('Dr. Smith')
   })
 
   it('ignores a blank stored name', () => {

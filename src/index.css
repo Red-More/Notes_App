@@ -4050,6 +4050,78 @@ body.split-resizing {
   white-space: nowrap;
 }
 
+/* ---- Contact form ---- */
+.contact-form-hero {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 4px 2px 18px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.avatar.large {
+  width: 56px;
+  height: 56px;
+  font-size: 22px;
+}
+
+.contact-form-hero-text {
+  min-width: 0;
+  flex: 1;
+}
+
+.contact-form-hero-name {
+  font-size: 17px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.contact-form-hero-hint {
+  font-size: 12px;
+  color: var(--text-3);
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Two short fields share a row; each still stacks its own label. */
+.form-row {
+  display: flex;
+  gap: 10px;
+}
+
+.form-row > .form-field {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Icon sits inside the field, so the text starts after it. */
+.form-input-iconic {
+  position: relative;
+}
+
+.form-input-icon {
+  position: absolute;
+  left: 11px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-3);
+  pointer-events: none;
+}
+
+.form-input-iconic .form-input {
+  padding-left: 35px;
+}
+
+/* The icon brightens while its own field is being edited. */
+.form-input-iconic:focus-within .form-input-icon {
+  color: var(--accent);
+}
+
 /* ============ Misc ============ */
 .list-loading {
   text-align: center;
