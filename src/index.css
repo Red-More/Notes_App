@@ -3473,11 +3473,41 @@ body.split-resizing {
 .folder-picker-crumbs {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 6px;
   margin-bottom: 4px;
   padding: 2px 4px 8px;
   border-bottom: 1px solid var(--border);
+}
+
+/* Only the crumb chain scrolls; the toggle stays pinned on the right. */
+.folder-picker-crumb-list {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
   overflow-x: auto;
+}
+
+.folder-picker-toggle {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: none;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.folder-picker-toggle.active {
+  color: var(--accent);
+  border-color: var(--accent-border);
+  background: var(--accent-weak);
 }
 
 .folder-picker-current {

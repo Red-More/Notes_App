@@ -3,7 +3,7 @@ import { api } from '../api'
 import type { Folder, FolderCrumb, FolderScope } from '../types'
 import { friendlyError } from '../utils'
 import { toast } from '../toast'
-import { IconCheck, IconChevronRight, IconFolder } from './Icons'
+import { IconCheck, IconChevronRight, IconEye, IconEyeOff, IconFolder } from './Icons'
 import { OverlayPortal } from './ui'
 
 interface Props {
@@ -19,7 +19,11 @@ interface Props {
   onClose: () => void
   /** Whether the namespace root itself can be selected (VFS root cannot). */
   rootSelectable?: boolean
-  /** Include dot-directories such as `.agent` / `.lifeos` while browsing. */
+  /**
+   * Initial state of the dot-directory toggle (`.agent` / `.lifeos`). Off by
+   * default: those folders are implementation detail, not browsing targets, so
+   * the picker stays short until the user asks for the full tree.
+   */
   includeSystem?: boolean
   /** Anchored placement computed by the caller. */
   style?: CSSProperties
@@ -50,6 +54,8 @@ export default function FolderScopePicker({
   ])
   const [folders, setFolders] = useState<Folder[]>([])
   const [loading, setLoading] = useState(true)
+  /** Dot-directories are hidden until the header toggle turns them on. */
+  const [showSystem, setShowSystem] = useState(includeSystem)
   const current = crumbs[crumbs.length - 1]
   const canSelectCurrent = current.id != null || rootSelectable
   const isSelected = (id: number | null, path: string) =>
@@ -80,7 +86,7 @@ export default function FolderScopePicker({
     setLoading(true)
     void (async () => {
       try {
-        const stats = await api.listFolders(current.id, rootPath, includeSystem)
+        const stats = await api.listFolders(current.id, rootPath, showSystem)
         if (!cancelled) setFolders(stats.folders)
       } catch (e) {
         if (!cancelled) toast(friendlyError(e))
@@ -91,7 +97,7 @@ export default function FolderScopePicker({
     return () => {
       cancelled = true
     }
-  }, [current.id, rootPath, includeSystem])
+  }, [current.id, rootPath, showSystem])
 
   const choose = (scope: FolderScope) => {
     onSelect(scope)
@@ -115,20 +121,35 @@ export default function FolderScopePicker({
       <div className="scope-backdrop" onClick={onClose} />
       <div className="folder-popover folder-picker" style={position} role="dialog" aria-label="选择文件夹">
         <div className="folder-picker-crumbs">
-          {crumbs.map((crumb, index) => (
-            <Fragment key={`${crumb.id ?? 'root'}-${index}`}>
-              {index > 0 && <IconChevronRight size={14} className="folder-crumb-sep" />}
-              <button
-                type="button"
-                className={`folder-crumb ${index === crumbs.length - 1 ? 'current' : ''}`}
-                onClick={() => {
-                  if (index < crumbs.length - 1) setCrumbs((prev) => prev.slice(0, index + 1))
-                }}
-              >
-                {crumb.name}
-              </button>
-            </Fragment>
-          ))}
+          <div className="folder-picker-crumb-list">
+            {crumbs.map((crumb, index) => (
+              <Fragment key={`${crumb.id ?? 'root'}-${index}`}>
+                {index > 0 && <IconChevronRight size={14} className="folder-crumb-sep" />}
+                <button
+                  type="button"
+                  className={`folder-crumb ${index === crumbs.length - 1 ? 'current' : ''}`}
+                  onClick={() => {
+                    if (index < crumbs.length - 1) setCrumbs((prev) => prev.slice(0, index + 1))
+                  }}
+                >
+                  {crumb.name}
+                </button>
+              </Fragment>
+            ))}
+          </div>
+          {/* Sits to the right of the crumb row. Dot-folders (`.agent` /
+              `.lifeos`) stay hidden until the user asks for them; the toggle
+              follows the user down so nested dot-folders stay reachable. */}
+          <button
+            type="button"
+            className={`folder-picker-toggle ${showSystem ? 'active' : ''}`}
+            onClick={() => setShowSystem((shown) => !shown)}
+            aria-pressed={showSystem}
+            aria-label={showSystem ? '隐藏系统文件夹' : '显示系统文件夹'}
+            title={showSystem ? '隐藏系统文件夹' : '显示系统文件夹'}
+          >
+            {showSystem ? <IconEyeOff size={16} /> : <IconEye size={16} />}
+          </button>
         </div>
 
         {canSelectCurrent && (

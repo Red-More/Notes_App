@@ -816,6 +816,54 @@ fn folder_list_can_include_system_directories() {
         .any(|folder| folder.path == "/life/.lifeos"));
 }
 
+/// 日程 moved into the diary/todo tabs, so the seeded folder is gone. An old
+/// database still carries its empty row, which used to linger in the notes
+/// page's folder list; startup drops it while it is empty and never otherwise.
+#[test]
+fn a_retired_system_folder_is_dropped_only_while_empty() {
+    let mut vfs = test_vfs();
+    let empty = docs::folders::create_scoped(&mut vfs, "日程", None, Some("/life")).unwrap();
+    let busy = docs::folders::create_scoped(&mut vfs, "日程2", None, Some("/life")).unwrap();
+    let kept = docs::create(&mut vfs, "note", "日程里的笔记", "正文", None, None).unwrap();
+    docs::move_many_to_dir(&mut vfs, &[kept.id], &busy.path).unwrap();
+
+    // Point the retired path at the empty folder, then run startup once.
+    vfs.conn()
+        .execute(
+            "UPDATE inodes SET path = '/life/schedule' WHERE inode = ?1",
+            params![empty.id],
+        )
+        .unwrap();
+    db::schema::ensure_default_dirs(vfs.conn()).unwrap();
+
+    let exists = |path: &str| -> bool {
+        let count: i64 = vfs
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM inodes WHERE path = ?1",
+                params![path],
+                |row| row.get(0),
+            )
+            .unwrap();
+        count > 0
+    };
+    assert!(
+        !exists("/life/schedule"),
+        "an empty retired folder must not linger"
+    );
+    // A folder that still holds a note survives: dropping it would orphan content.
+    let busy_note: i64 = vfs
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM inodes WHERE path LIKE ?1 ESCAPE '\\'",
+            params![format!("{}/%", busy.path)],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(busy_note, 1, "a non-empty folder must be left alone");
+    assert!(exists(&busy.path));
+}
+
 #[test]
 fn folders_outside_notes_support_create_rename_move_and_delete() {
     let mut vfs = test_vfs();
@@ -1419,8 +1467,10 @@ fn contact_file_name_keeps_dots_and_the_stable_id() {
     assert!(docs::rename_file(&mut vfs, note.id, "v1.2", "md").is_err());
 }
 
-/// A contact edit renames the file and rewrites its fields in one transaction,
-/// so a rejected name cannot leave the file renamed with stale frontmatter.
+/// A contact edit renames the file and rewrites its body in one transaction, so
+/// a rejected name cannot leave the file renamed with a stale body behind.
+///
+/// 联系方式写在正文里（frontmatter 只留稳定的 id），因此重命名与正文更新必须同进同退。
 #[test]
 fn save_can_rename_and_update_fields_atomically() {
     let mut vfs = test_vfs();
@@ -1428,12 +1478,9 @@ fn save_can_rename_and_update_fields_atomically() {
         &mut vfs,
         "contact",
         "Dr. Smith-c_abc123",
-        "",
+        "- 电话：110",
         None,
-        Some(fields(&[
-            ("id", Value::String("c_abc123".into())),
-            ("name", Value::String("Dr. Smith".into())),
-        ])),
+        Some(fields(&[("id", Value::String("c_abc123".into()))])),
         Some("md"),
     )
     .unwrap();
@@ -1442,41 +1489,43 @@ fn save_can_rename_and_update_fields_atomically() {
         &mut vfs,
         contact.id,
         docs::SaveRequest {
+            content: Some("- 电话：123\n- 标签：客户".into()),
             fields: Some(fields(&[
-                ("name", Value::String("Dr. Jane Smith".into())),
-                ("phone", Value::String("123".into())),
+                ("id", Value::String("c_abc123".into())),
+                ("phone", Value::Null),
             ])),
             rename: Some(("Dr. Jane Smith-c_abc123".into(), "md".into())),
             ..Default::default()
         },
     )
-    .expect("rename plus field update should succeed");
+    .expect("rename plus body update should succeed");
     assert!(receipt.path.ends_with("Dr. Jane Smith-c_abc123.md"));
 
     let stored = docs::get(&vfs, contact.id, false).unwrap();
     assert_eq!(stored.ext, "md");
     assert_eq!(stored.title, "Dr. Jane Smith-c_abc123");
     assert_eq!(
-        stored.fields.get("name").and_then(|value| value.as_str()),
-        Some("Dr. Jane Smith")
+        stored.fields.get("id").and_then(|value| value.as_str()),
+        Some("c_abc123"),
+        "the stable id must survive the rename"
+    );
+    // `null` removes a legacy key that now lives in the body.
+    assert!(
+        !stored.fields.contains_key("phone"),
+        "a null field must be dropped from the frontmatter: {:?}",
+        stored.fields
     );
     assert_eq!(
-        stored.fields.get("phone").and_then(|value| value.as_str()),
-        Some("123")
-    );
-    // The frontmatter title follows the file name in the same write.
-    assert!(
-        stored.content.is_empty(),
-        "the body must stay untouched: {:?}",
-        stored.content
+        stored.content, "- 电话：123\n- 标签：客户",
+        "the body must hold what the user typed"
     );
 
-    // A rejected name leaves both the path and the fields exactly as they were.
+    // A rejected name leaves both the path and the body exactly as they were.
     let error = docs::save_document(
         &mut vfs,
         contact.id,
         docs::SaveRequest {
-            fields: Some(fields(&[("name", Value::String("坏/名字".into()))])),
+            content: Some("- 电话：999".into()),
             rename: Some(("坏/名字-c_abc123".into(), "md".into())),
             ..Default::default()
         },
@@ -1489,12 +1538,8 @@ fn save_can_rename_and_update_fields_atomically() {
     let unchanged = docs::get(&vfs, contact.id, false).unwrap();
     assert_eq!(unchanged.path, stored.path);
     assert_eq!(
-        unchanged
-            .fields
-            .get("name")
-            .and_then(|value| value.as_str()),
-        Some("Dr. Jane Smith"),
-        "a refused rename must not apply the field update either"
+        unchanged.content, stored.content,
+        "a refused rename must not apply the body update either"
     );
 }
 

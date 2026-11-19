@@ -12,7 +12,7 @@
 //! revision chains, structured mirrors and search indexes. FTS5 is maintained
 //! by the application inside the same transaction (there are no triggers).
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 /// Version stamped on databases created by this module.
 pub const SCHEMA_VERSION: i64 = 7;
@@ -51,6 +51,15 @@ const LEGACY_RENAMES: &[(&str, &str)] = &[
     ("/life/.agents", "/life/.agent"),
     ("/life/agent", "/life/ai_default"),
 ];
+
+/// System directories that no longer exist and must not linger in the tree.
+///
+/// 日程 used to be seeded as a top-level folder; the feature moved to the diary
+/// and todo tabs, so the seed is gone. An old database still carries the empty
+/// directory row (with its 日程 label), which kept showing up in the notes
+/// page's browse list. Cleanup is conservative: the row is only dropped while
+/// the folder holds nothing, so anything the user put there survives.
+const LEGACY_EMPTY_DIRS: &[&str] = &["/life/schedule"];
 
 /// Tables that must exist when `user_version` already matches.
 ///
@@ -502,6 +511,9 @@ pub fn ensure_default_dirs(conn: &Connection) -> rusqlite::Result<()> {
     for (old, new) in LEGACY_RENAMES {
         rename_path_prefix(conn, old, new)?;
     }
+    for path in LEGACY_EMPTY_DIRS {
+        drop_empty_legacy_dir(conn, path)?;
+    }
     // Legacy ACL table: visibility is now resolved from ai.policy files only.
     conn.execute("DROP TABLE IF EXISTS path_acl", [])?;
     for path in DEFAULT_DIRS {
@@ -518,6 +530,34 @@ pub fn ensure_default_dirs(conn: &Connection) -> rusqlite::Result<()> {
             params![*path, *title],
         )?;
     }
+    Ok(())
+}
+
+/// Drop one retired system directory, but only while it is completely empty.
+///
+/// The row (and its `dir_titles` label, removed by the FK cascade) is what kept
+/// the dead 日程 entry in the notes browse list. A folder that still holds files
+/// or sub-folders is left untouched: dropping it would orphan user content, so
+/// it stays visible and deletable through the normal folder manager instead.
+fn drop_empty_legacy_dir(conn: &Connection, path: &str) -> rusqlite::Result<()> {
+    let inode: Option<i64> = conn
+        .query_row(
+            "SELECT inode FROM inodes WHERE path = ?1 AND kind = 'directory'",
+            params![path],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(inode) = inode else { return Ok(()) };
+
+    let children: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM inodes WHERE path LIKE ?1 ESCAPE '\\'",
+        params![format!("{}/%", crate::vfs::cap_gate::escape_like(path))],
+        |row| row.get(0),
+    )?;
+    if children > 0 {
+        return Ok(());
+    }
+    conn.execute("DELETE FROM inodes WHERE inode = ?1", params![inode])?;
     Ok(())
 }
 

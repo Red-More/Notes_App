@@ -662,7 +662,6 @@ export default function NoteListPage({
           rootLabel="全部文件"
           rootPath="/life"
           rootSelectable={false}
-          includeSystem
           value={scope.id}
           valuePath={scope.path}
           onSelect={handleScopeSelect}

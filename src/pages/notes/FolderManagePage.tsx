@@ -121,11 +121,13 @@ export default function FolderManagePage({
     setScopeId(next)
   }
 
-  // Pop one level: recycle bin → selection → parent folder → notes tab.
+  // Back always leaves the manager for the notes list, no matter how deep the
+  // current level is: drilling up is the breadcrumb's job, so a single back
+  // never feels like it was swallowed. Transient sub-states (recycle bin,
+  // selection) are dismissed first.
   const handleBack = () => {
     if (trashOpen) setTrashOpen(false)
     else if (selectMode) exitSelect()
-    else if (scopeId != null) changeScope(crumbs[crumbs.length - 2]?.id ?? null)
     else onBack()
   }
   useEdgeBack(handleBack)
