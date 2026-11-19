@@ -1,6 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import { getAppPrefs, setAppPrefs, subscribeAppPrefs } from '../../appPrefs'
-import { IconBell } from '../../components/Icons'
+import { IconBell, IconCalendar } from '../../components/Icons'
 import {
   notificationPermission,
   requestNotificationPermission,
@@ -20,6 +20,7 @@ export default function NotificationSection() {
   const prefs = useSyncExternalStore(subscribeAppPrefs, getAppPrefs, getAppPrefs)
   const [permission, setPermission] = useState<NotificationPermission | 'checking'>('checking')
   const toggleSave = useSettingSave()
+  const missedSave = useSettingSave()
   const requestSave = useSettingSave()
 
   useEffect(() => {
@@ -59,6 +60,18 @@ export default function NotificationSection() {
           })
         }
         status={<SaveStatus state={toggleSave.state} error={toggleSave.error} />}
+      />
+      <SettingsSwitchRow
+        icon={<IconCalendar size={20} />}
+        title="未写日记提醒"
+        subtitle="在日历上标出没有日记的日子"
+        checked={prefs.markMissedDiary}
+        onChange={(next) =>
+          void missedSave.run(() => {
+            setAppPrefs({ markMissedDiary: next })
+          })
+        }
+        status={<SaveStatus state={missedSave.state} error={missedSave.error} />}
       />
       <SettingsRow
         icon={<IconBell size={20} />}

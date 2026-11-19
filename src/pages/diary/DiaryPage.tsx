@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { api, docApi } from '../../api'
 import { dateStr, formatDueLabel, friendlyError, monthStr, parseDbTime } from '../../utils'
+import { getAppPrefs, subscribeAppPrefs } from '../../appPrefs'
 import type { Note, Todo } from '../../types'
 import { toast } from '../../toast'
 import {
@@ -34,6 +35,8 @@ export default function DiaryPage({ isActive, version, onOpenSettings, onOpenDia
   const [editTodo, setEditTodo] = useState<Todo | null>(null)
   const [createTodoOpen, setCreateTodoOpen] = useState(false)
   const [loading, setLoading] = useState(true)
+  // 未写日记的红点默认关闭，只在用户到设置里主动打开后才出现。
+  const prefs = useSyncExternalStore(subscribeAppPrefs, getAppPrefs, getAppPrefs)
 
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -89,8 +92,36 @@ export default function DiaryPage({ isActive, version, onOpenSettings, onOpenDia
       .sort((a, b) => when(a).localeCompare(when(b)))
   }, [todos, selectedDate])
 
+  /**
+   * 日历标记只看"这天还有没做完的待办"：完成的待办不再占一个点，
+   * 否则日积月累整月都是标记，提醒就失效了。
+   */
+  const pendingTodoDates = useMemo(() => {
+    const dates = new Set<string>()
+    for (const todo of todos) {
+      if (todo.isCompleted === 1) continue
+      const day = (todo.dueDate ?? todo.remindAt ?? '').slice(0, 10)
+      if (day) dates.add(day)
+    }
+    return dates
+  }, [todos])
+
   const today = dateStr(new Date())
   const now = Date.now()
+
+  /**
+   * 已过去、且没有日记的日子。只有用户在设置里打开「未写日记提醒」才计算，
+   * 默认不标记：漏写一天不应该变成持续的压力来源。
+   */
+  const missedDiaryDates = useMemo(() => {
+    if (!prefs.markMissedDiary) return new Set<string>()
+    const dates = new Set<string>()
+    for (const day of days) {
+      if (!day || day >= today || diaryDates.has(day)) continue
+      dates.add(day)
+    }
+    return dates
+  }, [days, today, diaryDates, prefs.markMissedDiary])
 
   const handleToggle = async (t: Todo) => {
     try {
@@ -144,23 +175,32 @@ export default function DiaryPage({ isActive, version, onOpenSettings, onOpenDia
           ))}
         </div>
         <div className="cal-grid">
-          {days.map((d, i) =>
-            d ? (
+          {days.map((d, i) => {
+            // 有未完成待办 → 实心点；开启「未写日记提醒」后，漏写的日子 → 红点。
+            const pending = d ? pendingTodoDates.has(d) : false
+            const missed = d ? missedDiaryDates.has(d) : false
+            return d ? (
               <button
                 key={d}
                 type="button"
                 className={`cal-cell ${d === today ? 'today' : ''} ${d === selectedDate ? 'selected' : ''}`}
                 onClick={() => setSelectedDate(d)}
+                aria-label={
+                  pending
+                    ? `${d}，有未完成待办`
+                    : missed
+                      ? `${d}，未写日记`
+                      : undefined
+                }
               >
                 {Number(d.slice(8))}
-                {(diaryDates.has(d) || dayTodos.some((t) => (t.dueDate ?? '').startsWith(d))) && (
-                  <span className="cal-dot" />
-                )}
+                {pending && <span className="cal-dot" />}
+                {!pending && missed && <span className="cal-dot missed" />}
               </button>
             ) : (
               <span key={`empty-${i}`} className="cal-cell empty" />
-            ),
-          )}
+            )
+          })}
         </div>
       </div>
 

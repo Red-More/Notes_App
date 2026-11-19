@@ -3357,6 +3357,16 @@ body.split-resizing {
   background: #fff;
 }
 
+/* 未写日记的日子：红色空心点，和"有未完成待办"的实心点区分开。 */
+.cal-dot.missed {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--danger);
+}
+
+.cal-cell.selected .cal-dot.missed {
+  box-shadow: inset 0 0 0 1.5px #fff;
+}
+
 /* ============ Diary ============ */
 .diary-datebar {
   display: flex;

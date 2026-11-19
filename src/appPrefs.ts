@@ -7,6 +7,11 @@ export interface AppPrefs {
   remindersEnabled: boolean
   /** UI type scale; rem-based styles follow the root font size. */
   fontScale: FontScale
+  /**
+   * 是否在日历上标出"没写日记"的日子。默认关闭：漏写一天不该变成压力，
+   * 只有用户主动打开才用红点提醒。
+   */
+  markMissedDiary: boolean
 }
 
 export const MAX_DISPLAY_NAME_LENGTH = 24
@@ -21,6 +26,7 @@ export const DEFAULT_APP_PREFS: AppPrefs = {
   displayName: '本机用户',
   remindersEnabled: true,
   fontScale: 'standard',
+  markMissedDiary: false,
 }
 
 const STORAGE_KEY = 'notes:app-prefs'
@@ -51,6 +57,10 @@ export function parseAppPrefs(raw: string | null): AppPrefs {
         ? record.remindersEnabled
         : DEFAULT_APP_PREFS.remindersEnabled,
     fontScale: isFontScale(record.fontScale) ? record.fontScale : DEFAULT_APP_PREFS.fontScale,
+    markMissedDiary:
+      typeof record.markMissedDiary === 'boolean'
+        ? record.markMissedDiary
+        : DEFAULT_APP_PREFS.markMissedDiary,
   }
 }
 
@@ -83,6 +93,7 @@ export function setAppPrefs(patch: Partial<AppPrefs>): AppPrefs {
       patch.displayName !== undefined ? sanitizeDisplayName(patch.displayName) : current.displayName,
     remindersEnabled: patch.remindersEnabled ?? current.remindersEnabled,
     fontScale: isFontScale(patch.fontScale) ? patch.fontScale : current.fontScale,
+    markMissedDiary: patch.markMissedDiary ?? current.markMissedDiary,
   }
   cached = next
   localStorage.setItem(STORAGE_KEY, JSON.stringify(next))
