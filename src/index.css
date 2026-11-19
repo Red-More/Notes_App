@@ -1052,11 +1052,12 @@ textarea {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  /* Opening, closing and snapping all run for exactly one linear second:
-     the pane size and the content fade move together like a scroll unrolling. */
+  /* Opening, closing and snapping all run for exactly one and a half linear
+     seconds: the pane size and the content fade move together like a scroll
+     unrolling. Keep in sync with PREVIEW_ANIM_MS in NoteEditorPage.tsx. */
   transition:
-    flex-basis 1s linear,
-    opacity 1s linear;
+    flex-basis 1.5s linear,
+    opacity 1.5s linear;
 }
 
 body.split-resizing .editor-main {
@@ -1258,11 +1259,24 @@ body.split-resizing .editor-main {
   flex-direction: column;
   /* The fade runs alongside the pane resize, so hiding/showing the preview
      reads as the content unrolling or rolling back up. */
-  transition: opacity 1s linear;
+  transition: opacity 1.5s linear;
 }
 
 body.split-resizing .editor-preview {
   transition: none;
+}
+
+/* Soft handoff at the divider: with both panes visible, text scrolling into the
+   boundary fades out instead of being sliced mid-glyph. The masks are only
+   applied while the split is active, so a collapsed pane stays untouched. */
+.editor-split.split-active .markdown-editor-host {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent 100%);
+}
+
+.editor-split.split-active .preview-scroll {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 26px);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 26px);
 }
 
 /* ============ Split divider ============ */
@@ -1271,7 +1285,8 @@ body.split-resizing .editor-preview {
    from it when the pointer comes close and rolls back once left alone. The
    line's accent gradient cross-fades over three seconds, so the divider slowly
    gains color when it wakes and slowly releases it when it rests. `top`
-   follows the 0-100% divider position over the same one-second transition. */
+   follows the 0-100% divider position over the same one-and-a-half-second
+   transition. */
 .split-handle {
   position: absolute;
   left: 0;
@@ -1285,21 +1300,37 @@ body.split-resizing .editor-preview {
   outline: none;
   user-select: none;
   -webkit-tap-highlight-color: transparent;
-  background-image: linear-gradient(
-    90deg,
-    transparent,
-    var(--accent-border) 12%,
-    var(--accent-border) 88%,
-    transparent
-  );
-  background-size: 100% 2px;
-  background-position: center;
-  background-repeat: no-repeat;
-  transition: top 1s linear;
+  /* Two layers: a crisp hairline seam that always reads as the boundary, and
+     the accent gradient that fades in and out on top of it. */
+  background-image:
+    linear-gradient(
+      90deg,
+      transparent,
+      var(--accent-border) 12%,
+      var(--accent-border) 88%,
+      transparent
+    ),
+    linear-gradient(var(--border), var(--border));
+  background-size:
+    100% 2px,
+    100% 1px;
+  background-position:
+    center,
+    center;
+  background-repeat: no-repeat, no-repeat;
+  transition: top 1.5s linear;
 }
 
 body.split-resizing .split-handle {
   transition: none;
+}
+
+/* With both panes live the seam thickens a little, so the boundary stays
+   obvious while long text scrolls past the fade above. */
+.editor-split.split-active .split-handle {
+  background-size:
+    100% 3px,
+    100% 1px;
 }
 
 /* Brighter accent gradient; it fades in over three seconds while awake. */
@@ -2454,6 +2485,11 @@ body.split-resizing {
 
 .action-sheet-item.danger {
   color: var(--danger);
+}
+
+.action-sheet-item:disabled {
+  color: var(--text-3);
+  opacity: 0.55;
 }
 
 .action-sheet-item:last-of-type {

@@ -14,6 +14,7 @@ import { api, assetApi, docApi } from '../../api'
 import {
   bytesToBase64,
   computeKbInset,
+  exportTs,
   formatAmPmDateTime,
   formatDateTime,
   fmtVersion,
@@ -31,8 +32,10 @@ import {
   normalizeExtension,
 } from '../../fileTypes'
 import type { Doc, NoteVersion } from '../../types'
-import { ConfirmDialog, DiffView, Modal } from '../../components/ui'
+import { ActionSheet, ConfirmDialog, DiffView, Modal } from '../../components/ui'
 import { toast } from '../../toast'
+import { readText } from '@tauri-apps/plugin-clipboard-manager'
+import { copyText } from '../../system/clipboard'
 import { useEdgeBack } from '../../hooks'
 import { usePhysicalBack } from '../../system/backButton'
 import { getSaveStrategy } from '../../saveStrategy'
@@ -109,7 +112,7 @@ const META_SNAP_IDLE_MS = 120
 const META_SNAP_MS = 220
 
 /** Position/opacity transition of the split panes (kept in sync with index.css). */
-const PREVIEW_ANIM_MS = 1000
+const PREVIEW_ANIM_MS = 1500
 
 /** Quick-syntax actions offered by the bar above the soft keyboard. */
 type QuickAction =
@@ -208,6 +211,9 @@ export default function NoteEditorPage({
   const [deleteVersionConfirm, setDeleteVersionConfirm] = useState<NoteVersion | null>(null)
 
   const [zoomImage, setZoomImage] = useState<ZoomImage | null>(null)
+  /** Long-press text menu; the sheet renders only while it is true. */
+  const [textMenuOpen, setTextMenuOpen] = useState(false)
+  const [textMenuHasSelection, setTextMenuHasSelection] = useState(false)
 
   // The divider position is persisted, but the preview always starts closed:
   // the editor is the default view and the eye button renders the preview on
@@ -355,7 +361,14 @@ export default function NoteEditorPage({
       return true
     }
     if (noteIdRef.current == null && isBlank) return true
-    const nameError = fileNameError(t, false)
+    const creating = noteIdRef.current == null
+    // 日记正文为空时不落盘：空白日记没有内容可记，日历上也不该出现一个空文件。
+    if (creating && mode === 'diary' && !c.trim()) return true
+    // 新建时若用户始终没改文件名，就用时间戳命名，避免出现一堆 untitled。
+    const typed = t.trim()
+    const draftTitle =
+      creating && !typed ? (mode === 'diary' && diaryDate ? diaryDate : exportTs()) : t
+    const nameError = fileNameError(draftTitle, false)
     if (nameError) {
       toast(nameError)
       setSaveState('dirty')
@@ -363,12 +376,12 @@ export default function NoteEditorPage({
     }
     setSaveState('saving')
     try {
-      if (noteIdRef.current == null) {
+      if (creating) {
         const note =
           mode === 'diary' && diaryDate
-            ? await api.createDiary({ date: diaryDate, title: t, content: c })
+            ? await api.createDiary({ date: diaryDate, title: draftTitle, content: c })
             : await api.createNote({
-                title: t,
+                title: draftTitle,
                 content: c,
                 folderId: currentFolderId,
                 ext: fileExt,
@@ -379,24 +392,31 @@ export default function NoteEditorPage({
         setDocPath(note.path)
         setFileExt(note.ext ?? fileExt)
         setFileFormat(note.format === 'raw' ? 'raw' : 'markdown')
+        // 文件名即标题：把后端定下的名字回填到标题框，后续保存才不会再改一次名。
+        if (draftTitle !== t) setTitle(draftTitle)
       } else if (mode === 'diary') {
-        const receipt = await api.saveDiary({ id: noteIdRef.current, title: t, content: c })
+        // `creating` above proved the id is set, but a ref field does not
+        // narrow across the branch, so the non-null assertion carries it.
+        const receipt = await api.saveDiary({ id: noteIdRef.current!, title: t, content: c })
         setUpdatedAt(receipt.updatedAt)
       } else {
         // Generic save: folderId semantics only apply to notes; other kinds
         // keep their path and system-owned frontmatter untouched.
         const receipt = await api.saveNote({
-          id: noteIdRef.current,
+          id: noteIdRef.current!,
           title: t,
           content: c,
           folderId: currentFolderId,
         })
         setUpdatedAt(receipt.updatedAt)
       }
-      lastSavedRef.current = { title: t, content: c }
+      // 新建时标题被回填成时间戳，快照要跟着走，否则会一直显示未保存。
+      const effectiveTitle = creating ? draftTitle : t
+      lastSavedRef.current = { title: effectiveTitle, content: c }
       // The content may have changed again mid-write; reflect that state.
-      setDirty(title !== t || content !== c)
-      setSaveState(title === t && content === c ? 'clean' : 'dirty')
+      const stale = content !== c || (!creating && title !== t)
+      setDirty(stale)
+      setSaveState(stale ? 'dirty' : 'clean')
       setLastSavedAt(Date.now())
       return true
     } catch (e) {
@@ -1123,11 +1143,79 @@ export default function NoteEditorPage({
     editorRef.current?.focus()
   }
 
+  // ---- Long-press text menu ----
+  // A long press (or right click) on the body opens this sheet instead of the
+  // WebView's own menu, which differs per platform and has no 全选 entry.
+
+  const copySelection = async () => {
+    const text = editorRef.current?.selectionText() ?? ''
+    if (!text) {
+      toast('请先选择要复制的内容')
+      return
+    }
+    const ok = await copyText(text)
+    toast(ok ? '已复制' : '复制失败')
+  }
+
+  const cutSelection = async () => {
+    const text = editorRef.current?.selectionText() ?? ''
+    if (!text) {
+      toast('请先选择要剪切的内容')
+      return
+    }
+    const ok = await copyText(text)
+    if (!ok) {
+      toast('剪切失败')
+      return
+    }
+    editorRef.current?.deleteSelection()
+    toast('已剪切')
+  }
+
+  const pasteText = async () => {
+    // The WebView often denies the async clipboard API; the Tauri plugin reads
+    // the same clipboard through Rust, so it is the fallback path.
+    let text = ''
+    let readable = false
+    try {
+      text = (await navigator.clipboard?.readText?.()) ?? ''
+      readable = true
+    } catch {
+      text = ''
+    }
+    if (!readable) {
+      try {
+        text = (await readText()) ?? ''
+        readable = true
+      } catch {
+        text = ''
+      }
+    }
+    if (!readable) {
+      // Both readers failed; the native paste shortcut still works, so tell
+      // the user instead of silently doing nothing.
+      toast('无法读取剪贴板，请使用系统粘贴')
+      return
+    }
+    if (!text) {
+      toast('剪贴板为空')
+      return
+    }
+    editorRef.current?.insertAtCursor(text)
+  }
+
+  const openTextMenu = () => {
+    // The sheet takes focus away from CodeMirror, so the selection state is
+    // sampled now: 复制 / 剪切 grey out when there is nothing selected.
+    setTextMenuHasSelection(editorRef.current?.hasSelection() ?? false)
+    setTextMenuOpen(true)
+  }
+
   // ---- Layout: preview visibility and divider position ----
 
   /**
    * Unroll the preview: mount it at 0% and then animate to the remembered
-   * divider position over one second. A divider remembered at 100% (preview
+   * divider position over 1.5 seconds. A divider remembered at 100% (preview
    * hidden) opens the full preview instead of staying invisible.
    */
   const openPreview = () => {
@@ -1147,7 +1235,7 @@ export default function NoteEditorPage({
     setPreviewOpen(true)
     setPreviewMounted(true)
     setRenderedRatio(MAX_SPLIT_RATIO)
-    // Let the zero-height pane paint once, then run the one-second unroll.
+    // Let the zero-height pane paint once, then run the 1.5s unroll.
     previewOpenFramesRef.current = [
       requestAnimationFrame(() => {
         previewOpenFramesRef.current = [
@@ -1160,7 +1248,7 @@ export default function NoteEditorPage({
     ]
   }
 
-  /** Roll the preview back over one second, then unmount it. */
+  /** Roll the preview back over 1.5 seconds, then unmount it. */
   const closePreview = () => {
     previewOpenFramesRef.current.forEach((id) => cancelAnimationFrame(id))
     previewOpenFramesRef.current = []
@@ -1555,7 +1643,7 @@ export default function NoteEditorPage({
                 )}
               </div>
             </div>
-            <div className="editor-split">
+            <div className={`editor-split${previewMounted ? ' split-active' : ''}`}>
               <div
                 className="editor-main"
                 style={{
@@ -1574,6 +1662,7 @@ export default function NoteEditorPage({
                     onHistoryChange={handleHistoryChange}
                     onScrollLine={handleEditorScroll}
                     onPasteImages={insertImages}
+                    onLongPressText={openTextMenu}
                   />
                 </div>
               </div>
@@ -1647,6 +1736,46 @@ export default function NoteEditorPage({
             </div>
           </div>
         </div>
+      )}
+
+      {/* ---- Long-press text menu ---- */}
+      {textMenuOpen && (
+        <ActionSheet
+          title="文本操作"
+          onClose={() => setTextMenuOpen(false)}
+          items={[
+            {
+              label: '全选',
+              onClick: () => {
+                setTextMenuOpen(false)
+                editorRef.current?.selectAll()
+              },
+            },
+            {
+              label: '复制',
+              disabled: !textMenuHasSelection,
+              onClick: () => {
+                setTextMenuOpen(false)
+                void copySelection()
+              },
+            },
+            {
+              label: '剪切',
+              disabled: !textMenuHasSelection,
+              onClick: () => {
+                setTextMenuOpen(false)
+                void cutSelection()
+              },
+            },
+            {
+              label: '粘贴',
+              onClick: () => {
+                setTextMenuOpen(false)
+                void pasteText()
+              },
+            },
+          ]}
+        />
       )}
 
       {/* ---- Folder selector popover (notes only) ---- */}

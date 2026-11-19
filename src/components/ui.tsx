@@ -136,6 +136,8 @@ interface ActionSheetItem {
   label: string
   onClick: () => void
   danger?: boolean
+  /** Greyed out and inert; for entries that cannot apply right now. */
+  disabled?: boolean
 }
 
 interface ActionSheetProps {
@@ -163,6 +165,7 @@ export function ActionSheet({ title, items, onClose }: ActionSheetProps) {
               type="button"
               className={`action-sheet-item ${item.danger ? 'danger' : ''}`}
               onClick={item.onClick}
+              disabled={item.disabled}
             >
               {item.label}
             </button>

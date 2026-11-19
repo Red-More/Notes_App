@@ -70,6 +70,7 @@ import {
 } from '../editor/syntaxPrefs'
 import { assetDataUrl } from '../assets'
 import { requestImageZoom } from '../system/imageZoom'
+import { hapticTap } from '../system/haptics'
 import {
   clipboardImageFromNative,
   hasTextPayload,
@@ -95,6 +96,14 @@ export interface MarkdownEditorHandle {
   toggleLinePrefix: (prefix: string) => void
   /** 1-based line at the top of the editor viewport. */
   getTopLine: () => number
+  /** Whether the document currently has a non-empty selection. */
+  hasSelection: () => boolean
+  /** Text of the current selection (empty when nothing is selected). */
+  selectionText: () => string
+  /** Select the whole document (long-press menu). */
+  selectAll: () => void
+  /** Delete the selection without touching the clipboard. */
+  deleteSelection: () => void
 }
 
 interface MarkdownEditorProps {
@@ -105,15 +114,21 @@ interface MarkdownEditorProps {
   onHistoryChange: (canUndo: boolean, canRedo: boolean) => void
   onScrollLine: (line: number) => void
   onPasteImages: (files: File[]) => void
+  /** Long press (or right click) on the text: open the editor action menu. */
+  onLongPressText: () => void
 }
 
 type CallbackRef<T> = { current: T }
+
+/** Hold time before a still press on the text raises the editor menu. */
+const LONG_PRESS_MS = 500
 
 interface EditorRefs {
   onChange: CallbackRef<(value: string) => void>
   onHistory: CallbackRef<(canUndo: boolean, canRedo: boolean) => void>
   onScroll: CallbackRef<(line: number) => void>
   onPasteImages: CallbackRef<(files: File[]) => void>
+  onLongPressText: CallbackRef<() => void>
   history: CallbackRef<{ undo: number; redo: number }>
 }
 
@@ -527,6 +542,14 @@ function buildExtensions(prefs: EditorPrefs, refs: EditorRefs) {
         refs.onPasteImages.current(files)
         return true
       },
+      // A long press on the text raises the editor menu (剪切/复制/粘贴/全选).
+      // WebViews show their own native menu here, which is inconsistent across
+      // platforms and lacks 全选, so the press is claimed and our sheet opens.
+      contextmenu: (event) => {
+        event.preventDefault()
+        refs.onLongPressText.current()
+        return true
+      },
     }),
     indentationMarkers({
       thickness: 1,
@@ -572,7 +595,7 @@ function buildExtensions(prefs: EditorPrefs, refs: EditorRefs) {
 
 export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorProps>(
   function MarkdownEditor(
-    { value, prefs, kbInset, onChange, onHistoryChange, onScrollLine, onPasteImages },
+    { value, prefs, kbInset, onChange, onHistoryChange, onScrollLine, onPasteImages, onLongPressText },
     ref,
   ) {
     const hostRef = useRef<HTMLDivElement>(null)
@@ -582,6 +605,7 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
     const onHistoryRef = useRef(onHistoryChange)
     const onScrollRef = useRef(onScrollLine)
     const onPasteImagesRef = useRef(onPasteImages)
+    const onLongPressTextRef = useRef(onLongPressText)
     const historyRef = useRef({ undo: -1, redo: -1 })
 
     useEffect(() => {
@@ -603,6 +627,10 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
     useEffect(() => {
       onPasteImagesRef.current = onPasteImages
     }, [onPasteImages])
+
+    useEffect(() => {
+      onLongPressTextRef.current = onLongPressText
+    }, [onLongPressText])
 
     // Apply palette / token color / switch changes without recreating the view,
     // so the caret, undo history and scroll position survive.
@@ -629,6 +657,7 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
         onHistory: onHistoryRef,
         onScroll: onScrollRef,
         onPasteImages: onPasteImagesRef,
+        onLongPressText: onLongPressTextRef,
         history: historyRef,
       })
       const state = EditorState.create({ doc: valueRef.current, extensions })
@@ -649,7 +678,46 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
       }
       view.scrollDOM.addEventListener('scroll', onScroll, { passive: true })
 
+      // Long press: a still press on the text opens the editor menu, the same
+      // way a desktop right click does. Moving the finger cancels it, so
+      // selecting text by dragging still works.
+      let pressTimer = 0
+      const pressFrom = { x: 0, y: 0 }
+      const cancelPress = () => {
+        if (pressTimer) {
+          window.clearTimeout(pressTimer)
+          pressTimer = 0
+        }
+      }
+      const onPressDown = (event: PointerEvent) => {
+        cancelPress()
+        // A mouse reaches the menu through the contextmenu handler instead.
+        if (event.pointerType === 'mouse') return
+        pressFrom.x = event.clientX
+        pressFrom.y = event.clientY
+        pressTimer = window.setTimeout(() => {
+          pressTimer = 0
+          hapticTap(8)
+          onLongPressTextRef.current()
+        }, LONG_PRESS_MS)
+      }
+      const onPressMove = (event: PointerEvent) => {
+        if (Math.abs(event.clientX - pressFrom.x) > 10 || Math.abs(event.clientY - pressFrom.y) > 10) {
+          cancelPress()
+        }
+      }
+      const content = view.contentDOM
+      content.addEventListener('pointerdown', onPressDown)
+      content.addEventListener('pointermove', onPressMove)
+      content.addEventListener('pointerup', cancelPress)
+      content.addEventListener('pointercancel', cancelPress)
+
       return () => {
+        cancelPress()
+        content.removeEventListener('pointerdown', onPressDown)
+        content.removeEventListener('pointermove', onPressMove)
+        content.removeEventListener('pointerup', cancelPress)
+        content.removeEventListener('pointercancel', cancelPress)
         view.scrollDOM.removeEventListener('scroll', onScroll)
         view.destroy()
         viewRef.current = null
@@ -665,6 +733,7 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
         onHistory: onHistoryRef,
         onScroll: onScrollRef,
         onPasteImages: onPasteImagesRef,
+        onLongPressText: onLongPressTextRef,
         history: historyRef,
       })
       view.setState(EditorState.create({ doc: value, extensions }))
@@ -749,6 +818,30 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
         getTopLine: () => {
           const view = viewRef.current
           return view ? topLineOf(view) : 1
+        },
+        hasSelection: () => {
+          const view = viewRef.current
+          return view ? !view.state.selection.main.empty : false
+        },
+        selectionText: () => {
+          const view = viewRef.current
+          if (!view) return ''
+          const { from, to } = view.state.selection.main
+          return view.state.sliceDoc(from, to)
+        },
+        selectAll: () => {
+          const view = viewRef.current
+          if (!view) return
+          view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } })
+          view.focus()
+        },
+        deleteSelection: () => {
+          const view = viewRef.current
+          if (!view) return
+          const { from, to } = view.state.selection.main
+          if (from === to) return
+          view.dispatch({ changes: { from, to, insert: '' }, selection: { anchor: from } })
+          view.focus()
         },
       }),
       [],

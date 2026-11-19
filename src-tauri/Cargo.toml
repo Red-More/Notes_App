@@ -26,6 +26,8 @@ tauri-plugin-dialog = "2.8.2"
 tauri-plugin-fs = "2.7.0"
 tauri-plugin-notification = "2.6.0"
 tauri-plugin-opener = "2"
+# 长按菜单的粘贴：WebView 常拒绝异步剪贴板 API，改走 Rust 侧读取。
+tauri-plugin-clipboard-manager = "2.5.0"
 rusqlite = { version = "0.37", features = ["bundled"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # 技能包导入：WebView 上传的 zip/.skill 以 base64 传入 Rust。

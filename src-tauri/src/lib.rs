@@ -27,6 +27,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
+        // 长按菜单的粘贴：WebView 常拒绝异步剪贴板 API，改走 Rust 侧读取。
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             // life.db 是唯一数据库；VirtualFs 独占连接并通过 Mutex 串行化。
             let conn = db::init(app.handle())?;

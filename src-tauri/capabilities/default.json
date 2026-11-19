@@ -11,6 +11,7 @@
     "notification:default",
     "log:default",
     "opener:default",
+    "clipboard-manager:allow-read-text",
     "fs:allow-read-file",
     {
       "identifier": "fs:scope",
