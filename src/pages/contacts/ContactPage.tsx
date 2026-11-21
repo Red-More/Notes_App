@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../api'
 import { useCollapsibleHeader, useDebouncedSearch, useElasticOverscroll } from '../../hooks'
 import { friendlyError } from '../../utils'
@@ -16,9 +16,16 @@ import PageHeader from '../../components/PageHeader'
 import FAB from '../../components/FAB'
 import EmptyState from '../../components/EmptyState'
 import ChipRow from '../../components/ChipRow'
+import TagSelector from '../../components/TagSelector'
 import { contactNameError } from '../../contacts/contactFile'
+import { DEFAULT_TAG_KEY, type ContactTagGroup } from '../../contacts/contactBody'
 
-const PRESET_TAGS = ['默认', '客户', '朋友', '同事']
+const PRESET_TAG_VALUES = ['默认', '客户', '朋友', '同事']
+
+/** Default selection for a new contact: one single-select `类别` group. */
+const DEFAULT_TAGS: ContactTagGroup[] = [
+  { key: DEFAULT_TAG_KEY, values: ['默认'], multiple: false },
+]
 
 interface ContactForm {
   name: string
@@ -26,7 +33,7 @@ interface ContactForm {
   email: string
   company: string
   notes: string
-  tag: string
+  tags: ContactTagGroup[]
 }
 
 const EMPTY_FORM: ContactForm = {
@@ -35,7 +42,7 @@ const EMPTY_FORM: ContactForm = {
   email: '',
   company: '',
   notes: '',
-  tag: '默认',
+  tags: DEFAULT_TAGS,
 }
 
 export default function ContactPage({
@@ -108,13 +115,45 @@ export default function ContactPage({
 
   const tags = [
     '全部',
-    ...PRESET_TAGS,
-    ...[...new Set(contacts.map((c) => c.tag))].filter((t) => !PRESET_TAGS.includes(t)).sort(),
+    ...PRESET_TAG_VALUES,
+    ...[
+      ...new Set(contacts.flatMap((c) => c.tags.flatMap((group) => group.values))),
+    ]
+      .filter((value) => !PRESET_TAG_VALUES.includes(value))
+      .sort(),
   ]
 
+  // Known values per key: presets first, then whatever other contacts use.
+  const tagSuggestions = useMemo(() => {
+    const map: Record<string, string[]> = { [DEFAULT_TAG_KEY]: [...PRESET_TAG_VALUES] }
+    for (const contact of contacts) {
+      for (const group of contact.tags) {
+        const list = map[group.key] ?? (map[group.key] = [])
+        for (const value of group.values) {
+          if (!list.includes(value)) list.push(value)
+        }
+      }
+    }
+    return map
+  }, [contacts])
+
+  /** Key the current filter value belongs to, so a new contact preselects it. */
+  const groupKeyOf = (value: string): string => {
+    for (const contact of contacts) {
+      for (const group of contact.tags) {
+        if (group.values.includes(value)) return group.key
+      }
+    }
+    return DEFAULT_TAG_KEY
+  }
+
   const openCreate = () => {
+    const selected = tag === '全部' ? '默认' : tag
     setEditing(null)
-    setForm({ ...EMPTY_FORM, tag: tag === '全部' ? '默认' : tag })
+    setForm({
+      ...EMPTY_FORM,
+      tags: [{ key: groupKeyOf(selected), values: [selected], multiple: false }],
+    })
     setEditOpen(true)
   }
 
@@ -126,7 +165,7 @@ export default function ContactPage({
       email: c.email ?? '',
       company: c.company ?? '',
       notes: c.notes ?? '',
-      tag: c.tag,
+      tags: c.tags.map((group) => ({ ...group, values: [...group.values] })),
     })
     setEditOpen(true)
   }
@@ -140,7 +179,6 @@ export default function ContactPage({
       toast(nameError)
       return
     }
-    const customTag = form.tag.trim() || '默认'
     try {
       const params = {
         name,
@@ -148,7 +186,7 @@ export default function ContactPage({
         email: form.email.trim() || null,
         company: form.company.trim() || null,
         notes: form.notes.trim() || null,
-        tag: customTag,
+        tags: form.tags,
       }
       if (editing) {
         await api.updateContact({ id: editing.id, ...params })
@@ -208,20 +246,26 @@ export default function ContactPage({
                 text={query || tag !== '全部' ? '没有匹配的联系人' : '还没有联系人，点击 + 添加'}
               />
             ) : (
-              contacts.map((c) => (
-                <div key={c.id} className="contact-row" onClick={() => openEdit(c)}>
-                  <div className="avatar">{c.name.charAt(0)}</div>
-                  <div className="contact-main">
-                    <div className="contact-name">
-                      {c.name}
-                      <span className="chip mini">{c.tag}</span>
-                    </div>
-                    <div className="contact-sub">
-                      {[c.company, c.phone].filter(Boolean).join(' · ') || '暂无信息'}
+              contacts.map((c) => {
+                const tagValues = c.tags.flatMap((group) => group.values)
+                return (
+                  <div key={c.id} className="contact-row" onClick={() => openEdit(c)}>
+                    <div className="avatar">{c.name.charAt(0)}</div>
+                    <div className="contact-main">
+                      <div className="contact-name">
+                        {c.name}
+                        {tagValues[0] && <span className="chip mini">{tagValues[0]}</span>}
+                        {tagValues.length > 1 && (
+                          <span className="chip mini">+{tagValues.length - 1}</span>
+                        )}
+                      </div>
+                      <div className="contact-sub">
+                        {[c.company, c.phone].filter(Boolean).join(' · ') || '暂无信息'}
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))
+                )
+              })
             )}
           </div>
         </div>
@@ -292,46 +336,19 @@ export default function ContactPage({
             </div>
 
             <div className="form-field">
-              <span className="form-label">标签</span>
-              <ChipRow
-                className="modal"
-                items={[...new Set([...PRESET_TAGS, form.tag])].map((t) => ({ key: t, label: t }))}
-                value={form.tag}
-                onChange={(t) => setForm((f) => ({ ...f, tag: t }))}
-              />
-            </div>
-
-            <div className="form-row">
-              <div className="form-field">
-                <label className="form-label" htmlFor="contact-phone">
-                  电话
-                </label>
-                <div className="form-input-iconic">
-                  <IconPhone size={17} className="form-input-icon" />
-                  <input
-                    id="contact-phone"
-                    type="tel"
-                    className="form-input"
-                    value={form.phone}
-                    onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))}
-                    placeholder="电话号码"
-                  />
-                </div>
-              </div>
-              <div className="form-field">
-                <label className="form-label" htmlFor="contact-company">
-                  公司
-                </label>
-                <div className="form-input-iconic">
-                  <IconBuilding size={17} className="form-input-icon" />
-                  <input
-                    id="contact-company"
-                    className="form-input"
-                    value={form.company}
-                    onChange={(e) => setForm((f) => ({ ...f, company: e.target.value }))}
-                    placeholder="公司 / 组织"
-                  />
-                </div>
+              <label className="form-label" htmlFor="contact-phone">
+                电话
+              </label>
+              <div className="form-input-iconic">
+                <IconPhone size={17} className="form-input-icon" />
+                <input
+                  id="contact-phone"
+                  type="tel"
+                  className="form-input"
+                  value={form.phone}
+                  onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))}
+                  placeholder="电话号码"
+                />
               </div>
             </div>
 
@@ -350,6 +367,31 @@ export default function ContactPage({
                   placeholder="电子邮箱"
                 />
               </div>
+            </div>
+
+            <div className="form-field">
+              <label className="form-label" htmlFor="contact-company">
+                公司
+              </label>
+              <div className="form-input-iconic">
+                <IconBuilding size={17} className="form-input-icon" />
+                <input
+                  id="contact-company"
+                  className="form-input"
+                  value={form.company}
+                  onChange={(e) => setForm((f) => ({ ...f, company: e.target.value }))}
+                  placeholder="公司 / 组织"
+                />
+              </div>
+            </div>
+
+            <div className="form-field">
+              <span className="form-label">标签</span>
+              <TagSelector
+                value={form.tags}
+                suggestions={tagSuggestions}
+                onChange={(tags) => setForm((f) => ({ ...f, tags }))}
+              />
             </div>
 
             <div className="form-field">

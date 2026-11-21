@@ -87,6 +87,15 @@ html {
 
 body {
   margin: 0;
+  /* The app owns its scroll containers; never let the browser rubber-band or
+     reload the whole shell. */
+  overscroll-behavior: none;
+}
+
+/* Images and links are content, not draggable chrome. */
+img,
+a {
+  -webkit-user-drag: none;
 }
 
 #root {
@@ -3835,7 +3844,8 @@ body.split-resizing {
   resize: none;
   overflow: hidden;
   font-family: inherit;
-  min-height: 66px;
+  /* 1.5x the previous 66px so a long "要做的事情" reads without scrolling. */
+  min-height: 99px;
 }
 
 .todo-quick-input:focus {
@@ -4241,17 +4251,6 @@ body.split-resizing {
   white-space: nowrap;
 }
 
-/* Two short fields share a row; each still stacks its own label. */
-.form-row {
-  display: flex;
-  gap: 10px;
-}
-
-.form-row > .form-field {
-  flex: 1;
-  min-width: 0;
-}
-
 /* Icon sits inside the field, so the text starts after it. */
 .form-input-iconic {
   position: relative;
@@ -4273,6 +4272,118 @@ body.split-resizing {
 /* The icon brightens while its own field is being edited. */
 .form-input-iconic:focus-within .form-input-icon {
   color: var(--accent);
+}
+
+/* ---- Contact tag selector (key -> values) ---- */
+.tag-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tag-group {
+  padding: 10px 12px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.tag-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.tag-group-key {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 0;
+  border: none;
+  background: none;
+  outline: none;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.tag-group-key::placeholder {
+  font-weight: 400;
+  color: var(--text-3);
+}
+
+.tag-mode-btn {
+  flex: none;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 11px;
+}
+
+.tag-mode-btn.multi {
+  border-color: var(--accent-border);
+  background: var(--accent-weak);
+  color: var(--accent);
+}
+
+.tag-group-remove {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  color: var(--text-3);
+}
+
+.tag-group-remove:active {
+  background: var(--surface);
+}
+
+.tag-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tag-chips .chip {
+  padding: 6px 12px;
+  background: var(--surface);
+}
+
+.tag-value-input {
+  width: 88px;
+  padding: 6px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.tag-value-input:focus {
+  border-style: solid;
+  border-color: var(--accent);
+}
+
+.tag-add-group {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 9px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.tag-add-group:active {
+  background: var(--surface-2);
 }
 
 /* ============ Misc ============ */

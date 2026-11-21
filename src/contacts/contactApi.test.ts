@@ -35,7 +35,11 @@ describe('createContact', () => {
   it('names the file {name}-{id}.md and writes the details into the body', async () => {
     invoke.mockResolvedValueOnce(doc())
 
-    const contact = await api.createContact({ name: 'Dr. Smith', tag: '客户', phone: '123' })
+    const contact = await api.createContact({
+      name: 'Dr. Smith',
+      tags: [{ key: '类别', values: ['客户'], multiple: false }],
+      phone: '123',
+    })
 
     const [command, args] = invoke.mock.calls[0] as [string, Record<string, unknown>]
     expect(command).toBe('doc_create')
@@ -46,7 +50,7 @@ describe('createContact', () => {
     // The body carries what the user typed; frontmatter only keeps the id.
     const content = args.content as string
     expect(content).toContain('- 电话：123')
-    expect(content).toContain('- 标签：客户')
+    expect(content).toContain('- 标签：类别=客户')
     const fields = args.fields as Record<string, unknown>
     expect(fields.id).toMatch(/^c_[a-z0-9]{10}$/)
     expect(fields.name).toBeNull()
@@ -69,11 +73,15 @@ describe('updateContact', () => {
         doc({
           path: '/life/contacts/Dr. Jane-c_abc123.md',
           title: 'Dr. Jane-c_abc123',
-          content: '- 标签：客户',
+          content: '- 标签：类别=客户',
         }),
       )
 
-    const contact = await api.updateContact({ id: 7, name: 'Dr. Jane', tag: '客户' })
+    const contact = await api.updateContact({
+      id: 7,
+      name: 'Dr. Jane',
+      tags: [{ key: '类别', values: ['客户'], multiple: false }],
+    })
 
     const commands = invoke.mock.calls.map((call) => call[0])
     // One write command: the rename travels with the body update.
@@ -86,7 +94,7 @@ describe('updateContact', () => {
     }
     expect(saveArgs.renameBase).toBe('Dr. Jane-c_abc123')
     expect(saveArgs.renameExt).toBe('md')
-    expect(saveArgs.content).toContain('- 标签：客户')
+    expect(saveArgs.content).toContain('- 标签：类别=客户')
     expect(saveArgs.fields.id).toBe('c_abc123')
     expect(saveArgs.fields.name).toBeNull()
     expect(contact.name).toBe('Dr. Jane')
@@ -166,7 +174,7 @@ describe('updateContact', () => {
 describe('listContacts', () => {
   it('reads the details from the body and falls back to legacy frontmatter', async () => {
     invoke.mockResolvedValueOnce([
-      doc({ content: '- 电话：123\n- 公司：星尘\n- 标签：客户' }),
+      doc({ content: '- 电话：123\n- 公司：星尘\n- 标签：类别=客户' }),
       // 旧联系人：字段还在 frontmatter，正文是空的。
       doc({
         id: 9,
@@ -182,30 +190,38 @@ describe('listContacts', () => {
     expect(contacts.map((contact) => contact.contactId)).toEqual(['c_abc123', 'c_9'])
     expect(contacts[0]?.phone).toBe('123')
     expect(contacts[0]?.company).toBe('星尘')
-    expect(contacts[0]?.tag).toBe('客户')
+    expect(contacts[0]?.tags).toEqual([{ key: '类别', values: ['客户'], multiple: false }])
     expect(contacts[1]?.phone).toBe('110')
-    expect(contacts[1]?.tag).toBe('朋友')
+    // 旧的单标签包成默认分组，界面仍然能显示。
+    expect(contacts[1]?.tags).toEqual([{ key: '类别', values: ['朋友'], multiple: false }])
   })
 
-  it('filters by tag in the frontend because the tag lives in the body', async () => {
+  it('filters by any tag value in the frontend because tags live in the body', async () => {
     invoke.mockResolvedValueOnce([
-      doc({ content: '- 标签：客户' }),
+      doc({ content: '- 标签：类别=客户' }),
       doc({
         id: 9,
         path: '/life/contacts/甲-c_9.md',
         title: '甲-c_9',
-        content: '- 标签：朋友',
+        content: '- 标签：类别=朋友',
+        fields: {},
+      }),
+      doc({
+        id: 10,
+        path: '/life/contacts/乙-c_10.md',
+        title: '乙-c_10',
+        content: '- 标签：城市（多选）=北京、上海',
         fields: {},
       }),
     ])
 
-    const contacts = await api.listContacts({ tag: '朋友' })
+    const contacts = await api.listContacts({ tag: '上海' })
 
     const [command, args] = invoke.mock.calls[0] as [string, Record<string, unknown>]
     expect(command).toBe('doc_list')
     // 正文必须取回，否则解析不出标签。
     expect(args.includeContent).toBe(true)
     expect(args.tag).toBeUndefined()
-    expect(contacts.map((contact) => contact.contactId)).toEqual(['c_9'])
+    expect(contacts.map((contact) => contact.contactId)).toEqual(['c_10'])
   })
 })

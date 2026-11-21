@@ -6,7 +6,7 @@ const details = {
   email: 'a@b.com',
   company: '星尘',
   notes: '在读书会认识',
-  tag: '客户',
+  tags: [{ key: '类别', values: ['客户'], multiple: false }],
 }
 
 describe('composeContactBody', () => {
@@ -16,7 +16,7 @@ describe('composeContactBody', () => {
         '- 电话：138 0000 0000',
         '- 邮箱：a@b.com',
         '- 公司：星尘',
-        '- 标签：客户',
+        '- 标签：类别=客户',
         '',
         '## 备注',
         '',
@@ -27,9 +27,21 @@ describe('composeContactBody', () => {
 
   it('omits empty fields instead of writing empty bullets', () => {
     const body = composeContactBody({ ...details, phone: null, company: '  ', notes: null })
-    expect(body).toBe(['- 邮箱：a@b.com', '- 标签：客户'].join('\n'))
+    expect(body).toBe(['- 邮箱：a@b.com', '- 标签：类别=客户'].join('\n'))
     expect(body).not.toContain('电话')
     expect(body).not.toContain('## 备注')
+  })
+
+  it('writes multi-select groups with every value on one line', () => {
+    const body = composeContactBody({
+      ...details,
+      tags: [
+        { key: '类别', values: ['客户'], multiple: false },
+        { key: '城市', values: ['北京', '上海'], multiple: true },
+      ],
+    })
+    expect(body).toContain('- 标签：类别=客户')
+    expect(body).toContain('- 标签：城市（多选）=北京、上海')
   })
 })
 
@@ -47,9 +59,18 @@ describe('parseContactBody', () => {
     })
   })
 
-  it('ignores unknown labels and empty values', () => {
+  it('reads legacy single tags into the default 类别 key', () => {
     const body = ['- 电话：', '- 生日：1 月 1 日', '- 标签：朋友'].join('\n')
-    expect(parseContactBody(body)).toEqual({ tag: '朋友' })
+    expect(parseContactBody(body)).toEqual({
+      tags: [{ key: '类别', values: ['朋友'], multiple: false }],
+    })
+  })
+
+  it('merges repeated lines of the same multi-select key', () => {
+    const body = ['- 标签：城市（多选）=北京', '- 标签：城市（多选）=上海'].join('\n')
+    expect(parseContactBody(body)).toEqual({
+      tags: [{ key: '城市', values: ['北京', '上海'], multiple: true }],
+    })
   })
 
   it('returns an empty object for a blank or plain-prose body', () => {
@@ -92,7 +113,7 @@ describe('mergeContactBody', () => {
     const merged = mergeContactBody(existing, { ...details, notes: '新备注' })
 
     expect(merged).toContain('- 电话：138 0000 0000')
-    expect(merged).toContain('- 标签：客户')
+    expect(merged).toContain('- 标签：类别=客户')
     expect(merged).not.toContain('- 电话：110')
     expect(merged).not.toContain('旧备注')
     expect(merged).toContain('新备注')
@@ -126,7 +147,9 @@ describe('mergeContactBody', () => {
     })
     expect(merged).not.toContain('## 备注')
     expect(merged).not.toContain('旧备注')
-    expect(merged).toBe('- 电话：138 0000 0000\n- 邮箱：a@b.com\n- 公司：星尘\n- 标签：客户')
+    expect(merged).toBe(
+      '- 电话：138 0000 0000\n- 邮箱：a@b.com\n- 公司：星尘\n- 标签：类别=客户',
+    )
   })
 
   it('appends the 备注 section to a file that has prose but no labels', () => {

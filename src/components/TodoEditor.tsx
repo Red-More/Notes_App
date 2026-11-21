@@ -50,7 +50,8 @@ export default function TodoEditor({ todo, initialRemind, onClose, onSaved }: Pr
       el.style.height = '38vh'
     } else {
       el.style.height = 'auto'
-      el.style.height = `${Math.min(el.scrollHeight, 132)}px`
+      // 1.5x the previous 132px cap, matching the taller default box.
+      el.style.height = `${Math.min(el.scrollHeight, 198)}px`
     }
   }, [content, expanded])
 

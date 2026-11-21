@@ -46,10 +46,12 @@ import {
 } from './contacts/contactFile'
 import {
   DEFAULT_CONTACT_TAG,
+  DEFAULT_TAG_KEY,
   composeContactBody,
   mergeContactBody,
   parseContactBody,
   type ContactDetails,
+  type ContactTagGroup,
 } from './contacts/contactBody'
 import { localStamp, newTodoId, todayLocal } from './todos/todoFile'
 import { TodoStore, type TodoDoc, type TodoPort } from './todos/todoStore'
@@ -270,11 +272,18 @@ function docToContact(doc: Doc): Contact {
   // 联系方式写在正文里；旧文件把字段放在 frontmatter，读取时仍然兼容，
   // 正文有值就以正文为准，这样老联系人在第一次编辑前也能正常显示。
   const body = parseContactBody(doc.content ?? '')
-  const pick = (key: keyof ContactDetails): string | null => {
+  const pick = (key: 'phone' | 'email' | 'company' | 'notes'): string | null => {
     const fromBody = body[key]
     if (typeof fromBody === 'string' && fromBody.trim()) return fromBody.trim()
     return nullableStr(doc.fields[key])
   }
+  // 旧文件的标签只有一个 frontmatter 字符串，读取时包成默认分组。
+  const legacyTag = nullableStr(doc.fields.tag)
+  const tags =
+    body.tags ??
+    (legacyTag
+      ? [{ key: DEFAULT_TAG_KEY, values: [legacyTag], multiple: false }]
+      : [{ key: DEFAULT_TAG_KEY, values: [DEFAULT_CONTACT_TAG], multiple: false }])
   return {
     id: doc.id,
     contactId,
@@ -283,7 +292,7 @@ function docToContact(doc: Doc): Contact {
     email: pick('email'),
     company: pick('company'),
     notes: pick('notes'),
-    tag: pick('tag') ?? DEFAULT_CONTACT_TAG,
+    tags,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
   }
@@ -300,7 +309,7 @@ function contactDetails(input: {
   email?: string | null
   company?: string | null
   notes?: string | null
-  tag?: string
+  tags?: ContactTagGroup[]
 }): ContactDetails {
   const trimmed = (value?: string | null) => {
     const text = (value ?? '').trim()
@@ -311,8 +320,28 @@ function contactDetails(input: {
     email: trimmed(input.email),
     company: trimmed(input.company),
     notes: trimmed(input.notes),
-    tag: trimmed(input.tag) ?? DEFAULT_CONTACT_TAG,
+    tags: normalizeTags(input.tags),
   }
+}
+
+/**
+ * Keep only usable tag groups: a key is required, values are de-duplicated and
+ * single-select keys hold at most one value. An empty selection falls back to
+ * the default tag so every contact still shows one chip in the list.
+ */
+function normalizeTags(tags?: ContactTagGroup[]): ContactTagGroup[] {
+  const out: ContactTagGroup[] = []
+  for (const group of tags ?? []) {
+    const key = group.key.trim()
+    const values = [...new Set(group.values.map((value) => value.trim()).filter(Boolean))]
+    if (!key || values.length === 0) continue
+    out.push({
+      key,
+      values: group.multiple ? values : values.slice(0, 1),
+      multiple: group.multiple,
+    })
+  }
+  return out.length > 0 ? out : [{ key: DEFAULT_TAG_KEY, values: [DEFAULT_CONTACT_TAG], multiple: false }]
 }
 
 /**
@@ -615,7 +644,9 @@ export const api = {
     })
     const contacts = docs.map(docToContact)
     const tag = params.tag?.trim()
-    return tag ? contacts.filter((contact) => contact.tag === tag) : contacts
+    return tag
+      ? contacts.filter((contact) => contact.tags.some((group) => group.values.includes(tag)))
+      : contacts
   },
   createContact: async (params: {
     name: string
@@ -623,7 +654,7 @@ export const api = {
     email?: string | null
     company?: string | null
     notes?: string | null
-    tag?: string
+    tags?: ContactTagGroup[]
   }) => {
     const nameError = contactNameError(params.name)
     if (nameError) throw contactInputError(nameError)
@@ -646,7 +677,7 @@ export const api = {
     email?: string | null
     company?: string | null
     notes?: string | null
-    tag?: string
+    tags?: ContactTagGroup[]
   }) => {
     const nameError = contactNameError(params.name)
     if (nameError) throw contactInputError(nameError)

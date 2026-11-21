@@ -8,24 +8,46 @@
 //! Writes go through [`mergeContactBody`], which rewrites only the label lines
 //! and the 备注 section and leaves any other paragraph the user added alone.
 
+/**
+ * One tag key and the values selected under it.
+ *
+ * A key owns a list of values, so `城市` can hold both `北京` and `上海` at
+ * once. `multiple` is the picker's selection mode: single-select replaces the
+ * value, multi-select toggles it. Both modes are persisted in the body.
+ */
+export interface ContactTagGroup {
+  key: string
+  values: string[]
+  multiple: boolean
+}
+
 /** The user-owned half of a contact; `name` lives in the file name instead. */
 export interface ContactDetails {
   phone: string | null
   email: string | null
   company: string | null
   notes: string | null
-  tag: string
+  tags: ContactTagGroup[]
 }
 
 export const DEFAULT_CONTACT_TAG = '默认'
+/** Default tag key; legacy `- 标签：客户` lines migrate into it. */
+export const DEFAULT_TAG_KEY = '类别'
+
+type DetailKey = 'phone' | 'email' | 'company'
+type LabelKey = DetailKey | 'tag'
 
 /** Canonical label order and the details key each one maps to. */
-const LABELS: Array<{ label: string; key: keyof ContactDetails }> = [
+const LABELS: Array<{ label: string; key: DetailKey }> = [
   { label: '电话', key: 'phone' },
   { label: '邮箱', key: 'email' },
   { label: '公司', key: 'company' },
-  { label: '标签', key: 'tag' },
 ]
+
+const TAG_LABEL = '标签'
+/** Marks a multi-select key in the stored line, e.g. `城市（多选）=北京`. */
+const MULTI_SUFFIX = '（多选）'
+const TAG_VALUE_SEP = /[、,，]/
 
 const NOTES_HEADING = '## 备注'
 
@@ -47,27 +69,93 @@ const HEADING_LINE = /^\s{0,3}(?:\*\*)?#{1,6}\s/
  */
 const NOTES_HEADING_PATTERN = /^\s{0,3}(?:\*\*)?#{1,6}\s*备注\s*(?:\*\*)?$/
 
-function labelOf(key: keyof ContactDetails): string {
+function labelOf(key: DetailKey): string {
   return LABELS.find((entry) => entry.key === key)?.label ?? ''
 }
 
-function keyOfLabel(label: string): keyof ContactDetails | null {
-  const found = LABELS.find((entry) => entry.label === label.trim())
+function keyOfLabel(label: string): LabelKey | null {
+  const trimmed = label.trim()
+  if (trimmed === TAG_LABEL) return 'tag'
+  const found = LABELS.find((entry) => entry.label === trimmed)
   return found ? found.key : null
 }
 
 /** One detail as it should be written; empty values are simply omitted. */
-function detailLine(key: keyof ContactDetails, details: ContactDetails): string | null {
+function detailLine(key: DetailKey, details: ContactDetails): string | null {
   const raw = details[key]
   const value = typeof raw === 'string' ? raw.trim() : ''
   if (!value) return null
   return `- ${labelOf(key)}：${value}`
 }
 
+/** Split a tag value list on any accepted separator. */
+function splitTagValues(raw: string): string[] {
+  return raw
+    .split(TAG_VALUE_SEP)
+    .map((value) => value.trim())
+    .filter(Boolean)
+}
+
+/**
+ * Parse one `- 标签：…` value.
+ *
+ * Canonical form is `key=value、value`, with `（多选）` marking a multi-select
+ * key. A legacy line without `=` is a single `类别` value (`- 标签：客户`).
+ */
+export function parseTagValue(raw: string): ContactTagGroup | null {
+  const text = raw.trim()
+  if (!text) return null
+  const separator = text.indexOf('=')
+  if (separator < 0) {
+    const values = splitTagValues(text)
+    if (values.length === 0) return null
+    return { key: DEFAULT_TAG_KEY, values, multiple: values.length > 1 }
+  }
+  const rawKey = text.slice(0, separator).trim()
+  const multiple = rawKey.endsWith(MULTI_SUFFIX)
+  const key = (multiple ? rawKey.slice(0, -MULTI_SUFFIX.length) : rawKey).trim()
+  const values = splitTagValues(text.slice(separator + 1))
+  if (!key || values.length === 0) return null
+  return { key, values: multiple ? values : values.slice(0, 1), multiple }
+}
+
+/** Merge one parsed group into the accumulator, keeping one entry per key. */
+function mergeTagGroup(groups: ContactTagGroup[], incoming: ContactTagGroup): void {
+  const existing = groups.find((group) => group.key === incoming.key)
+  if (!existing) {
+    groups.push({ ...incoming, values: [...incoming.values] })
+    return
+  }
+  existing.multiple = existing.multiple || incoming.multiple
+  for (const value of incoming.values) {
+    if (!existing.values.includes(value)) existing.values.push(value)
+  }
+  if (!existing.multiple) existing.values = existing.values.slice(0, 1)
+}
+
+/** Canonical tag lines: one readable bullet per key. */
+function tagLines(tags: ContactTagGroup[]): string[] {
+  const merged: ContactTagGroup[] = []
+  for (const group of tags) {
+    const key = group.key.trim()
+    const values = group.values.map((value) => value.trim()).filter(Boolean)
+    if (!key || values.length === 0) continue
+    mergeTagGroup(merged, {
+      key,
+      values: group.multiple ? values : values.slice(0, 1),
+      multiple: group.multiple,
+    })
+  }
+  return merged.map(
+    (group) => `- ${TAG_LABEL}：${group.key}${group.multiple ? MULTI_SUFFIX : ''}=${group.values.join('、')}`,
+  )
+}
+
 function labelBlock(details: ContactDetails): string[] {
-  return LABELS.map((entry) => detailLine(entry.key, details)).filter(
+  const lines = LABELS.map((entry) => detailLine(entry.key, details)).filter(
     (line): line is string => line !== null,
   )
+  return [...lines, ...tagLines(details.tags)]
 }
 
 interface Scanned {
@@ -112,6 +200,7 @@ export function parseContactBody(body: string): Partial<ContactDetails> {
   const lines = body.replace(/\r\n/g, '\n').split('\n')
   const scanned = scan(body)
   const out: Partial<ContactDetails> = {}
+  const tags: ContactTagGroup[] = []
   for (const index of scanned.labelLines) {
     const match = LABEL_LINE.exec(lines[index] ?? '')
     if (!match) continue
@@ -119,9 +208,14 @@ export function parseContactBody(body: string): Partial<ContactDetails> {
     if (!key) continue
     const value = (match[2] ?? '').trim()
     if (!value) continue
-    if (key === 'tag') out.tag = value
-    else out[key] = value
+    if (key === 'tag') {
+      const group = parseTagValue(value)
+      if (group) mergeTagGroup(tags, group)
+      continue
+    }
+    out[key] = value
   }
+  if (tags.length > 0) out.tags = tags
   if (scanned.notesHeading != null) {
     const notes = lines
       .slice(scanned.notesHeading + 1, scanned.notesEnd)

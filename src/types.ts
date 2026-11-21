@@ -1,3 +1,5 @@
+import type { ContactTagGroup } from './contacts/contactBody'
+
 export interface Folder {
   id: number
   name: string
@@ -121,7 +123,8 @@ export interface Contact {
   email: string | null
   company: string | null
   notes: string | null
-  tag: string
+  /** Key-value tags; each key owns one or more selected values. */
+  tags: ContactTagGroup[]
   createdAt: string
   updatedAt: string
 }

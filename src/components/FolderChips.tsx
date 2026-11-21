@@ -49,7 +49,9 @@ export default function FolderChips({ folders, activeId, onSelect, onReorder }: 
   }
 
   const onPointerDown = (e: React.PointerEvent<HTMLButtonElement>, index: number) => {
-    if (e.pointerType === 'mouse' && e.button !== 0) return
+    // Reordering is a touch long-press gesture; a mouse drag is browser-like
+    // and made chips feel freely movable, so it never arms the timer.
+    if (e.pointerType === 'mouse') return
     clearTimer()
     start.current = { x: e.clientX, y: e.clientY }
     suppressClick.current = false

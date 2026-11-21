@@ -124,13 +124,15 @@ function App() {
     tr.style.transform = `translateX(${-indexRef.current * 100}%)`
   }, [overlay])
 
-  // ---- Horizontal paging gestures (touch + mouse drag) ----
+  // ---- Horizontal paging gestures (touch only) ----
   // `overlay` is a dependency only as a remount signal: closing an overlay
   // creates a new pager element, so the listeners must move with it.
   // The track has no touch-action restriction: the browser handles vertical
   // panning natively (list scrolling / pull-to-refresh) and horizontal moves
   // on overflow elements (chips rows) natively; only horizontal-dominant
   // gestures elsewhere are taken over here.
+  // Mouse drag is deliberately not wired up: the app is a mobile shell, and
+  // dragging with a mouse made every page (and its controls) feel movable.
   useEffect(() => {
     const el = pagerRef.current
     if (!el) return
@@ -139,7 +141,6 @@ function App() {
     // drag that just ended would otherwise fire a click on the item under the
     // release point and accidentally open it.
     let clickGuardUntil = 0
-    let savedUserSelect = ''
 
     const drag = (x: number, y: number, target: Element, prevent: () => void) => {
       if (!g.active) return
@@ -192,7 +193,7 @@ function App() {
       g.lastT = now
     }
 
-    const finish = (dx: number, fromMouse: boolean) => {
+    const finish = (dx: number) => {
       if (!g.active) return
       g.active = false
       if (g.locked === 'h') {
@@ -210,9 +211,6 @@ function App() {
         clickGuardUntil = performance.now() + 300
       }
       g.locked = null
-      if (fromMouse && document.body.style.userSelect === 'none') {
-        document.body.style.userSelect = savedUserSelect
-      }
     }
 
     const onTouchStart = (e: TouchEvent) => {
@@ -234,56 +232,7 @@ function App() {
 
     const onTouchEnd = (e: TouchEvent) => {
       const t = e.changedTouches[0]
-      finish(t ? t.clientX - g.startX : 0, false)
-    }
-
-    // ---- Mouse drag (desktop / web preview) ----
-    // Pointer events only for mouse; touch keeps the touch-event path above so
-    // native scrolling and pull-to-refresh arbitration stay intact.
-    const onPointerDown = (e: PointerEvent) => {
-      if (e.pointerType !== 'mouse' || e.button !== 0) return
-      const target = e.target as Element
-      // Text editing keeps native selection/drag behavior.
-      if (target.closest('input, textarea, [contenteditable="true"]')) return
-      g.active = true
-      g.locked = null
-      g.startX = e.clientX
-      g.startY = e.clientY
-      g.lastX = g.startX
-      g.lastT = performance.now()
-      g.vx = 0
-    }
-
-    const onPointerMove = (e: PointerEvent) => {
-      if (!g.active || e.pointerType !== 'mouse' || e.buttons !== 1) return
-      // Pointer capture retargets events to the pager; ask the browser for the
-      // real element under the cursor so scrollable chips rows are respected.
-      const under = document.elementFromPoint(e.clientX, e.clientY)
-      const before = g.locked
-      drag(e.clientX, e.clientY, under ?? (e.target as Element), () => e.preventDefault())
-      // Locking horizontal is the first moment capture is needed. Capturing on
-      // pointerdown would retarget mouseup/click to the pager and swallow taps
-      // on list items (note cards, rows, buttons).
-      if (g.locked === 'h' && before !== 'h') {
-        try {
-          el.setPointerCapture(e.pointerId)
-        } catch {
-          // Capture can fail on synthetic pointers; dragging still works.
-        }
-        // Disable native text selection while a horizontal mouse drag is locked.
-        savedUserSelect = document.body.style.userSelect
-        document.body.style.userSelect = 'none'
-      }
-    }
-
-    const onPointerUp = (e: PointerEvent) => {
-      if (!g.active || e.pointerType !== 'mouse') return
-      finish(e.clientX - g.startX, true)
-    }
-
-    const onPointerCancel = () => {
-      if (!g.active) return
-      finish(0, true)
+      finish(t ? t.clientX - g.startX : 0)
     }
 
     const onClickCapture = (e: MouseEvent) => {
@@ -297,24 +246,13 @@ function App() {
     el.addEventListener('touchmove', onTouchMove, { passive: false })
     el.addEventListener('touchend', onTouchEnd)
     el.addEventListener('touchcancel', onTouchEnd)
-    el.addEventListener('pointerdown', onPointerDown)
-    el.addEventListener('pointermove', onPointerMove)
-    el.addEventListener('pointerup', onPointerUp)
-    el.addEventListener('pointercancel', onPointerCancel)
     el.addEventListener('click', onClickCapture, true)
     return () => {
       el.removeEventListener('touchstart', onTouchStart)
       el.removeEventListener('touchmove', onTouchMove)
       el.removeEventListener('touchend', onTouchEnd)
       el.removeEventListener('touchcancel', onTouchEnd)
-      el.removeEventListener('pointerdown', onPointerDown)
-      el.removeEventListener('pointermove', onPointerMove)
-      el.removeEventListener('pointerup', onPointerUp)
-      el.removeEventListener('pointercancel', onPointerCancel)
       el.removeEventListener('click', onClickCapture, true)
-      if (document.body.style.userSelect === 'none') {
-        document.body.style.userSelect = savedUserSelect
-      }
     }
   }, [goTo, overlay])
 
