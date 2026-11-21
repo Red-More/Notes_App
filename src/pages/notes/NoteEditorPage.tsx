@@ -32,7 +32,9 @@ import {
   normalizeExtension,
 } from '../../fileTypes'
 import type { Doc, NoteVersion } from '../../types'
-import { ActionSheet, ConfirmDialog, DiffView, Modal } from '../../components/ui'
+import { ConfirmDialog, DiffView, Modal } from '../../components/ui'
+import TextSelectionMenu from '../../components/TextSelectionMenu'
+import type { MenuAnchor, Point } from '../../editor/selectionMenu'
 import { toast } from '../../toast'
 import { readText } from '@tauri-apps/plugin-clipboard-manager'
 import { copyText } from '../../system/clipboard'
@@ -211,9 +213,14 @@ export default function NoteEditorPage({
   const [deleteVersionConfirm, setDeleteVersionConfirm] = useState<NoteVersion | null>(null)
 
   const [zoomImage, setZoomImage] = useState<ZoomImage | null>(null)
-  /** Long-press text menu; the sheet renders only while it is true. */
-  const [textMenuOpen, setTextMenuOpen] = useState(false)
-  const [textMenuHasSelection, setTextMenuHasSelection] = useState(false)
+  /**
+   * Long-press text menu. The anchor is captured at open time: the bubble hangs
+   * off the selection (or the press point when nothing is selected) and must
+   * keep that position even as the selection changes underneath it.
+   */
+  const [textMenu, setTextMenu] = useState<{ anchor: MenuAnchor; hasSelection: boolean } | null>(
+    null,
+  )
 
   // The divider position is persisted, but the preview always starts closed:
   // the editor is the default view and the eye button renders the preview on
@@ -1144,7 +1151,7 @@ export default function NoteEditorPage({
   }
 
   // ---- Long-press text menu ----
-  // A long press (or right click) on the body opens this sheet instead of the
+  // A long press (or right click) on the body opens this menu instead of the
   // WebView's own menu, which differs per platform and has no 全选 entry.
 
   const copySelection = async () => {
@@ -1204,11 +1211,20 @@ export default function NoteEditorPage({
     editorRef.current?.insertAtCursor(text)
   }
 
-  const openTextMenu = () => {
-    // The sheet takes focus away from CodeMirror, so the selection state is
-    // sampled now: 复制 / 剪切 grey out when there is nothing selected.
-    setTextMenuHasSelection(editorRef.current?.hasSelection() ?? false)
-    setTextMenuOpen(true)
+  const openTextMenu = (press: Point) => {
+    // The menu floats over the text, so it is anchored on the selection when
+    // there is one and on the press point otherwise. Both the anchor and the
+    // selection state are sampled now: 复制 / 剪切 grey out when nothing is
+    // selected, and the bubble must not jump if the selection later changes.
+    setTextMenu({
+      anchor: editorRef.current?.selectionAnchor(press) ?? {
+        left: press.x,
+        top: press.y,
+        right: press.x,
+        bottom: press.y,
+      },
+      hasSelection: editorRef.current?.hasSelection() ?? false,
+    })
   }
 
   // ---- Layout: preview visibility and divider position ----
@@ -1739,41 +1755,15 @@ export default function NoteEditorPage({
       )}
 
       {/* ---- Long-press text menu ---- */}
-      {textMenuOpen && (
-        <ActionSheet
-          title="文本操作"
-          onClose={() => setTextMenuOpen(false)}
+      {textMenu && (
+        <TextSelectionMenu
+          anchor={textMenu.anchor}
+          onClose={() => setTextMenu(null)}
           items={[
-            {
-              label: '全选',
-              onClick: () => {
-                setTextMenuOpen(false)
-                editorRef.current?.selectAll()
-              },
-            },
-            {
-              label: '复制',
-              disabled: !textMenuHasSelection,
-              onClick: () => {
-                setTextMenuOpen(false)
-                void copySelection()
-              },
-            },
-            {
-              label: '剪切',
-              disabled: !textMenuHasSelection,
-              onClick: () => {
-                setTextMenuOpen(false)
-                void cutSelection()
-              },
-            },
-            {
-              label: '粘贴',
-              onClick: () => {
-                setTextMenuOpen(false)
-                void pasteText()
-              },
-            },
+            { label: '全选', onClick: () => editorRef.current?.selectAll() },
+            { label: '复制', disabled: !textMenu.hasSelection, onClick: () => void copySelection() },
+            { label: '剪切', disabled: !textMenu.hasSelection, onClick: () => void cutSelection() },
+            { label: '粘贴', onClick: () => void pasteText() },
           ]}
         />
       )}

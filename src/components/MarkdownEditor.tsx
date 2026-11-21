@@ -71,6 +71,7 @@ import {
 import { assetDataUrl } from '../assets'
 import { requestImageZoom } from '../system/imageZoom'
 import { hapticTap } from '../system/haptics'
+import { anchorFromCoords, type MenuAnchor, type Point } from '../editor/selectionMenu'
 import {
   clipboardImageFromNative,
   hasTextPayload,
@@ -104,6 +105,11 @@ export interface MarkdownEditorHandle {
   selectAll: () => void
   /** Delete the selection without touching the clipboard. */
   deleteSelection: () => void
+  /**
+   * Client rect the text menu should hang off: the selection when there is
+   * one, otherwise `press` (the long-press / right-click point).
+   */
+  selectionAnchor: (press?: Point | null) => MenuAnchor
 }
 
 interface MarkdownEditorProps {
@@ -115,7 +121,7 @@ interface MarkdownEditorProps {
   onScrollLine: (line: number) => void
   onPasteImages: (files: File[]) => void
   /** Long press (or right click) on the text: open the editor action menu. */
-  onLongPressText: () => void
+  onLongPressText: (press: Point) => void
 }
 
 type CallbackRef<T> = { current: T }
@@ -128,7 +134,7 @@ interface EditorRefs {
   onHistory: CallbackRef<(canUndo: boolean, canRedo: boolean) => void>
   onScroll: CallbackRef<(line: number) => void>
   onPasteImages: CallbackRef<(files: File[]) => void>
-  onLongPressText: CallbackRef<() => void>
+  onLongPressText: CallbackRef<(press: Point) => void>
   history: CallbackRef<{ undo: number; redo: number }>
 }
 
@@ -544,10 +550,10 @@ function buildExtensions(prefs: EditorPrefs, refs: EditorRefs) {
       },
       // A long press on the text raises the editor menu (剪切/复制/粘贴/全选).
       // WebViews show their own native menu here, which is inconsistent across
-      // platforms and lacks 全选, so the press is claimed and our sheet opens.
+      // platforms and lacks 全选, so the press is claimed and our menu opens.
       contextmenu: (event) => {
         event.preventDefault()
-        refs.onLongPressText.current()
+        refs.onLongPressText.current({ x: event.clientX, y: event.clientY })
         return true
       },
     }),
@@ -698,7 +704,7 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
         pressTimer = window.setTimeout(() => {
           pressTimer = 0
           hapticTap(8)
-          onLongPressTextRef.current()
+          onLongPressTextRef.current({ x: pressFrom.x, y: pressFrom.y })
         }, LONG_PRESS_MS)
       }
       const onPressMove = (event: PointerEvent) => {
@@ -842,6 +848,14 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
           if (from === to) return
           view.dispatch({ changes: { from, to, insert: '' }, selection: { anchor: from } })
           view.focus()
+        },
+        selectionAnchor: (press) => {
+          const view = viewRef.current
+          if (!view) return anchorFromCoords(null, null, press ?? null)
+          const { from, to } = view.state.selection.main
+          // `coordsAtPos` measures rendered text only, so either end can come
+          // back null when it is scrolled out of view; the helper handles that.
+          return anchorFromCoords(view.coordsAtPos(from), view.coordsAtPos(to), press ?? null)
         },
       }),
       [],
