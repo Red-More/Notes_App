@@ -1624,10 +1624,64 @@ body.split-resizing {
   font-size: 0.85em;
 }
 
-/* Tables scroll horizontally instead of being clipped on phones. */
+/* Tables scroll horizontally instead of being clipped on phones. The gesture
+   belongs to the table: `overscroll-behavior-x` stops it chaining to the page,
+   and the tab pager ignores drags that start inside a horizontal scroller. */
 .md-preview .table-scroll {
   margin: 0 0 0.9em;
   overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+/* Raw HTML tables bypass the renderer's scroll wrapper, so they scroll
+   themselves with the same permissive-width pattern GitHub uses. */
+.md-preview > table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+/* Edge fade hint for a wide table: only the side that still hides columns
+   fades, so content never looks merely clipped. ChatMarkdown toggles the
+   state classes from the measured scroll range. */
+.md-preview .table-scroll.is-scrollable {
+  cursor: grab;
+}
+
+.md-preview .table-scroll.is-dragging {
+  cursor: grabbing;
+  /* A pan must never turn into a text selection while the mouse button is held. */
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.md-preview .table-scroll.is-scrollable:not(.at-end) {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+}
+
+.md-preview .table-scroll.is-scrollable:not(.at-start) {
+  -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 28px), transparent);
+  mask-image: linear-gradient(to left, #000 calc(100% - 28px), transparent);
+}
+
+.md-preview .table-scroll.is-scrollable:not(.at-start):not(.at-end) {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 28px,
+    #000 calc(100% - 28px),
+    transparent
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 28px,
+    #000 calc(100% - 28px),
+    transparent
+  );
 }
 
 .md-preview table {
@@ -5309,6 +5363,24 @@ body.split-resizing {
 .chat-bubble .chat-markdown a {
   word-break: break-word;
   overflow-wrap: anywhere;
+}
+
+/* Chat tables read as data grids: a short cell stays on one line and the table
+   grows horizontally instead of squeezing text into wrapped rows. Long prose
+   in note previews keeps its normal wrapping rules. */
+.chat-bubble .md-preview th,
+.chat-bubble .md-preview td {
+  white-space: nowrap;
+}
+
+/* The fade hint and grab cursor already advertise the pan, so the native
+   scrollbar stays out of the bubble like every other scroller in the app. */
+.chat-bubble .md-preview .table-scroll {
+  scrollbar-width: none;
+}
+
+.chat-bubble .md-preview .table-scroll::-webkit-scrollbar {
+  display: none;
 }
 
 /* Retry row for failed or cancelled assistant turns. */

@@ -65,6 +65,22 @@ interface Gesture {
   locked: null | 'h' | 'v' | 'chips'
 }
 
+/**
+ * Nearest ancestor that scrolls horizontally on its own (wide table, code
+ * block, chips row). A drag starting inside it belongs to that element: the
+ * pager must neither take the gesture over nor preventDefault it, otherwise the
+ * inner scroll is cancelled and the whole page skeleton slides instead.
+ */
+function findHorizontalScroller(target: Element): HTMLElement | null {
+  for (let el = target as HTMLElement | null; el; el = el.parentElement) {
+    // Cheap bail-out: no hidden width means the element cannot scroll at all.
+    if (el.scrollWidth <= el.clientWidth) continue
+    const overflowX = getComputedStyle(el).overflowX
+    if (overflowX === 'auto' || overflowX === 'scroll') return el
+  }
+  return null
+}
+
 function App() {
   const [index, setIndex] = useState(0)
   const [overlay, setOverlay] = useState<Overlay | null>(null)
@@ -163,6 +179,12 @@ function App() {
         // Vertical list scrolling keeps priority; only horizontal-dominant
         // gestures past the angle threshold take over the pager.
         if (Math.abs(dx) > Math.abs(dy) * ANGLE_RATIO) {
+          // A wide table / code block pans itself: release the gesture to the
+          // browser so its content moves and the page skeleton stays put.
+          if (findHorizontalScroller(target)) {
+            g.locked = 'v'
+            return
+          }
           // System back-gesture edge zones never page.
           const rect = el.getBoundingClientRect()
           if (g.startX - rect.left < EDGE_ZONE || rect.right - g.startX < EDGE_ZONE) {
