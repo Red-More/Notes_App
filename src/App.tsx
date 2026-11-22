@@ -54,6 +54,8 @@ const SLOP = 6
 const ANGLE_RATIO = 1.15
 const EDGE_ZONE = 24
 const TRANSITION = 'transform 0.32s cubic-bezier(0.22, 1.2, 0.36, 1)'
+/** Rightward drag distance that cancels an active list selection. */
+const SELECT_CANCEL_DX = 40
 
 interface Gesture {
   active: boolean
@@ -62,7 +64,7 @@ interface Gesture {
   lastX: number
   lastT: number
   vx: number
-  locked: null | 'h' | 'v' | 'chips'
+  locked: null | 'h' | 'v' | 'chips' | 'select'
 }
 
 /**
@@ -93,6 +95,8 @@ function App() {
   const indexRef = useRef(0)
   const trackRef = useRef<HTMLDivElement>(null)
   const pagerRef = useRef<HTMLDivElement>(null)
+  /** Cancel callback for the notes selection on the visible tab; null when idle. */
+  const cancelNotesSelection = useRef<(() => void) | null>(null)
   const gesture = useRef<Gesture>({
     active: false,
     startX: 0,
@@ -116,6 +120,11 @@ function App() {
     setOverlay(null)
     setDataVersion((v) => v + 1)
   }
+
+  /** Stable setter: the gesture listeners read the ref, so no rebind is needed. */
+  const handleSelectionStateChange = useCallback((cancel: (() => void) | null) => {
+    cancelNotesSelection.current = cancel
+  }, [])
 
   /** Snap the track to a page index (with or without a transition). */
   const goTo = useCallback((target: number, animate = true) => {
@@ -176,6 +185,18 @@ function App() {
           g.locked = 'chips'
           return
         }
+        // A live selection is modal: the tab strip never slides underneath it.
+        // The horizontal drag is consumed here; a rightward release cancels
+        // the selection in `finish`.
+        if (cancelNotesSelection.current) {
+          if (Math.abs(dx) > Math.abs(dy) * ANGLE_RATIO) {
+            g.locked = 'select'
+            prevent()
+          } else {
+            g.locked = 'v'
+          }
+          return
+        }
         // Vertical list scrolling keeps priority; only horizontal-dominant
         // gestures past the angle threshold take over the pager.
         if (Math.abs(dx) > Math.abs(dy) * ANGLE_RATIO) {
@@ -230,6 +251,12 @@ function App() {
           goTo(target)
         }
         // Guard the click that would otherwise follow a horizontal drag.
+        clickGuardUntil = performance.now() + 300
+      } else if (g.locked === 'select') {
+        // Rightward drag exits multi-select in place; either direction must
+        // not page, and the following click is suppressed for the same reason
+        // as a horizontal pager drag.
+        if (dx > SELECT_CANCEL_DX) cancelNotesSelection.current?.()
         clickGuardUntil = performance.now() + 300
       }
       g.locked = null
@@ -359,6 +386,7 @@ function App() {
               onOpenNote={(noteId, folderId) =>
                 setOverlay({ kind: 'editor', noteId, folderId })
               }
+              onSelectionStateChange={handleSelectionStateChange}
               onOpenFolders={(scope) =>
                 setOverlay({
                   kind: 'folders',

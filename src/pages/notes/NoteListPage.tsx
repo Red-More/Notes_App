@@ -4,12 +4,14 @@ import { api, docApi } from '../../api'
 import {
   useCollapsibleHeader,
   useDebouncedSearch,
+  useEdgeBack,
   useElasticOverscroll,
   useLongPress,
 } from '../../hooks'
 import { exportTs, formatAmPmDateTime, friendlyError } from '../../utils'
 import { fileTypeLabel } from '../../fileTypes'
 import { hapticTap } from '../../system/haptics'
+import { usePhysicalBack } from '../../system/backButton'
 import type { Doc, Folder, FolderScope, Note } from '../../types'
 import { NOTES_ROOT_SCOPE } from '../../types'
 import { ConfirmDialog, OverlayPortal } from '../../components/ui'
@@ -43,6 +45,12 @@ interface Props {
   onOpenSettings: () => void
   onOpenNote: (noteId: number | null, folderId: number | null) => void
   onOpenFolders: (scope: FolderScope) => void
+  /**
+   * Publishes the cancel callback while this page is the visible tab in
+   * multi-select mode; the tab pager routes rightward drags to it instead of
+   * paging. `null` means no active selection, so the pager behaves normally.
+   */
+  onSelectionStateChange?: (cancel: (() => void) | null) => void
 }
 
 /** One rendered row for a note document. */
@@ -133,6 +141,7 @@ export default function NoteListPage({
   onOpenSettings,
   onOpenNote,
   onOpenFolders,
+  onSelectionStateChange,
 }: Props) {
   const [notes, setNotes] = useState<Row[]>([])
   /** Direct child folders of the current scope, rendered as the segmented row. */
@@ -326,10 +335,22 @@ export default function NoteListPage({
     return () => io.disconnect()
   }, [notes.length, hasMore])
 
-  const exitSelect = () => {
+  const exitSelect = useCallback(() => {
     setSelectMode(false)
     setSelected(new Set())
-  }
+  }, [])
+
+  // Multi-select is a modal sub-state, so every back entry point must dismiss
+  // it instead of leaving the tab: the Android back key / system back gesture
+  // (Tauri would otherwise fall through to the activity default and close the
+  // whole app), the in-webview left-edge swipe, and the tab pager's rightward
+  // drag (published to App through `onSelectionStateChange`).
+  useEdgeBack(exitSelect, isActive && selectMode)
+  usePhysicalBack(exitSelect, isActive && selectMode)
+  useEffect(() => {
+    onSelectionStateChange?.(isActive && selectMode ? exitSelect : null)
+    return () => onSelectionStateChange?.(null)
+  }, [isActive, selectMode, onSelectionStateChange, exitSelect])
 
   const toggleSelected = (id: number) => {
     setSelected((prev) => {
