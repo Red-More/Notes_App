@@ -1,3 +1,9 @@
+import {
+  DEFAULT_REMINDER_SOUND,
+  isReminderSoundId,
+  type ReminderSoundId,
+} from './reminders/ringtones'
+
 export type FontScale = 'standard' | 'large' | 'extra'
 
 export interface AppPrefs {
@@ -5,6 +11,13 @@ export interface AppPrefs {
   displayName: string
   /** Master switch for due reminders (todos). */
   remindersEnabled: boolean
+  /** Ringtone played when a todo reminder fires. */
+  reminderSound: ReminderSoundId
+  /**
+   * Keep ringing on silent / do-not-disturb devices until the user dismisses
+   * the alarm. Only meaningful while reminder notifications are enabled.
+   */
+  forceReminder: boolean
   /** UI type scale; rem-based styles follow the root font size. */
   fontScale: FontScale
   /**
@@ -25,6 +38,8 @@ export const FONT_SCALE_OPTIONS: Array<{ key: FontScale; label: string; ratio: n
 export const DEFAULT_APP_PREFS: AppPrefs = {
   displayName: '本机用户',
   remindersEnabled: true,
+  reminderSound: DEFAULT_REMINDER_SOUND,
+  forceReminder: false,
   fontScale: 'standard',
   markMissedDiary: false,
 }
@@ -56,6 +71,13 @@ export function parseAppPrefs(raw: string | null): AppPrefs {
       typeof record.remindersEnabled === 'boolean'
         ? record.remindersEnabled
         : DEFAULT_APP_PREFS.remindersEnabled,
+    reminderSound: isReminderSoundId(record.reminderSound)
+      ? record.reminderSound
+      : DEFAULT_APP_PREFS.reminderSound,
+    forceReminder:
+      typeof record.forceReminder === 'boolean'
+        ? record.forceReminder
+        : DEFAULT_APP_PREFS.forceReminder,
     fontScale: isFontScale(record.fontScale) ? record.fontScale : DEFAULT_APP_PREFS.fontScale,
     markMissedDiary:
       typeof record.markMissedDiary === 'boolean'
@@ -92,6 +114,10 @@ export function setAppPrefs(patch: Partial<AppPrefs>): AppPrefs {
     displayName:
       patch.displayName !== undefined ? sanitizeDisplayName(patch.displayName) : current.displayName,
     remindersEnabled: patch.remindersEnabled ?? current.remindersEnabled,
+    reminderSound: isReminderSoundId(patch.reminderSound)
+      ? patch.reminderSound
+      : current.reminderSound,
+    forceReminder: patch.forceReminder ?? current.forceReminder,
     fontScale: isFontScale(patch.fontScale) ? patch.fontScale : current.fontScale,
     markMissedDiary: patch.markMissedDiary ?? current.markMissedDiary,
   }
