@@ -146,20 +146,24 @@ interface EditorRefs {
 const editorTheme = EditorView.theme({
   '&': {
     height: '100%',
-    fontSize: '15px',
+    // Reading tokens are rem-based, so the font tiers scale the note body too.
+    fontSize: 'var(--reading-size)',
     color: 'var(--text)',
     backgroundColor: 'transparent',
   },
   '&.cm-focused': { outline: 'none' },
   '.cm-scroller': {
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, 'PingFang SC', monospace",
-    lineHeight: '1.75',
+    lineHeight: 'var(--reading-leading)',
     overflow: 'auto',
     overscrollBehavior: 'contain',
     // Proportional tail below the document: clickable, no line numbers, no syntax.
     padding: '4px 0 18vh',
   },
-  '.cm-content': { padding: '0 4px', caretColor: 'var(--accent)' },
+  '.cm-content': {
+    padding: '0 4px',
+    caretColor: 'var(--accent)',
+  },
   '.cm-line': { padding: '0 6px' },
   // Deeper list / quote markers fade one step at a time.
   '.cm-md-depth-1': { opacity: '1' },
@@ -220,7 +224,7 @@ const editorTheme = EditorView.theme({
     boxShadow: 'var(--shadow)',
     overflow: 'hidden',
   },
-  '.cm-tooltip-autocomplete > ul': { fontFamily: 'var(--sans)', fontSize: '13px' },
+  '.cm-tooltip-autocomplete > ul': { fontFamily: 'var(--sans)', fontSize: '0.8125rem' },
   '.cm-tooltip-autocomplete > ul > li': { padding: '6px 10px' },
   '.cm-tooltip-autocomplete > ul > li[aria-selected]': {
     backgroundColor: 'var(--accent-weak)',

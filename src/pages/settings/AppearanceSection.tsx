@@ -1,5 +1,6 @@
 import { useState, useSyncExternalStore } from 'react'
 import {
+  FONT_FINE_RANGE,
   FONT_SCALE_OPTIONS,
   getAppPrefs,
   setAppPrefs,
@@ -9,12 +10,7 @@ import {
 import { IconEye, IconInfo, IconNote } from '../../components/Icons'
 import { getStoredTheme, setStoredTheme, type Theme } from '../../theme'
 import ChipRow from '../../components/ChipRow'
-import {
-  SettingsExpandableRow,
-  SettingsGroup,
-  SettingsRow,
-  SaveStatus,
-} from './SettingsPrimitives'
+import { SettingsExpandableRow, SettingsGroup, SettingsRow, SaveStatus } from './SettingsPrimitives'
 import { useSettingSave } from './useSettingSave'
 
 const THEME_OPTIONS: Array<{ key: Theme; label: string }> = [
@@ -27,7 +23,9 @@ const themeLabel = (theme: Theme) =>
   THEME_OPTIONS.find((option) => option.key === theme)?.label ?? '跟随系统'
 
 const fontLabel = (scale: AppPrefs['fontScale']) =>
-  FONT_SCALE_OPTIONS.find((option) => option.key === scale)?.label ?? '标准'
+  FONT_SCALE_OPTIONS.find((option) => option.key === scale)?.label ?? 'M'
+
+const fineLabel = (fine: number) => `${fine > 0 ? '+' : ''}${fine}%`
 
 export default function AppearanceSection() {
   const prefs = useSyncExternalStore(subscribeAppPrefs, getAppPrefs, getAppPrefs)
@@ -42,9 +40,9 @@ export default function AppearanceSection() {
     void themeSave.run(() => setStoredTheme(next))
   }
 
-  const chooseFont = (next: AppPrefs['fontScale']) => {
+  const chooseFont = (patch: Partial<Pick<AppPrefs, 'fontScale' | 'fontFine'>>) => {
     void fontSave.run(() => {
-      setAppPrefs({ fontScale: next })
+      setAppPrefs(patch)
     })
   }
 
@@ -65,13 +63,38 @@ export default function AppearanceSection() {
       <SettingsExpandableRow
         icon={<IconNote size={20} />}
         title="字体大小"
-        subtitle="即时预览，随系统字体缩放"
-        value={fontLabel(prefs.fontScale)}
+        subtitle="档位切换 + 微调，拖动即时预览"
+        value={`${fontLabel(prefs.fontScale)} · ${fineLabel(prefs.fontFine)}`}
         status={<SaveStatus state={fontSave.state} error={fontSave.error} />}
         open={fontOpen}
         onToggle={() => setFontOpen((open) => !open)}
       >
-        <ChipRow items={FONT_SCALE_OPTIONS} value={prefs.fontScale} onChange={chooseFont} />
+        <p className="font-scale-sample">字号预览：笔记正文会按这个大小与行距显示。</p>
+        <div className="settings-detail-field">
+          <span className="settings-detail-label">档位</span>
+          <ChipRow
+            items={FONT_SCALE_OPTIONS}
+            value={prefs.fontScale}
+            onChange={(fontScale) => chooseFont({ fontScale })}
+          />
+        </div>
+        <div className="settings-detail-field">
+          <span className="settings-detail-label">微调（{fineLabel(prefs.fontFine)}）</span>
+          <input
+            type="range"
+            className="font-fine-slider"
+            min={-FONT_FINE_RANGE}
+            max={FONT_FINE_RANGE}
+            step={1}
+            value={prefs.fontFine}
+            onChange={(e) => chooseFont({ fontFine: Number(e.target.value) })}
+            aria-label="字号微调"
+            aria-valuetext={fineLabel(prefs.fontFine)}
+          />
+        </div>
+        <p className="settings-detail-note">
+          档位之间差异明显，微调在档位附近细修 ±{FONT_FINE_RANGE}%；正文、预览与界面文字同步生效。
+        </p>
       </SettingsExpandableRow>
 
       <SettingsRow

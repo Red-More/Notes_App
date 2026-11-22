@@ -89,19 +89,25 @@
   --sans: system-ui, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', Roboto, sans-serif;
   /* UI type scale (1 = standard). Rem-based styles follow the root font size. */
   --font-scale: 1;
+  /* Reading typography for the note editor and Markdown preview. Kept in rem
+     so the S/M/L/XL tiers and fine tuning reach the text the user writes;
+     medium weight + relaxed leading keep light screens from looking thin. */
+  --reading-size: 1rem;
+  --reading-leading: 1.8;
+  --reading-weight: 500;
 
   color-scheme: light;
-  font: 16px/1.5 var(--sans);
+  /* Declared here (not as a `font` shorthand on :root) so the type scale wins
+     the cascade: a :root shorthand outranks the lower-specificity html rule. */
+  font-family: var(--sans);
+  font-size: calc(16px * var(--font-scale));
+  line-height: 1.5;
   color: var(--text);
   background: #ebedf0;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
-}
-
-html {
-  font-size: calc(16px * var(--font-scale));
 }
 
 * {
@@ -286,7 +292,7 @@ textarea {
   /* Touch target ~56px tall (icon + label + padding) — fully inside the bar, never under the gesture area. */
   min-height: 44px;
   color: var(--text-2);
-  font-size: 11px;
+  font-size: 0.6875rem;
   border-radius: 12px;
   transition:
     color 0.15s,
@@ -316,7 +322,7 @@ textarea {
 }
 
 .page-title {
-  font-size: 22px;
+  font-size: 1.375rem;
   font-weight: 700;
   margin: 0;
   letter-spacing: 0.2px;
@@ -385,7 +391,7 @@ textarea {
   height: var(--large-title-height);
   margin: 0;
   padding: 0 2px 10px;
-  font-size: 28px;
+  font-size: 1.75rem;
   line-height: 44px;
   font-weight: 700;
   letter-spacing: 0.2px;
@@ -425,7 +431,7 @@ textarea {
   border: none;
   outline: none;
   background: none;
-  font-size: 15px;
+  font-size: 0.9375rem;
   color: var(--text);
 }
 
@@ -453,7 +459,7 @@ textarea {
 
 .selection-count {
   text-align: center;
-  font-size: 17px;
+  font-size: 1.0625rem;
   font-weight: 600;
   letter-spacing: 0.2px;
   white-space: nowrap;
@@ -497,7 +503,7 @@ textarea {
 }
 
 .sort-popover-title {
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-3);
   padding: 8px 12px 4px;
 }
@@ -509,7 +515,7 @@ textarea {
   width: 100%;
   padding: 10px 12px;
   border-radius: 10px;
-  font-size: 14px;
+  font-size: 0.875rem;
   text-align: left;
   color: var(--text);
 }
@@ -593,7 +599,7 @@ textarea {
   background: var(--surface);
   border: 1px solid var(--border);
   color: var(--text-2);
-  font-size: 13px;
+  font-size: 0.8125rem;
   transition: all 0.15s;
 }
 
@@ -618,7 +624,7 @@ textarea {
 
 .chip.mini {
   padding: 2px 8px;
-  font-size: 11px;
+  font-size: 0.6875rem;
   border-radius: 6px;
   background: var(--surface-2);
   border: none;
@@ -679,9 +685,9 @@ textarea {
 
 .note-card-title {
   flex-shrink: 0;
-  height: 24px;
-  line-height: 24px;
-  font-size: 20px;
+  height: 1.5rem;
+  line-height: 1.5rem;
+  font-size: 1.25rem;
   font-weight: 600;
   margin: 0 0 4px;
   display: flex;
@@ -699,15 +705,15 @@ textarea {
 }
 
 .pin-badge {
-  font-size: 13px;
+  font-size: 0.8125rem;
   flex-shrink: 0;
 }
 
 .note-card-content {
   flex-shrink: 0;
-  height: 20px;
-  line-height: 20px;
-  font-size: 14px;
+  height: 1.25rem;
+  line-height: 1.25rem;
+  font-size: 0.875rem;
   color: var(--text-2);
   margin: 0 0 8px;
   white-space: nowrap;
@@ -726,7 +732,7 @@ textarea {
 /* Shown when fs_grep had to fall back to the LIKE scan. */
 .search-fallback-hint {
   margin: 0 16px 8px;
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 18px;
   color: var(--text-3);
 }
@@ -736,9 +742,9 @@ textarea {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 18px;
-  line-height: 18px;
-  font-size: 12px;
+  height: 1.125rem;
+  line-height: 1.125rem;
+  font-size: 0.75rem;
   color: var(--text-3);
   white-space: nowrap;
   overflow: hidden;
@@ -764,7 +770,7 @@ textarea {
   border-radius: 6px;
   background: var(--surface-2);
   color: var(--text-3);
-  font-size: 11px;
+  font-size: 0.6875rem;
   line-height: 18px;
   text-transform: lowercase;
 }
@@ -846,7 +852,7 @@ textarea {
 
 .action-bar-info {
   flex: 1;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--text-2);
   padding-left: 4px;
 }
@@ -856,7 +862,7 @@ textarea {
   flex-direction: column;
   align-items: center;
   gap: 3px;
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--text);
   padding: 6px 10px;
   border-radius: 10px;
@@ -951,7 +957,7 @@ textarea {
   border-radius: 12px;
   background: var(--surface-2);
   color: var(--text);
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 600;
   display: flex;
   align-items: center;
@@ -1037,7 +1043,7 @@ textarea {
   display: flex;
   align-items: center;
   gap: 4px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--text-2);
   padding: 6px 10px;
   border-radius: 10px;
@@ -1055,7 +1061,7 @@ textarea {
 }
 
 .save-status {
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-3);
   margin-left: auto;
   margin-right: 6px;
@@ -1124,7 +1130,7 @@ body.split-resizing .editor-main {
   border: none;
   outline: none;
   background: none;
-  font-size: 20px;
+  font-size: 1.25rem;
   font-weight: 700;
   padding: 6px 0;
   margin-bottom: 6px;
@@ -1139,7 +1145,7 @@ body.split-resizing .editor-main {
   align-items: center;
   gap: 8px;
   margin: 0 0 14px;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text);
   white-space: nowrap;
   overflow: visible;
@@ -1178,7 +1184,7 @@ body.split-resizing .editor-main {
   border-radius: 6px;
   background: var(--surface-2);
   color: var(--text-2);
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 18px;
 }
 
@@ -1200,7 +1206,7 @@ body.split-resizing .editor-main {
 
 .type-popover-title {
   padding: 6px 8px;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-3);
 }
 
@@ -1212,7 +1218,7 @@ body.split-resizing .editor-main {
   gap: 8px;
   padding: 8px;
   border-radius: 8px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--text);
   text-align: left;
 }
@@ -1224,7 +1230,7 @@ body.split-resizing .editor-main {
 
 .type-ext {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .type-popover-divider {
@@ -1247,7 +1253,7 @@ body.split-resizing .editor-main {
   border-radius: 8px;
   background: var(--surface-2);
   color: var(--text);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .type-custom button {
@@ -1255,13 +1261,13 @@ body.split-resizing .editor-main {
   border-radius: 8px;
   background: var(--accent-weak);
   color: var(--accent);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .type-error {
   padding: 4px 8px 6px;
   color: var(--danger);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .editor-title-input::placeholder {
@@ -1285,6 +1291,13 @@ body.split-resizing .editor-main {
 
 .markdown-editor .cm-editor.cm-focused {
   outline: none;
+}
+
+/* Note body weight and smoothing; size / leading come from the CM theme.
+   The extra .cm-editor step outranks CodeMirror's injected theme styles. */
+.markdown-editor .cm-editor .cm-content {
+  font-weight: var(--reading-weight);
+  -webkit-font-smoothing: auto;
 }
 
 /* Inline image widget: the Markdown source stays intact behind the picture. */
@@ -1476,20 +1489,23 @@ body.split-resizing {
 .preview-empty {
   padding: 16px 2px;
   color: var(--text-3);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .preview-loading {
   padding: 16px 2px;
   color: var(--text-3);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 /* ============ Markdown preview ============ */
 .md-preview {
   padding: 8px 2px 12px;
-  font-size: 15px;
-  line-height: 1.7;
+  font-size: var(--reading-size);
+  line-height: var(--reading-leading);
+  font-weight: var(--reading-weight);
+  /* Subpixel smoothing keeps strokes from thinning out on light screens. */
+  -webkit-font-smoothing: auto;
   color: var(--text);
   overflow-wrap: anywhere;
 }
@@ -1602,7 +1618,7 @@ body.split-resizing {
   padding: 0;
   background: none;
   border-radius: 0;
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1.6;
   white-space: pre;
 }
@@ -1687,7 +1703,7 @@ body.split-resizing {
 .md-preview table {
   min-width: 100%;
   border-collapse: collapse;
-  font-size: 14px;
+  font-size: 0.875rem;
 }
 
 .md-preview th,
@@ -1760,7 +1776,7 @@ body.split-resizing {
   margin-top: 1.4em;
   padding-top: 0.8em;
   border-top: 1px solid var(--border);
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--text-2);
 }
 
@@ -1814,14 +1830,14 @@ body.split-resizing {
 }
 
 .md-preview .mermaid-error-title {
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 600;
   color: var(--danger);
 }
 
 .md-preview .mermaid-error-detail {
   margin: 4px 0 6px;
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.5;
   color: var(--text-2);
   white-space: pre-wrap;
@@ -1835,7 +1851,7 @@ body.split-resizing {
   border-radius: 8px;
   background: var(--surface-2);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1.6;
   white-space: pre;
   overflow-x: auto;
@@ -1861,7 +1877,7 @@ body.split-resizing {
 }
 
 .md-preview .math-error-title {
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 600;
   color: var(--danger);
 }
@@ -1873,14 +1889,14 @@ body.split-resizing {
   border-radius: 8px;
   background: var(--surface);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1.6;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 .md-preview .math-error-detail {
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.5;
   color: var(--text-2);
   white-space: pre-wrap;
@@ -1949,7 +1965,7 @@ body.split-resizing {
   padding: 8px 18px var(--safe-bottom-pad);
   background: var(--surface);
   border-top: 1px solid var(--border);
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-3);
   flex-shrink: 0;
 }
@@ -1966,7 +1982,7 @@ body.split-resizing {
 .preview-banner {
   background: var(--accent-weak);
   color: var(--accent);
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 600;
   padding: 8px 16px;
   text-align: center;
@@ -1981,7 +1997,7 @@ body.split-resizing {
 }
 
 .preview-title {
-  font-size: 20px;
+  font-size: 1.25rem;
   font-weight: 700;
   margin: 6px 0 12px;
   white-space: pre-wrap;
@@ -1989,7 +2005,7 @@ body.split-resizing {
 }
 
 .preview-text {
-  font-size: 16px;
+  font-size: 1rem;
   line-height: 1.7;
   white-space: pre-wrap;
   word-break: break-all;
@@ -2021,14 +2037,14 @@ body.split-resizing {
 }
 
 .version-no {
-  font-size: 14px;
+  font-size: 0.875rem;
   font-weight: 700;
   color: var(--accent);
   font-variant-numeric: tabular-nums;
 }
 
 .version-label {
-  font-size: 11px;
+  font-size: 0.6875rem;
   background: var(--accent-weak);
   color: var(--accent);
   border-radius: 6px;
@@ -2040,7 +2056,7 @@ body.split-resizing {
 }
 
 .version-title {
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--text);
   margin-top: 2px;
   overflow: hidden;
@@ -2049,7 +2065,7 @@ body.split-resizing {
 }
 
 .version-time {
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--text-3);
 }
 
@@ -2062,7 +2078,7 @@ body.split-resizing {
 .diff-stats {
   display: flex;
   gap: 14px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   padding: 8px 2px 12px;
   font-variant-numeric: tabular-nums;
 }
@@ -2079,7 +2095,7 @@ body.split-resizing {
 
 .diff-body {
   font-family: ui-monospace, Consolas, monospace;
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.6;
   border-radius: var(--radius-sm);
   overflow: hidden;
@@ -2144,7 +2160,7 @@ body.split-resizing {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text);
-  font-size: 15px;
+  font-size: 0.9375rem;
   font-weight: 600;
 }
 
@@ -2158,7 +2174,7 @@ body.split-resizing {
   border-radius: 999px;
   background: var(--surface-2);
   color: var(--text-3);
-  font-size: 11.5px;
+  font-size: 0.71875rem;
 }
 
 .tool-detail-dot {
@@ -2186,7 +2202,7 @@ body.split-resizing {
   white-space: nowrap;
   color: var(--text-3);
   font-family: ui-monospace, Consolas, monospace;
-  font-size: 12.5px;
+  font-size: 0.78125rem;
 }
 
 /* The stat bar is pinned: it sits above, not inside, the scroll viewport. */
@@ -2199,7 +2215,7 @@ body.split-resizing {
 
 .tool-detail-stats .diff-stats {
   padding: 6px 2px;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 /* Only the code/read body scrolls; header and stats stay put. */
@@ -2224,7 +2240,7 @@ body.split-resizing {
 .tool-detail-section h4 {
   margin: 0;
   color: var(--text-3);
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 600;
 }
 
@@ -2233,7 +2249,7 @@ body.split-resizing {
   margin: 0;
   padding: 2px 2px 10px;
   color: var(--text);
-  font-size: 15px;
+  font-size: 0.9375rem;
   line-height: 1.85;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -2247,7 +2263,7 @@ body.split-resizing {
   background: var(--surface-2);
   color: var(--text);
   font-family: ui-monospace, Consolas, monospace;
-  font-size: 13.5px;
+  font-size: 0.84375rem;
   line-height: 1.75;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -2255,7 +2271,7 @@ body.split-resizing {
 
 .tool-detail .diff-body {
   border-radius: 12px;
-  font-size: 13.5px;
+  font-size: 0.84375rem;
   line-height: 1.75;
 }
 
@@ -2284,7 +2300,7 @@ body.split-resizing {
 .undo-receipt-lead {
   margin: 0;
   color: var(--text-2);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .undo-impact-group {
@@ -2295,7 +2311,7 @@ body.split-resizing {
 
 .undo-impact-title {
   color: var(--text-2);
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 600;
 }
 
@@ -2307,7 +2323,7 @@ body.split-resizing {
 .undo-impact-group li {
   color: var(--text-3);
   font-family: ui-monospace, Consolas, monospace;
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   word-break: break-all;
 }
 
@@ -2320,12 +2336,12 @@ body.split-resizing {
   display: block;
   margin-top: 1px;
   color: var(--text-3);
-  font-size: 11.5px;
+  font-size: 0.71875rem;
 }
 
 .undo-impact-empty {
   color: var(--text-3);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
 }
 
 .undo-impact-warning {
@@ -2333,7 +2349,7 @@ body.split-resizing {
   padding-top: 8px;
   border-top: 1px solid var(--border);
   color: var(--danger);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
 }
 
 /* ============ Modals & dialogs ============ */
@@ -2382,7 +2398,7 @@ body.split-resizing {
 }
 
 .modal-title {
-  font-size: 17px;
+  font-size: 1.0625rem;
   font-weight: 700;
 }
 
@@ -2494,7 +2510,7 @@ body.split-resizing {
 
 .dialog-title {
   min-width: 0;
-  font-size: 19px;
+  font-size: 1.1875rem;
   line-height: 1.35;
   font-weight: 700;
   letter-spacing: 0.01em;
@@ -2502,7 +2518,7 @@ body.split-resizing {
 }
 
 .dialog-message {
-  font-size: 14px;
+  font-size: 0.875rem;
   color: var(--text-2);
   line-height: 1.6;
   margin-bottom: 14px;
@@ -2523,7 +2539,7 @@ body.split-resizing {
 .dialog-detail-host {
   display: block;
   margin-bottom: 2px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 600;
   color: var(--text);
 }
@@ -2531,7 +2547,7 @@ body.split-resizing {
 .dialog-detail-url {
   display: block;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 11.5px;
+  font-size: 0.71875rem;
   color: var(--text-3);
   white-space: nowrap;
   overflow: hidden;
@@ -2547,7 +2563,7 @@ body.split-resizing {
   min-height: 44px;
   padding: 0 14px;
   border-radius: 12px;
-  font-size: 14px;
+  font-size: 0.875rem;
   transition:
     transform 0.12s ease,
     background-color 0.15s ease,
@@ -2576,7 +2592,7 @@ body.split-resizing {
 
 .action-sheet-title {
   padding: 8px 12px 10px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 600;
   color: var(--text-2);
   text-align: center;
@@ -2586,7 +2602,7 @@ body.split-resizing {
   display: block;
   width: 100%;
   padding: 14px;
-  font-size: 16px;
+  font-size: 1rem;
   background: var(--surface);
   border-radius: 12px;
   margin-bottom: 6px;
@@ -2609,7 +2625,7 @@ body.split-resizing {
   display: block;
   width: 100%;
   padding: 14px;
-  font-size: 16px;
+  font-size: 1rem;
   font-weight: 600;
   background: var(--surface);
   border-radius: 12px;
@@ -2649,7 +2665,7 @@ body.split-resizing {
 .text-menu-item {
   padding: 8px 12px;
   border-radius: 8px;
-  font-size: 14px;
+  font-size: 0.875rem;
   white-space: nowrap;
   color: var(--text);
 }
@@ -2677,7 +2693,7 @@ body.split-resizing {
 
 .form-label {
   display: block;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--text-2);
   margin-bottom: 6px;
 }
@@ -2689,7 +2705,7 @@ body.split-resizing {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 10px 12px;
-  font-size: 15px;
+  font-size: 0.9375rem;
   outline: none;
   background: var(--surface);
   transition: border-color 0.15s;
@@ -2709,7 +2725,7 @@ body.split-resizing {
   flex: 1;
   padding: 12px;
   border-radius: 12px;
-  font-size: 15px;
+  font-size: 0.9375rem;
   font-weight: 600;
   background: var(--surface-2);
   color: var(--text);
@@ -2749,7 +2765,7 @@ body.split-resizing {
   gap: 10px;
   padding: 13px 6px;
   border-bottom: 1px solid var(--border);
-  font-size: 15px;
+  font-size: 0.9375rem;
   width: 100%;
   text-align: left;
 }
@@ -2761,7 +2777,7 @@ body.split-resizing {
 .option-row .count {
   margin-left: auto;
   color: var(--text-3);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .option-row .row-check {
@@ -2771,7 +2787,7 @@ body.split-resizing {
 
 /* ============ Settings: save strategy ============ */
 .settings-section-title {
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--text-2);
   margin: 10px 2px 12px;
   font-weight: 600;
@@ -2779,7 +2795,7 @@ body.split-resizing {
 
 .settings-note {
   margin: 8px 2px 0;
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.5;
   color: var(--text-3);
 }
@@ -2805,13 +2821,13 @@ body.split-resizing {
 }
 
 .skill-import-title {
-  font-size: 14px;
+  font-size: 0.875rem;
   font-weight: 500;
   color: var(--text);
 }
 
 .skill-import-desc {
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.5;
   color: var(--text-3);
 }
@@ -2849,7 +2865,7 @@ body.split-resizing {
 /* Compact inline action for draft rows (载入 / 丢弃). */
 .skill-actions .restore-default {
   padding: 6px 8px;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .skill-preview-body {
@@ -2870,13 +2886,13 @@ body.split-resizing {
   border-radius: 999px;
   background: var(--accent-weak);
   color: var(--accent-deep);
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 18px;
 }
 
 .skill-trigger-issue {
   margin: 6px 2px 0;
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.5;
   color: var(--text-3);
 }
@@ -2893,12 +2909,12 @@ body.split-resizing {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 15px;
+  font-size: 0.9375rem;
   color: var(--text);
 }
 
 .skill-tag {
-  font-size: 11px;
+  font-size: 0.6875rem;
   padding: 1px 6px;
   border-radius: 999px;
   background: var(--accent-weak);
@@ -2906,13 +2922,13 @@ body.split-resizing {
 }
 
 .skill-desc {
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.4;
   color: var(--text-2);
 }
 
 .skill-triggers {
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--text-3);
 }
 
@@ -2940,12 +2956,12 @@ body.split-resizing {
 }
 
 .settings-switch-title {
-  font-size: 15px;
+  font-size: 0.9375rem;
   color: var(--text);
 }
 
 .settings-switch-desc {
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-3);
 }
 
@@ -3015,9 +3031,18 @@ body.split-resizing {
   accent-color: var(--accent);
 }
 
+/* Fine-tune slider for the reading type scale (touch target matches chips). */
+.font-fine-slider {
+  display: block;
+  width: 100%;
+  height: 2.75rem;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 .layout-ratio-value {
   flex: none;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-2);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -3039,7 +3064,7 @@ body.split-resizing {
   align-items: center;
   justify-content: center;
   min-height: 0;
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--text-3);
 }
 
@@ -3077,7 +3102,7 @@ body.split-resizing {
 .syntax-token-label {
   flex: 1;
   min-width: 0;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--text);
   white-space: nowrap;
   overflow: hidden;
@@ -3194,7 +3219,7 @@ body.split-resizing {
 }
 
 .color-popover-title {
-  font-size: 14px;
+  font-size: 0.875rem;
   font-weight: 600;
   color: var(--text);
 }
@@ -3202,7 +3227,7 @@ body.split-resizing {
 .color-popover-current {
   margin-left: auto;
   font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace;
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--text-3);
 }
 
@@ -3278,7 +3303,7 @@ body.split-resizing {
   align-items: center;
   gap: 8px;
   margin: 8px 0;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-2);
 }
 
@@ -3325,7 +3350,7 @@ body.split-resizing {
   align-items: center;
   gap: 8px;
   margin: 10px 0 4px;
-  font-size: 11px;
+  font-size: 0.6875rem;
 }
 
 .color-hex-label {
@@ -3341,7 +3366,7 @@ body.split-resizing {
   background: var(--surface-2);
   color: var(--text);
   font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace;
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .color-rgb-readout {
@@ -3380,7 +3405,7 @@ body.split-resizing {
 
 .color-reset {
   padding: 6px 0;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-2);
 }
 
@@ -3393,7 +3418,7 @@ body.split-resizing {
   border-radius: 10px;
   background: var(--accent-weak);
   color: var(--accent-deep);
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 600;
 }
 
@@ -3449,7 +3474,7 @@ body.split-resizing {
 
 .save-label {
   flex: 1;
-  font-size: 15px;
+  font-size: 0.9375rem;
   min-width: 0;
 }
 
@@ -3478,7 +3503,7 @@ body.split-resizing {
 
 .save-desc {
   flex-basis: 100%;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-3);
   padding: 2px 0 8px 28px;
 }
@@ -3494,7 +3519,7 @@ body.split-resizing {
   border-radius: 12px;
   box-shadow: 0 8px 24px rgba(20, 22, 28, 0.14);
   padding: 10px 12px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1.6;
   color: var(--text);
   font-weight: 400;
@@ -3505,7 +3530,7 @@ body.split-resizing {
 
 .hint-bubble.tooltip {
   width: 190px;
-  font-size: 12px;
+  font-size: 0.75rem;
   padding: 8px 10px;
 }
 
@@ -3514,7 +3539,7 @@ body.split-resizing {
 }
 
 .restore-default {
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--accent);
   padding: 12px 2px;
 }
@@ -3588,7 +3613,7 @@ body.split-resizing {
 }
 
 .folder-row .folder-name {
-  font-size: 15px;
+  font-size: 0.9375rem;
   font-weight: 600;
   display: flex;
   align-items: center;
@@ -3598,7 +3623,7 @@ body.split-resizing {
 }
 
 .folder-row .folder-count {
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-3);
 }
 
@@ -3644,7 +3669,7 @@ body.split-resizing {
 }
 
 .todo-title {
-  font-size: 15px;
+  font-size: 0.9375rem;
   word-break: break-all;
 }
 
@@ -3658,7 +3683,7 @@ body.split-resizing {
   align-items: center;
   gap: 6px;
   margin-top: 4px;
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--text-3);
   flex-wrap: wrap;
 }
@@ -3685,11 +3710,11 @@ body.split-resizing {
 /* Snippet insert: a secondary action under the rules counter. */
 .rules-insert {
   margin-top: 8px;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .section-title {
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--text-2);
   margin: 14px 2px 8px;
   font-weight: 600;
@@ -3704,7 +3729,7 @@ body.split-resizing {
 }
 
 .cal-title {
-  font-size: 17px;
+  font-size: 1.0625rem;
   font-weight: 700;
   min-width: 120px;
   text-align: center;
@@ -3714,7 +3739,7 @@ body.split-resizing {
   display: grid;
   grid-template-columns: repeat(7, 1fr);
   text-align: center;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-3);
   padding-bottom: 6px;
 }
@@ -3732,7 +3757,7 @@ body.split-resizing {
   align-items: center;
   justify-content: center;
   border-radius: 12px;
-  font-size: 14px;
+  font-size: 0.875rem;
   position: relative;
   color: var(--text);
 }
@@ -3795,21 +3820,21 @@ body.split-resizing {
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 8px 12px;
-  font-size: 14px;
+  font-size: 0.875rem;
   color: var(--text);
   font-variant-numeric: tabular-nums;
 }
 
 .diary-day-title {
   padding: 0 16px 8px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--text-3);
   flex-shrink: 0;
 }
 
 .diary-meta {
   padding: 0 16px 8px;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-3);
   flex-shrink: 0;
 }
@@ -3824,14 +3849,14 @@ body.split-resizing {
 /* Read-only virtual groups (全部 / AI 工作区). */
 .readonly-hint {
   margin: 0 16px 8px;
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 18px;
   color: var(--text-3);
 }
 
 .source-path {
   margin-bottom: 8px;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-3);
   word-break: break-all;
 }
@@ -3843,7 +3868,7 @@ body.split-resizing {
   overflow: auto;
   background: var(--surface-2);
   border-radius: 10px;
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-all;
@@ -3948,7 +3973,7 @@ body.split-resizing {
   border: none;
   background: none;
   color: var(--text);
-  font-size: 15px;
+  font-size: 0.9375rem;
   text-align: left;
   cursor: pointer;
 }
@@ -3962,7 +3987,7 @@ body.split-resizing {
 
 .folder-picker-count {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .folder-picker-pick {
@@ -3988,7 +4013,7 @@ body.split-resizing {
 .folder-picker-empty {
   padding: 14px 8px;
   color: var(--text-3);
-  font-size: 13px;
+  font-size: 0.8125rem;
   text-align: center;
 }
 
@@ -4006,7 +4031,7 @@ body.split-resizing {
   border: none;
   background: none;
   color: var(--text-3);
-  font-size: 13px;
+  font-size: 0.8125rem;
   padding: 4px 6px;
   border-radius: 8px;
   white-space: nowrap;
@@ -4048,14 +4073,14 @@ body.split-resizing {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 14px;
+  font-size: 0.875rem;
   font-weight: 600;
   color: var(--text);
 }
 
 .diary-entry-preview {
   margin-top: 6px;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-3);
   line-height: 1.5;
   word-break: break-all;
@@ -4072,7 +4097,7 @@ body.split-resizing {
 }
 
 .overdue-badge {
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: #fff;
   background: var(--danger, #e5484d);
   border-radius: 999px;
@@ -4122,20 +4147,20 @@ body.split-resizing {
   border: none;
   background: none;
   padding: 0;
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--text-3);
   cursor: pointer;
 }
 
 .editor-yaml-arrow {
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .editor-yaml-body {
   margin: 0 0 8px;
   max-height: 80px;
   overflow: auto;
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.6;
   color: var(--text-3);
   font-family: var(--font-mono, ui-monospace, monospace);
@@ -4164,7 +4189,7 @@ body.split-resizing {
   border-radius: 12px;
   background: var(--surface-2);
   padding: 10px 40px 10px 12px;
-  font-size: 15px;
+  font-size: 0.9375rem;
   line-height: 1.5;
   color: var(--text);
   resize: none;
@@ -4214,7 +4239,7 @@ body.split-resizing {
   color: var(--text-3);
   border-radius: 999px;
   padding: 7px 12px;
-  font-size: 12px;
+  font-size: 0.75rem;
   cursor: pointer;
   max-width: 60%;
   min-width: 0;
@@ -4251,7 +4276,7 @@ body.split-resizing {
   border: none;
   border-radius: 999px;
   padding: 8px 20px;
-  font-size: 14px;
+  font-size: 0.875rem;
   font-weight: 600;
   cursor: pointer;
 }
@@ -4268,7 +4293,7 @@ body.split-resizing {
   gap: 10px;
   margin-top: 8px;
   padding: 0 2px;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-3);
 }
 
@@ -4284,7 +4309,7 @@ body.split-resizing {
   color: var(--text);
   border-radius: 8px;
   padding: 4px 8px;
-  font-size: 12px;
+  font-size: 0.75rem;
   font-family: inherit;
 }
 
@@ -4308,14 +4333,14 @@ body.split-resizing {
 
 .picker-title {
   text-align: center;
-  font-size: 17px;
+  font-size: 1.0625rem;
   font-weight: 700;
   color: var(--text);
 }
 
 .picker-subtitle {
   text-align: center;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--text-3);
   margin-top: 6px;
 }
@@ -4364,7 +4389,7 @@ body.split-resizing {
   scroll-snap-align: center;
   /* Near-big-far-small: --prox (0..1, center=1) is set imperatively on scroll
      so the size/weight/opacity track the wheel in real time. */
-  font-size: calc(14px + 4px * var(--prox, 0));
+  font-size: calc(0.875rem + 0.25rem * var(--prox, 0));
   font-weight: calc(400 + 250 * var(--prox, 0));
   opacity: calc(0.45 + 0.55 * var(--prox, 0));
   color: var(--text-2);
@@ -4382,13 +4407,13 @@ body.split-resizing {
 }
 
 .wheel-unit {
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 400;
   color: var(--text-3);
 }
 
 .wheel-unit {
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 400;
   color: var(--text-3);
 }
@@ -4409,7 +4434,7 @@ body.split-resizing {
 }
 
 .picker-repeat-label {
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--text-2);
   flex-shrink: 0;
 }
@@ -4428,7 +4453,7 @@ body.split-resizing {
   color: var(--text);
   border-radius: 999px;
   padding: 7px 14px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   cursor: pointer;
 }
 
@@ -4509,7 +4534,7 @@ body.split-resizing {
   border-radius: 50%;
   background: linear-gradient(135deg, #ffb070, var(--accent));
   color: #fff;
-  font-size: 17px;
+  font-size: 1.0625rem;
   font-weight: 700;
   display: flex;
   align-items: center;
@@ -4523,7 +4548,7 @@ body.split-resizing {
 }
 
 .contact-name {
-  font-size: 15px;
+  font-size: 0.9375rem;
   font-weight: 600;
   display: flex;
   align-items: center;
@@ -4531,7 +4556,7 @@ body.split-resizing {
 }
 
 .contact-sub {
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-2);
   margin-top: 2px;
   overflow: hidden;
@@ -4552,7 +4577,7 @@ body.split-resizing {
 .avatar.large {
   width: 56px;
   height: 56px;
-  font-size: 22px;
+  font-size: 1.375rem;
 }
 
 .contact-form-hero-text {
@@ -4561,7 +4586,7 @@ body.split-resizing {
 }
 
 .contact-form-hero-name {
-  font-size: 17px;
+  font-size: 1.0625rem;
   font-weight: 700;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -4569,7 +4594,7 @@ body.split-resizing {
 }
 
 .contact-form-hero-hint {
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-3);
   margin-top: 3px;
   overflow: hidden;
@@ -4628,7 +4653,7 @@ body.split-resizing {
   border: none;
   background: none;
   outline: none;
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 600;
   color: var(--text);
 }
@@ -4645,7 +4670,7 @@ body.split-resizing {
   border-radius: 999px;
   background: var(--surface);
   color: var(--text-2);
-  font-size: 11px;
+  font-size: 0.6875rem;
 }
 
 .tag-mode-btn.multi {
@@ -4688,7 +4713,7 @@ body.split-resizing {
   outline: none;
   background: transparent;
   color: var(--text);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .tag-value-input:focus {
@@ -4705,7 +4730,7 @@ body.split-resizing {
   border: 1px dashed var(--border);
   border-radius: var(--radius-sm);
   color: var(--text-2);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .tag-add-group:active {
@@ -4717,14 +4742,14 @@ body.split-resizing {
   text-align: center;
   color: var(--text-3);
   padding: 40px 20px;
-  font-size: 14px;
+  font-size: 0.875rem;
 }
 
 .empty-state {
   text-align: center;
   color: var(--text-3);
   padding: 70px 20px;
-  font-size: 14px;
+  font-size: 0.875rem;
 }
 
 .empty-state svg {
@@ -4739,7 +4764,7 @@ body.split-resizing {
   transform: translateX(-50%);
   background: rgba(31, 33, 40, 0.92);
   color: #fff;
-  font-size: 13px;
+  font-size: 0.8125rem;
   padding: 10px 18px;
   border-radius: 999px;
   z-index: 200;
@@ -4843,7 +4868,7 @@ body.split-resizing {
   background: var(--surface);
   box-shadow: var(--shadow);
   color: var(--text-3);
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.4;
   pointer-events: none;
   animation: fade-in 0.15s ease;
@@ -5002,8 +5027,8 @@ body.split-resizing {
   border-radius: 999px;
   background: var(--surface);
   color: var(--text-2);
-  font-size: 12px;
-  line-height: 16px;
+  font-size: 0.75rem;
+  line-height: 1rem;
 }
 
 .chat-model-trigger:disabled {
@@ -5032,12 +5057,12 @@ body.split-resizing {
 .chat-model-caret {
   flex: none;
   color: var(--text-3);
-  font-size: 10px;
+  font-size: 0.625rem;
 }
 
 .chat-model-note {
   color: var(--danger);
-  font-size: 11.5px;
+  font-size: 0.71875rem;
 }
 
 .chat-model-popover {
@@ -5059,7 +5084,7 @@ body.split-resizing {
 .chat-model-popover-title {
   padding: 8px 10px 4px;
   color: var(--text-3);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .chat-model-option {
@@ -5089,7 +5114,7 @@ body.split-resizing {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13.5px;
+  font-size: 0.84375rem;
   font-weight: 600;
 }
 
@@ -5099,7 +5124,7 @@ body.split-resizing {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-3);
-  font-size: 11.5px;
+  font-size: 0.71875rem;
 }
 
 .chat-model-option-check {
@@ -5107,7 +5132,7 @@ body.split-resizing {
   grid-row: 1 / span 2;
   align-self: center;
   color: var(--accent);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .chat-page .page-scroll.chat-scroll {
@@ -5240,7 +5265,7 @@ body.split-resizing {
   flex: none;
   padding: 4px 8px 6px;
   color: var(--text-3);
-  font-size: 11.5px;
+  font-size: 0.71875rem;
 }
 
 .chat-index-list {
@@ -5270,7 +5295,7 @@ body.split-resizing {
   border-radius: 10px;
   text-align: left;
   color: var(--text-2);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   line-height: 1.4;
 }
 
@@ -5308,7 +5333,7 @@ body.split-resizing {
   margin: 8px 0;
   border-radius: 16px;
   line-height: 1.55;
-  font-size: 15px;
+  font-size: 0.9375rem;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   animation: page-in 0.16s ease;
@@ -5343,7 +5368,7 @@ body.split-resizing {
 }
 
 /* Agent 正文（text part）走 Markdown：气泡不再保留 pre-wrap，块级排版交给
-   .md-preview，字号与行高继续跟随气泡。工具卡片不进入这条管线。 */
+   .md-preview，字号、字重与行高继续跟随气泡。工具卡片不进入这条管线。 */
 .chat-bubble.markdown {
   white-space: normal;
 }
@@ -5352,6 +5377,7 @@ body.split-resizing {
   padding: 0;
   font-size: inherit;
   line-height: inherit;
+  font-weight: inherit;
   color: inherit;
 }
 
@@ -5396,7 +5422,7 @@ body.split-resizing {
   border-radius: 999px;
   background: transparent;
   color: var(--danger);
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 18px;
 }
 
@@ -5432,7 +5458,7 @@ body.split-resizing {
   padding: 4px 8px;
   border-radius: 8px;
   color: var(--text-3);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 /* Icon-only variant for the compact user toolbar. */
@@ -5476,7 +5502,7 @@ body.split-resizing {
   border-radius: 10px;
   background: var(--surface-2);
   outline: none;
-  font-size: 14.5px;
+  font-size: 0.90625rem;
   line-height: 1.5;
 }
 
@@ -5497,7 +5523,7 @@ body.split-resizing {
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text-2);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
 }
 
 .chat-edit-btn.primary {
@@ -5513,7 +5539,7 @@ body.split-resizing {
 .chat-usage {
   padding: 0 4px;
   color: var(--text-3);
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -5549,7 +5575,7 @@ body.split-resizing {
 
 .chat-context-ring span {
   position: relative;
-  font-size: 9.5px;
+  font-size: 0.59375rem;
   color: var(--text-2);
   font-variant-numeric: tabular-nums;
 }
@@ -5567,7 +5593,7 @@ body.split-resizing {
   background: var(--surface);
   box-shadow: var(--shadow);
   color: var(--text-2);
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.5;
   text-align: left;
   white-space: normal;
@@ -5587,7 +5613,7 @@ body.split-resizing {
   background: var(--surface);
   color: var(--text-2);
   box-shadow: var(--shadow);
-  font-size: 18px;
+  font-size: 1.125rem;
   line-height: 1;
   /* Above messages, the rail (4/6), the tabbar (30) and the composer edge;
      popover layers (55+) still win. */
@@ -5625,7 +5651,7 @@ body.split-resizing {
   padding: 2px 0;
   text-align: left;
   color: var(--text-2);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .chat-trace-group-title {
@@ -5640,14 +5666,14 @@ body.split-resizing {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-3);
-  font-size: 11px;
+  font-size: 0.6875rem;
 }
 
 .chat-trace-group-all {
   flex: none;
   padding: 2px 4px;
   color: var(--accent-deep);
-  font-size: 11px;
+  font-size: 0.6875rem;
 }
 
 /* One indent line per level: the group body and each child detail. */
@@ -5717,14 +5743,14 @@ body.split-resizing {
   overflow: hidden;
   color: var(--text-3);
   font-family: var(--font-mono, ui-monospace, 'SFMono-Regular', Consolas, monospace);
-  font-size: 10.5px;
+  font-size: 0.65625rem;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
 .chat-trace-label {
   font-family: var(--font-mono, ui-monospace, 'SFMono-Regular', Consolas, monospace);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   font-weight: 600;
   color: var(--text);
 }
@@ -5764,7 +5790,7 @@ body.split-resizing {
 .chat-trace-chevron {
   flex: none;
   color: var(--text-3);
-  font-size: 10px;
+  font-size: 0.625rem;
   line-height: 1;
   transition: transform 0.15s ease;
 }
@@ -5782,7 +5808,7 @@ body.split-resizing {
   height: 26px;
   flex: none;
   color: var(--text-3);
-  font-size: 16px;
+  font-size: 1rem;
   line-height: 1;
 }
 
@@ -5793,7 +5819,7 @@ body.split-resizing {
   flex: 1 1 auto;
   min-width: 0;
   font-family: var(--font-mono, ui-monospace, 'SFMono-Regular', Consolas, monospace);
-  font-size: 11.5px;
+  font-size: 0.71875rem;
 }
 
 .chat-file-dir {
@@ -5876,7 +5902,7 @@ body.split-resizing {
   /* Same horizontal padding as the card head keeps both levels aligned. */
   padding: 8px 12px;
   color: var(--text-2);
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.65;
   white-space: pre-wrap;
   word-break: break-word;
@@ -5940,7 +5966,7 @@ body.split-resizing {
   border-radius: 999px;
   background: var(--surface-2);
   color: var(--text-3);
-  font-size: 10.5px;
+  font-size: 0.65625rem;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -5955,7 +5981,7 @@ body.split-resizing {
   border-radius: 999px;
   background: var(--surface-2);
   color: var(--text-3);
-  font-size: 10.5px;
+  font-size: 0.65625rem;
   white-space: nowrap;
 }
 
@@ -5989,7 +6015,7 @@ body.split-resizing {
   display: flex;
   gap: 12px;
   padding: 1px 2px 5px;
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-variant-numeric: tabular-nums;
 }
 
@@ -6051,7 +6077,7 @@ body.split-resizing {
   display: flex;
   gap: 6px;
   flex: none;
-  font-size: 12px;
+  font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
 }
 
@@ -6065,7 +6091,7 @@ body.split-resizing {
 .diff-file-head .restore-default,
 .version-actions .restore-default {
   padding: 6px 10px;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .chat-composer {
@@ -6171,7 +6197,7 @@ body.kb-open .chat-page.expanded .chat-composer {
 .chat-resume {
   align-self: flex-start;
   padding: 4px 10px;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--warn, #b45309);
   background: var(--warn-bg, #fffbeb);
   border: 1px solid var(--warn-border, #fcd34d);
@@ -6232,7 +6258,7 @@ body.kb-open .chat-page.expanded .chat-composer {
   border: none;
   background: none;
   color: #fff;
-  font-size: 14px;
+  font-size: 0.875rem;
   font-weight: 600;
   letter-spacing: 0.01em;
 }
@@ -6250,7 +6276,7 @@ body.kb-open .chat-page.expanded .chat-composer {
   border-left: 1px solid rgba(255, 255, 255, 0.28);
   background: none;
   color: #fff;
-  font-size: 11px;
+  font-size: 0.6875rem;
   line-height: 1;
 }
 
@@ -6275,7 +6301,7 @@ body.kb-open .chat-page.expanded .chat-composer {
 
 .chat-queue-menu-title {
   padding: 4px 10px 6px;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-3);
 }
 
@@ -6301,13 +6327,13 @@ body.kb-open .chat-page.expanded .chat-composer {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 14px;
+  font-size: 0.875rem;
   font-weight: 600;
   color: var(--text);
 }
 
 .chat-queue-option-note {
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.4;
   color: var(--text-3);
 }
@@ -6338,7 +6364,7 @@ body.kb-open .chat-page.expanded .chat-composer {
 
 .chat-queue-count {
   flex: 0 0 auto;
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 600;
   color: var(--text-2);
   font-variant-numeric: tabular-nums;
@@ -6351,13 +6377,13 @@ body.kb-open .chat-page.expanded .chat-composer {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-3);
 }
 
 .chat-queue-caret {
   flex: 0 0 auto;
-  font-size: 10px;
+  font-size: 0.625rem;
   color: var(--text-3);
 }
 
@@ -6411,7 +6437,7 @@ body.kb-open .chat-page.expanded .chat-composer {
   flex: 0 0 auto;
   padding: 1px 6px;
   border-radius: 999px;
-  font-size: 11px;
+  font-size: 0.6875rem;
   line-height: 1.5;
 }
 
@@ -6431,7 +6457,7 @@ body.kb-open .chat-page.expanded .chat-composer {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--text);
 }
 
@@ -6440,7 +6466,7 @@ body.kb-open .chat-page.expanded .chat-composer {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--text-3);
 }
 
@@ -6475,7 +6501,7 @@ body.kb-open .chat-page.expanded .chat-composer {
   border-radius: 50%;
   background: none;
   color: var(--text-3);
-  font-size: 15px;
+  font-size: 0.9375rem;
   line-height: 1;
 }
 
@@ -6494,7 +6520,7 @@ body.kb-open .chat-page.expanded .chat-composer {
   border-radius: 10px;
   background: rgba(20, 22, 28, 0.92);
   color: #fff;
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.4;
   pointer-events: none;
   box-shadow: 0 6px 18px rgba(20, 22, 28, 0.24);
@@ -6507,7 +6533,7 @@ body.kb-open .chat-page.expanded .chat-composer {
   border-radius: 999px;
   background: var(--accent-weak);
   color: var(--accent-deep);
-  font-size: 12px;
+  font-size: 0.75rem;
   animation: queue-guide-in 200ms ease;
 }
 
@@ -6553,7 +6579,7 @@ body.kb-open .chat-page.expanded .chat-composer {
   background: transparent;
   color: var(--text);
   font: inherit;
-  font-size: 15px;
+  font-size: 0.9375rem;
   line-height: 1.45;
   resize: none;
   outline: none;
@@ -6650,7 +6676,7 @@ body.kb-open .chat-page.expanded .chat-composer {
   border-radius: 50%;
   background: rgba(20, 22, 28, 0.6);
   color: #fff;
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1;
 }
 
@@ -6705,7 +6731,7 @@ body.kb-open .chat-page.expanded .chat-composer {
 .chat-conv-popover-head {
   flex: 0 0 auto;
   padding: 4px 10px 8px;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-3);
 }
 
@@ -6786,7 +6812,7 @@ body.kb-open .chat-page.expanded .chat-composer {
 }
 
 .chat-conv-title {
-  font-size: 14.5px;
+  font-size: 0.90625rem;
   font-weight: 600;
   max-width: 100%;
   overflow: hidden;
@@ -6795,7 +6821,7 @@ body.kb-open .chat-page.expanded .chat-composer {
 }
 
 .chat-conv-meta {
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-2);
 }
 
@@ -6832,7 +6858,7 @@ body.kb-open .chat-page.expanded .chat-composer {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 15px;
+  font-size: 0.9375rem;
   font-weight: 600;
   overflow-wrap: anywhere;
 }
@@ -6844,12 +6870,12 @@ body.kb-open .chat-page.expanded .chat-composer {
   border-radius: 999px;
   background: var(--surface);
   color: var(--accent);
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 600;
 }
 
 .model-meta {
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-2);
   overflow-wrap: anywhere;
 }
@@ -6898,7 +6924,7 @@ body.kb-open .chat-page.expanded .chat-composer {
   gap: 8px;
   padding: 7px 9px;
   border-radius: 8px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--text-2);
   overflow-wrap: anywhere;
 }
@@ -6924,7 +6950,7 @@ body.kb-open .chat-page.expanded .chat-composer {
   background: var(--surface-2);
   color: var(--text-2);
   font-family: var(--font-mono, ui-monospace, 'SFMono-Regular', Consolas, monospace);
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -6964,7 +6990,7 @@ body.kb-open .chat-page.expanded .chat-composer {
   position: absolute;
   right: 12px;
   color: var(--text-3);
-  font-size: 12px;
+  font-size: 0.75rem;
   pointer-events: none;
 }
 
@@ -6980,7 +7006,7 @@ body.kb-open .chat-page.expanded .chat-composer {
   border-radius: 999px;
   background: var(--surface);
   color: var(--text-2);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .chip-btn.active {
@@ -7001,7 +7027,7 @@ body.kb-open .chat-page.expanded .chat-composer {
 
 .param-label {
   flex: 0 0 150px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--text-2);
 }
 
@@ -7025,7 +7051,7 @@ body.kb-open .chat-page.expanded .chat-composer {
 
 .param-json {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .param-error {
@@ -7369,6 +7395,20 @@ body.kb-open .chat-page.expanded .chat-composer {
   margin-bottom: 4px;
   font-size: 0.8125rem;
   color: var(--text-2);
+}
+
+/* Live specimen that mirrors the note-body typography while dragging. */
+.font-scale-sample {
+  margin: 2px 0 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  font-size: var(--reading-size);
+  line-height: var(--reading-leading);
+  font-weight: var(--reading-weight);
+  -webkit-font-smoothing: auto;
+  color: var(--text);
+  overflow-wrap: anywhere;
 }
 
 .settings-detail-note {
