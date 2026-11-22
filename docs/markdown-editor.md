@@ -32,6 +32,7 @@
 
 - 行号 gutter 由 CodeMirror 渲染，与内容共用同一个滚动容器，天然同步滚动。
 - 行号使用等宽数字，活动行号以强调色显示。
+- 文档末尾保留约 `18vh` 的空白尾区（scroller padding，不含行号与语法高亮）：滚到最底后在最后一行下方任意空白处单击，光标直接落到文档末尾，方便继续回车新段。
 
 ### 3.2 智能视觉折行
 
@@ -51,16 +52,58 @@
 - 主题全部使用应用 CSS 变量（`--text`、`--surface-2`、`--accent` 等），浅色/深色主题自动切换。
 - 活动行背景高亮、行号强调、光标 2px 强调色、选区半透明强调色。
 - 行内代码、标题、链接、引用、列表标记、Markdown 标点均有独立配色。
+- 标题符号、有序 / 无序 / 待办 / 引用符号在设置页可分别取色；列表与引用每深一层，符号透明度递减一档（depth 1–5）。
 - 正文使用等宽字体栈，行高 1.75；预览使用阅读字体。
 
 ### 3.5 Markdown 语法高亮与实时提示
 
 - 基于 Lezer Markdown 语法树实时高亮，无需等待解析完成。
+- 编辑器使用 `@codemirror/lang-markdown` 的扩展语言作为 base（CommonMark + GFM 任务列表 / 表格 / 删除线 / 自动链接 + 上下标 / Emoji），与预览侧支持的语法保持一致。
+- 标题级别、列表类型与嵌套深度、待办勾选状态、引用深度由语法树装饰插件识别，补充 Lezer 标签层无法表达的节点级信息。
 - 实时语法提示：
   - 行首输入 `#`、`-`、`*`、`+`、`>` 时弹出对应 Markdown 结构建议；
   - 硬件键盘可用 `Ctrl+Space` 主动唤起全部片段（代码块、表格、加粗、链接等）；
   - 未闭合的围栏代码块会以波浪线提示“代码块未闭合”；
   - 括号匹配、选中内容同词高亮由 CodeMirror 提供。
+
+#### 3.5.1 语法 token 全量清单（按当前 parser 核对）
+
+状态说明：`已覆盖`＝现有高亮已生效；`本轮补`＝新增节点级 class / 设置项；`解析器不支持`＝Lezer 不产出节点，仅预览侧渲染；`待排期`＝ parser 有节点但本轮不补。
+
+| 分组 | 语法 | Lezer 节点 / 标签 | 现状 | 本轮动作 |
+| --- | --- | --- | --- | --- |
+| 块级 | ATX H1–H6 | `ATXHeading1..6/...` → `heading1..6` | 已覆盖（H5/H6 共用 heading4） | 标题符号 `HeaderMark` 按级别补色 |
+| 块级 | Setext H1/H2 | `SetextHeading1/2` → `heading1/2` | 已覆盖 | 同上（含下划线 `HeaderMark`） |
+| 块级 | 段落 | `Paragraph` → `content` | 正文色 | — |
+| 块级 | 引用 / 嵌套引用 | `Blockquote/...` → `quote`；`QuoteMark` → `processingInstruction` | 内容有引用色，符号无层级 | 本轮补 `QuoteMark` 深度色 |
+| 块级 | 围栏代码块 | `FencedCode`；`CodeText` → `monospace`；`CodeInfo` → `labelName` | 代码内容已覆盖 | 待排期 |
+| 块级 | 行内代码 | `InlineCode` → `monospace`；`CodeMark` → `processingInstruction` | 已覆盖 | — |
+| 块级 | 水平线 | `HorizontalRule` → `contentSeparator` | 已覆盖 | — |
+| 块级 | 表格 | `TableHeader` → `heading`；`TableCell` → `content`；`TableDelimiter` → `processingInstruction` | 部分覆盖 | 待排期 |
+| 块级 | HTML 块 / 标签 | `HTMLBlock / HTMLTag`（无标签） | 正文色 | 待排期 |
+| 块级 | 独立公式 `$$` | Lezer 不解析 | 预览 KaTeX 专属 | 解析器不支持 |
+| 块级 | 注释 | `Comment / CommentBlock` → `comment` | 正文色 | 待排期 |
+| 列表 | 无序 `-` `*` `+` | `ListMark`（父级 `BulletList`） | 统一语法灰 | 本轮补 `list` 色 + 深度色 |
+| 列表 | 有序 `1.` | `ListMark`（父级 `OrderedList`） | 与无序同色 | 本轮补 `ordered` 色 + 深度色 |
+| 列表 | 待办 `- [ ]` / `- [x]` | `Task` → `list`；`TaskMarker` → `atom` | `[ ]` 无规则 | 本轮补 `task` 色；`[x]` 追加弱化态 |
+| 列表 | 子列表 2/4 级 | 祖先链 `BulletList / OrderedList` | 无层级区分 | 本轮补 `cm-md-depth-1..5` |
+| 列表 | 定义列表 | Lezer 不解析（预览专属） | 无 | 解析器不支持 |
+| 行内 | 加粗 / 斜体 / 粗斜 | `StrongEmphasis` → `strong`；`Emphasis` → `emphasis` | 已覆盖 | — |
+| 行内 | 行内代码 | `InlineCode` → `monospace` | 已覆盖 | — |
+| 行内 | 删除线 | `Strikethrough/...` → `strikethrough` | 已覆盖 | — |
+| 行内 | 链接 / 图片 | `Link/Image` → `link`；`URL` → `url`；`LinkLabel` → `labelName`；`LinkTitle` → `string` | 链接与 URL 已覆盖 | 待排期 |
+| 行内 | 上标 / 下标 | `Superscript/Subscript` → `special(content)` | 内容无独立色 | 待排期 |
+| 行内 | Emoji | `Emoji` → `character` | 正文色 | 待排期 |
+| 行内 | 转义 / 实体 | `Escape` → `escape`；`Entity` → `character` | 正文色 | 待排期 |
+| 行内 | `==高亮==`、`++插入++`、脚注 | Lezer 不解析（预览扩展专属） | 无 | 解析器不支持 |
+| 行内 | Wiki `[[ ]]` | 预览也未启用 | 无 | 待排期（新特性） |
+| 装饰符 | `HeaderMark` | `ATXHeadingN / SetextHeadingN` 子节点 | 统一语法灰 | 本轮补：按标题级别取 heading1–4 色，字重 600 |
+| 装饰符 | `QuoteMark` | `Blockquote` 子节点 | 统一语法灰 | 本轮补：quote 色 + depth 1–5 递减透明度 |
+| 装饰符 | `ListMark`（无序 / 有序） | `BulletList / OrderedList` 子节点 | 统一语法灰 | 本轮补：list / ordered 色 + depth 1–5 递减透明度 |
+| 装饰符 | `TaskMarker` | `Task` 子节点 → `atom` | 默认正文色 | 本轮补：task 色；已完成再降透明度 |
+| 装饰符 | `EmphasisMark / CodeMark / LinkMark / StrikethroughMark / SuperscriptMark / SubscriptMark / TableDelimiter / HardBreak` | `processingInstruction` | 已覆盖 | 统一走 `punctuation` 语法灰（default 由 text3 提到 text2） |
+
+快捷语法栏行为：`标题` 按 H1 → H2 → … → H6 → 取消循环；`有序` 插入 `1. `。插入前缀后光标停在符号 + 空格右侧，多行选区则统一落到最后一行正文末尾。
 
 ### 3.6 快捷键
 

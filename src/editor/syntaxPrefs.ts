@@ -16,6 +16,8 @@ export type SyntaxToken =
   | 'code'
   | 'quote'
   | 'list'
+  | 'ordered'
+  | 'task'
   | 'punctuation'
 
 /** Theme-aware color slots; values resolve through CSS variables. */
@@ -51,7 +53,9 @@ export const SYNTAX_TOKENS: Array<{ key: SyntaxToken; label: string }> = [
   { key: 'link', label: '链接 / 网址' },
   { key: 'code', label: '行内代码' },
   { key: 'quote', label: '引用' },
-  { key: 'list', label: '列表标记' },
+  { key: 'list', label: '无序列表标记' },
+  { key: 'ordered', label: '有序列表标记' },
+  { key: 'task', label: '待办标记' },
   { key: 'punctuation', label: 'Markdown 符号' },
 ]
 
@@ -75,7 +79,9 @@ const PALETTE_COLORS: Record<SyntaxPaletteKey, Record<SyntaxToken, SyntaxColorKe
     code: 'accentDeep',
     quote: 'text2',
     list: 'accent',
-    punctuation: 'text3',
+    ordered: 'info',
+    task: 'text',
+    punctuation: 'text2',
   },
   vivid: {
     heading1: 'accentDeep',
@@ -89,6 +95,8 @@ const PALETTE_COLORS: Record<SyntaxPaletteKey, Record<SyntaxToken, SyntaxColorKe
     code: 'accent',
     quote: 'info',
     list: 'accentDeep',
+    ordered: 'info',
+    task: 'accent',
     punctuation: 'text2',
   },
   muted: {
@@ -103,6 +111,8 @@ const PALETTE_COLORS: Record<SyntaxPaletteKey, Record<SyntaxToken, SyntaxColorKe
     code: 'text2',
     quote: 'text3',
     list: 'text2',
+    ordered: 'text2',
+    task: 'text',
     punctuation: 'text3',
   },
   contrast: {
@@ -117,6 +127,8 @@ const PALETTE_COLORS: Record<SyntaxPaletteKey, Record<SyntaxToken, SyntaxColorKe
     code: 'accentDeep',
     quote: 'text',
     list: 'accent',
+    ordered: 'info',
+    task: 'text',
     punctuation: 'text2',
   },
 }

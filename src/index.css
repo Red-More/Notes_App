@@ -6677,6 +6677,10 @@ body.kb-open .chat-page.expanded .chat-composer {
 .settings-page {
   --settings-radius: 20px;
   --settings-icon-size: 2.5rem;
+  /* One gutter / rhythm shared by the tab strip and the grouped cards. */
+  --settings-gutter: 16px;
+  --settings-space: 8px;
+  --settings-nav-height: 3.75rem;
   background: var(--bg);
 }
 
@@ -6732,25 +6736,28 @@ body.kb-open .chat-page.expanded .chat-composer {
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: none;
-  /* Keep the last group clear of the fixed tab bar and gesture area. */
-  padding: 6px 16px calc(var(--tabbar-height) + 24px + var(--nav-clearance));
+  /* The tab strip is the first in-flow row, so no top gap before it. */
+  padding: 0 var(--settings-gutter) calc(var(--tabbar-height) + 24px + var(--nav-clearance));
 }
 
 .settings-scroll::-webkit-scrollbar {
   display: none;
 }
 
-/* Small-screen jump bar: keeps eight task groups reachable without scrolling. */
+/* Sticky index strip: in normal flow, pinned vertically, scrolls horizontally
+   on its own. Its background only spans the card column, so it never reads as
+   an overlay floating over the content. */
 .settings-quicknav {
   position: sticky;
   top: 0;
   z-index: 5;
   display: flex;
-  gap: 8px;
+  gap: 4px;
   overflow-x: auto;
-  margin: 0 -16px 2px;
-  padding: 8px 16px 10px;
+  margin: 0;
+  padding: 0;
   background: var(--bg);
+  box-shadow: inset 0 -1px 0 var(--border);
   scrollbar-width: none;
 }
 
@@ -6760,24 +6767,32 @@ body.kb-open .chat-page.expanded .chat-composer {
 
 .settings-quicknav-chip {
   flex: none;
-  min-height: 2.75rem;
-  padding: 0 16px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--surface);
+  min-height: var(--settings-nav-height);
+  padding: 0 12px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--text-2);
   font-size: 0.875rem;
+  box-shadow: inset 0 -2px 0 transparent;
   touch-action: manipulation;
 }
 
 .settings-quicknav-chip:active {
-  background: var(--surface-2);
   color: var(--text);
+  background: var(--surface-2);
+}
+
+.settings-quicknav-chip.active {
+  color: var(--accent-deep);
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 var(--accent);
 }
 
 .settings-group {
-  margin: 6px 0 18px;
-  scroll-margin-top: 4.5rem;
+  margin: var(--settings-space) 0 18px;
+  /* Leave room for the sticky strip when jumping to a group. */
+  scroll-margin-top: calc(var(--settings-nav-height) + var(--settings-space));
 }
 
 .settings-group-title {

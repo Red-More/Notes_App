@@ -52,12 +52,17 @@ import {
   type CompletionResult,
 } from '@codemirror/autocomplete'
 import { linter } from '@codemirror/lint'
-import { markdown } from '@codemirror/lang-markdown'
+import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { languages } from '@codemirror/language-data'
 import { indentationMarkers } from '@replit/codemirror-indentation-markers'
 import { tags, type Tag } from '@lezer/highlight'
 import { findUnclosedFence } from '../editor/diagnostics'
-import { insertMarkdownLink, toggleInlineMarker } from '../editor/commands'
+import {
+  cycleHeadingRange,
+  insertMarkdownLink,
+  toggleInlineMarker,
+  toggleLinePrefixRange,
+} from '../editor/commands'
 import { indentUnitFor, type EditorPrefs } from '../editor/prefs'
 import {
   SYNTAX_TOKENS,
@@ -68,6 +73,7 @@ import {
   type SyntaxPrefs,
   type SyntaxToken,
 } from '../editor/syntaxPrefs'
+import { buildMarkerTheme, syntaxMarkPlugin } from '../editor/syntaxMarks'
 import { assetDataUrl } from '../assets'
 import { requestImageZoom } from '../system/imageZoom'
 import { hapticTap } from '../system/haptics'
@@ -95,6 +101,8 @@ export interface MarkdownEditorHandle {
   insertLink: () => void
   /** Toggle a line prefix such as `# `, `- ` or `> ` on the selected lines. */
   toggleLinePrefix: (prefix: string) => void
+  /** Cycle heading levels (H1→…→H6→off) on the selected lines. */
+  cycleHeading: () => void
   /** 1-based line at the top of the editor viewport. */
   getTopLine: () => number
   /** Whether the document currently has a non-empty selection. */
@@ -152,10 +160,18 @@ const editorTheme = EditorView.theme({
     lineHeight: '1.75',
     overflow: 'auto',
     overscrollBehavior: 'contain',
-    padding: '4px 0 12px',
+    // Proportional tail below the document: clickable, no line numbers, no syntax.
+    padding: '4px 0 18vh',
   },
   '.cm-content': { padding: '0 4px', caretColor: 'var(--accent)' },
   '.cm-line': { padding: '0 6px' },
+  // Deeper list / quote markers fade one step at a time.
+  '.cm-md-depth-1': { opacity: '1' },
+  '.cm-md-depth-2': { opacity: '0.8' },
+  '.cm-md-depth-3': { opacity: '0.64' },
+  '.cm-md-depth-4': { opacity: '0.52' },
+  '.cm-md-depth-5': { opacity: '0.42' },
+  '.cm-md-task-done': { opacity: '0.5' },
   '.cm-gutters': {
     backgroundColor: 'transparent',
     border: 'none',
@@ -202,8 +218,11 @@ const editorTheme = EditorView.theme({
   '.cm-lintRange-warning': { textDecoration: 'underline wavy var(--accent)' },
 })
 
-/** Lezer tags each configurable token category covers. */
-const TOKEN_TAGS: Record<SyntaxToken, Tag | readonly Tag[]> = {
+/**
+ * Lezer tags each configurable token category covers. Ordered / task markers
+ * have no matching tag: they are painted by `syntaxMarks.ts` + the marker theme.
+ */
+const TOKEN_TAGS: Partial<Record<SyntaxToken, Tag | readonly Tag[]>> = {
   heading1: tags.heading1,
   heading2: tags.heading2,
   heading3: tags.heading3,
@@ -214,7 +233,8 @@ const TOKEN_TAGS: Record<SyntaxToken, Tag | readonly Tag[]> = {
   link: [tags.link, tags.url],
   code: tags.monospace,
   quote: tags.quote,
-  list: tags.list,
+  // `list` only paints markers through syntaxMarks; leaving tags.list out keeps
+  // list item text in the body color so the markers stay legible per depth.
   punctuation: [tags.processingInstruction, tags.contentSeparator, tags.punctuation],
 }
 
@@ -234,6 +254,8 @@ const TOKEN_BASE_STYLE: Record<
   code: {},
   quote: { fontStyle: 'italic' },
   list: {},
+  ordered: {},
+  task: {},
   punctuation: {},
 }
 
@@ -243,14 +265,15 @@ const TOKEN_BASE_STYLE: Record<
  * they fall back to the plain text color.
  */
 function buildSyntaxHighlight(prefs: SyntaxPrefs) {
-  const styles = SYNTAX_TOKENS.filter((token) => !prefs.disabled.includes(token.key)).map(
-    (token) => ({
-      tag: TOKEN_TAGS[token.key],
-      color: syntaxColorCss(resolveSyntaxColor(prefs, token.key)),
-      ...TOKEN_BASE_STYLE[token.key],
-    }),
-  )
-  return syntaxHighlighting(HighlightStyle.define(styles))
+  const styles = SYNTAX_TOKENS.filter(
+    (token) => !prefs.disabled.includes(token.key) && TOKEN_TAGS[token.key] != null,
+  ).map((token) => ({
+    tag: TOKEN_TAGS[token.key]!,
+    color: syntaxColorCss(resolveSyntaxColor(prefs, token.key)),
+    ...TOKEN_BASE_STYLE[token.key],
+  }))
+  // Marker colors are node-scoped, so they ride along in the same compartment.
+  return [syntaxHighlighting(HighlightStyle.define(styles)), buildMarkerTheme(prefs)]
 }
 
 /** Swapped at runtime when the syntax preferences change. */
@@ -337,30 +360,19 @@ function linePosition(view: EditorView, line: number): number {
   return view.state.doc.line(clamped).from
 }
 
-/**
- * Toggle `prefix` at the start of every selected line. Collapsed selections
- * act on the current line; a selection ending exactly at a line start does not
- * include that line.
- */
+/** Toggle `prefix` on the selected lines and keep the caret after the marker. */
 function toggleLinePrefix(view: EditorView, prefix: string): void {
-  const { state } = view
-  const selection = state.selection.main
-  const firstNumber = state.doc.lineAt(selection.from).number
-  let lastNumber = state.doc.lineAt(selection.to).number
-  if (selection.to === state.doc.line(lastNumber).from && lastNumber > firstNumber) {
-    lastNumber -= 1
-  }
-  const numbers: number[] = []
-  for (let number = firstNumber; number <= lastNumber; number += 1) numbers.push(number)
+  const spec = view.state.changeByRange((range) =>
+    toggleLinePrefixRange(view.state, range, prefix),
+  )
+  view.dispatch(spec, { userEvent: 'input.format' })
+  view.focus()
+}
 
-  const allPrefixed = numbers.every((number) => state.doc.line(number).text.startsWith(prefix))
-  const changes = numbers.map((number) => {
-    const line = state.doc.line(number)
-    return allPrefixed
-      ? { from: line.from, to: line.from + prefix.length, insert: '' }
-      : { from: line.from, insert: prefix }
-  })
-  view.dispatch({ changes, userEvent: 'input.format' })
+/** Cycle ATX heading levels on the selected lines. */
+function cycleHeading(view: EditorView): void {
+  const spec = view.state.changeByRange((range) => cycleHeadingRange(view.state, range))
+  view.dispatch(spec, { userEvent: 'input.format' })
   view.focus()
 }
 
@@ -515,7 +527,10 @@ function buildExtensions(prefs: EditorPrefs, refs: EditorRefs) {
         indentWithTab,
       ]),
     ),
-    markdown({ codeLanguages: languages }),
+    // The extended base adds GFM (task lists, tables, strikethrough),
+    // superscript / subscript and emoji so the editor matches preview syntax.
+    markdown({ base: markdownLanguage, codeLanguages: languages }),
+    syntaxMarkPlugin,
     assetImagePlugin,
     // Pictures arrive as files on desktop and as base64 <img> markup on some
     // mobile WebViews; the Android shell covers clips the page cannot read.
@@ -684,6 +699,22 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
       }
       view.scrollDOM.addEventListener('scroll', onScroll, { passive: true })
 
+      // Blank tail below the last line: clicking it drops the caret at the end
+      // of the document. The area is scroller padding, so it has no line
+      // number, no syntax highlight and no Markdown auto-conversion.
+      const onTailPointerDown = (event: PointerEvent) => {
+        if (event.target !== view.scrollDOM) return
+        if (event.pointerType === 'mouse' && event.button !== 0) return
+        const scrollerRect = view.scrollDOM.getBoundingClientRect()
+        // Ignore the scrollbar strip on the right edge.
+        if (event.clientX > scrollerRect.right - 12) return
+        if (event.clientY <= view.contentDOM.getBoundingClientRect().bottom) return
+        event.preventDefault()
+        view.dispatch({ selection: { anchor: view.state.doc.length } })
+        view.focus()
+      }
+      view.scrollDOM.addEventListener('pointerdown', onTailPointerDown)
+
       // Long press: a still press on the text opens the editor menu, the same
       // way a desktop right click does. Moving the finger cancels it, so
       // selecting text by dragging still works.
@@ -724,6 +755,7 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
         content.removeEventListener('pointermove', onPressMove)
         content.removeEventListener('pointerup', cancelPress)
         content.removeEventListener('pointercancel', cancelPress)
+        view.scrollDOM.removeEventListener('pointerdown', onTailPointerDown)
         view.scrollDOM.removeEventListener('scroll', onScroll)
         view.destroy()
         viewRef.current = null
@@ -820,6 +852,10 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
         toggleLinePrefix: (prefix) => {
           const view = viewRef.current
           if (view) toggleLinePrefix(view, prefix)
+        },
+        cycleHeading: () => {
+          const view = viewRef.current
+          if (view) cycleHeading(view)
         },
         getTopLine: () => {
           const view = viewRef.current

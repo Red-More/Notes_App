@@ -122,6 +122,7 @@ type QuickAction =
   | 'bold'
   | 'italic'
   | 'list'
+  | 'ordered'
   | 'task'
   | 'quote'
   | 'code'
@@ -133,6 +134,7 @@ const QUICK_ACTIONS: Array<{ action: QuickAction; label: string }> = [
   { action: 'bold', label: '加粗' },
   { action: 'italic', label: '斜体' },
   { action: 'list', label: '列表' },
+  { action: 'ordered', label: '有序' },
   { action: 'task', label: '待办' },
   { action: 'quote', label: '引用' },
   { action: 'code', label: '代码' },
@@ -815,7 +817,7 @@ export default function NoteEditorPage({
     const editor = editorRef.current
     switch (action) {
       case 'heading':
-        editor?.toggleLinePrefix('# ')
+        editor?.cycleHeading()
         break
       case 'bold':
         editor?.toggleInline('**')
@@ -825,6 +827,9 @@ export default function NoteEditorPage({
         break
       case 'list':
         editor?.toggleLinePrefix('- ')
+        break
+      case 'ordered':
+        editor?.toggleLinePrefix('1. ')
         break
       case 'task':
         editor?.toggleLinePrefix('- [ ] ')
