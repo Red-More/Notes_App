@@ -309,6 +309,17 @@ export const IconSettings = (p: IconProps) => (
   </svg>
 )
 
+/** Palette: used by the syntax color picker button. */
+export const IconPalette = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M12 21a9 9 0 1 1 9-9c0 2.2-1.8 3-3.5 3H16a2 2 0 0 0-1.5 3.3c.4.48.5 1.1.5 1.7a2 2 0 0 1-2 2z" />
+    <circle cx="7.5" cy="10.5" r="1" fill="currentColor" stroke="none" />
+    <circle cx="9.5" cy="6.8" r="1" fill="currentColor" stroke="none" />
+    <circle cx="14.2" cy="6.2" r="1" fill="currentColor" stroke="none" />
+    <circle cx="17.4" cy="9.4" r="1" fill="currentColor" stroke="none" />
+  </svg>
+)
+
 export const IconChat = (p: IconProps) => (
   <svg {...base(p)}>
     <path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5 8.5 8.5 0 0 1-3.9-.9L3 21l1.9-5.6a8.5 8.5 0 0 1-.9-3.9A8.38 8.38 0 0 1 12.5 3 8.38 8.38 0 0 1 8.5 8.5z" />

@@ -1,9 +1,4 @@
-import {
-  forwardRef,
-  useEffect,
-  useImperativeHandle,
-  useRef,
-} from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react'
 import { Compartment, EditorState, Prec, RangeSetBuilder } from '@codemirror/state'
 import {
   Decoration,
@@ -74,6 +69,7 @@ import {
   type SyntaxToken,
 } from '../editor/syntaxPrefs'
 import { buildMarkerTheme, syntaxMarkPlugin } from '../editor/syntaxMarks'
+import { attachElasticOverscroll } from '../editor/elasticOverscroll'
 import { assetDataUrl } from '../assets'
 import { requestImageZoom } from '../system/imageZoom'
 import { hapticTap } from '../system/haptics'
@@ -171,7 +167,24 @@ const editorTheme = EditorView.theme({
   '.cm-md-depth-3': { opacity: '0.64' },
   '.cm-md-depth-4': { opacity: '0.52' },
   '.cm-md-depth-5': { opacity: '0.42' },
-  '.cm-md-task-done': { opacity: '0.5' },
+  // Inline code shape; its color and background live in the marker theme so a
+  // disabled token can drop both without leaving a stray highlight box.
+  '.cm-md-inline-code': { borderRadius: '4px', padding: '0 3px' },
+  // Elastic overscroll: content and gutters shift together, then spring back.
+  '.cm-scroller.md-overscroll .cm-content': {
+    transform: 'translateY(var(--md-overscroll, 0px))',
+    willChange: 'transform',
+  },
+  '.cm-scroller.md-overscroll .cm-gutters': {
+    transform: 'translateY(var(--md-overscroll, 0px))',
+    willChange: 'transform',
+  },
+  '.cm-scroller.md-overscroll-settling .cm-content': {
+    transition: 'transform 0.4s cubic-bezier(0.22, 1, 0.36, 1)',
+  },
+  '.cm-scroller.md-overscroll-settling .cm-gutters': {
+    transition: 'transform 0.4s cubic-bezier(0.22, 1, 0.36, 1)',
+  },
   '.cm-gutters': {
     backgroundColor: 'transparent',
     border: 'none',
@@ -226,16 +239,17 @@ const TOKEN_TAGS: Partial<Record<SyntaxToken, Tag | readonly Tag[]>> = {
   heading1: tags.heading1,
   heading2: tags.heading2,
   heading3: tags.heading3,
-  heading4: [tags.heading4, tags.heading5, tags.heading6],
+  heading4: tags.heading4,
+  heading5: tags.heading5,
+  heading6: tags.heading6,
   strong: tags.strong,
   emphasis: tags.emphasis,
   strikethrough: tags.strikethrough,
   link: [tags.link, tags.url],
-  code: tags.monospace,
   quote: tags.quote,
-  // `list` only paints markers through syntaxMarks; leaving tags.list out keeps
-  // list item text in the body color so the markers stay legible per depth.
-  punctuation: [tags.processingInstruction, tags.contentSeparator, tags.punctuation],
+  hr: tags.contentSeparator,
+  // `list` / `code` / `codeBlock` / `task` are painted through syntaxMarks.
+  punctuation: [tags.processingInstruction, tags.punctuation],
 }
 
 /** Weight / decoration that stays fixed while the user tunes colors. */
@@ -247,15 +261,20 @@ const TOKEN_BASE_STYLE: Record<
   heading2: { fontWeight: '700' },
   heading3: { fontWeight: '600' },
   heading4: { fontWeight: '600' },
+  heading5: { fontWeight: '600' },
+  heading6: { fontWeight: '600' },
   strong: { fontWeight: '700' },
   emphasis: { fontStyle: 'italic' },
   strikethrough: { textDecoration: 'line-through' },
   link: { textDecoration: 'underline' },
   code: {},
+  codeBlock: {},
   quote: { fontStyle: 'italic' },
   list: {},
   ordered: {},
   task: {},
+  taskDone: {},
+  hr: {},
   punctuation: {},
 }
 
@@ -362,9 +381,7 @@ function linePosition(view: EditorView, line: number): number {
 
 /** Toggle `prefix` on the selected lines and keep the caret after the marker. */
 function toggleLinePrefix(view: EditorView, prefix: string): void {
-  const spec = view.state.changeByRange((range) =>
-    toggleLinePrefixRange(view.state, range, prefix),
-  )
+  const spec = view.state.changeByRange((range) => toggleLinePrefixRange(view.state, range, prefix))
   view.dispatch(spec, { userEvent: 'input.format' })
   view.focus()
 }
@@ -616,7 +633,16 @@ function buildExtensions(prefs: EditorPrefs, refs: EditorRefs) {
 
 export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorProps>(
   function MarkdownEditor(
-    { value, prefs, kbInset, onChange, onHistoryChange, onScrollLine, onPasteImages, onLongPressText },
+    {
+      value,
+      prefs,
+      kbInset,
+      onChange,
+      onHistoryChange,
+      onScrollLine,
+      onPasteImages,
+      onLongPressText,
+    },
     ref,
   ) {
     const hostRef = useRef<HTMLDivElement>(null)
@@ -661,9 +687,7 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
           const view = viewRef.current
           if (!view) return
           view.dispatch({
-            effects: syntaxHighlightCompartment.reconfigure(
-              buildSyntaxHighlight(getSyntaxPrefs()),
-            ),
+            effects: syntaxHighlightCompartment.reconfigure(buildSyntaxHighlight(getSyntaxPrefs())),
           })
         }),
       [],
@@ -714,6 +738,7 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
         view.focus()
       }
       view.scrollDOM.addEventListener('pointerdown', onTailPointerDown)
+      const detachElastic = attachElasticOverscroll(view)
 
       // Long press: a still press on the text opens the editor menu, the same
       // way a desktop right click does. Moving the finger cancels it, so
@@ -739,7 +764,10 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
         }, LONG_PRESS_MS)
       }
       const onPressMove = (event: PointerEvent) => {
-        if (Math.abs(event.clientX - pressFrom.x) > 10 || Math.abs(event.clientY - pressFrom.y) > 10) {
+        if (
+          Math.abs(event.clientX - pressFrom.x) > 10 ||
+          Math.abs(event.clientY - pressFrom.y) > 10
+        ) {
           cancelPress()
         }
       }
@@ -756,6 +784,7 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
         content.removeEventListener('pointerup', cancelPress)
         content.removeEventListener('pointercancel', cancelPress)
         view.scrollDOM.removeEventListener('pointerdown', onTailPointerDown)
+        detachElastic()
         view.scrollDOM.removeEventListener('scroll', onScroll)
         view.destroy()
         viewRef.current = null

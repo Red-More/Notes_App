@@ -33,6 +33,7 @@
 - 行号 gutter 由 CodeMirror 渲染，与内容共用同一个滚动容器，天然同步滚动。
 - 行号使用等宽数字，活动行号以强调色显示。
 - 文档末尾保留约 `18vh` 的空白尾区（scroller padding，不含行号与语法高亮）：滚到最底后在最后一行下方任意空白处单击，光标直接落到文档末尾，方便继续回车新段。
+- 尾区下方支持弹性回弹：在文档顶部继续下拉、或到底部继续上拉时，内容与行号一起产生最多 80px 的阻尼位移，松手后以 0.4s ease-out 回弹；开启「减少动态效果」时自动停用。顶部只有弹性段，没有固定段。
 
 ### 3.2 智能视觉折行
 
@@ -53,6 +54,7 @@
 - 活动行背景高亮、行号强调、光标 2px 强调色、选区半透明强调色。
 - 行内代码、标题、链接、引用、列表标记、Markdown 标点均有独立配色。
 - 标题符号、有序 / 无序 / 待办 / 引用符号在设置页可分别取色；列表与引用每深一层，符号透明度递减一档（depth 1–5）。
+- 默认「语义默认」配色采用 VS Code Dark+ 语义色：H1–H6、加粗/斜体、删除线、链接、行内代码/代码块、列表、待办、引用、水平线各自取色；浅色主题使用同语义的加深色，保证浅底可读。行内代码 / 代码块 / 引用块带背景，引用块另带左侧竖线。
 - 正文使用等宽字体栈，行高 1.75；预览使用阅读字体。
 
 ### 3.5 Markdown 语法高亮与实时提示
@@ -72,24 +74,23 @@
 
 | 分组 | 语法 | Lezer 节点 / 标签 | 现状 | 本轮动作 |
 | --- | --- | --- | --- | --- |
-| 块级 | ATX H1–H6 | `ATXHeading1..6/...` → `heading1..6` | 已覆盖（H5/H6 共用 heading4） | 标题符号 `HeaderMark` 按级别补色 |
+| 块级 | ATX H1–H6 | `ATXHeading1..6/...` → `heading1..6` | 已覆盖（H1–H6 独立色） | 标题符号 `HeaderMark` 按级别取色 |
 | 块级 | Setext H1/H2 | `SetextHeading1/2` → `heading1/2` | 已覆盖 | 同上（含下划线 `HeaderMark`） |
 | 块级 | 段落 | `Paragraph` → `content` | 正文色 | — |
-| 块级 | 引用 / 嵌套引用 | `Blockquote/...` → `quote`；`QuoteMark` → `processingInstruction` | 内容有引用色，符号无层级 | 本轮补 `QuoteMark` 深度色 |
-| 块级 | 围栏代码块 | `FencedCode`；`CodeText` → `monospace`；`CodeInfo` → `labelName` | 代码内容已覆盖 | 待排期 |
-| 块级 | 行内代码 | `InlineCode` → `monospace`；`CodeMark` → `processingInstruction` | 已覆盖 | — |
-| 块级 | 水平线 | `HorizontalRule` → `contentSeparator` | 已覆盖 | — |
+| 块级 | 引用 / 嵌套引用 | `Blockquote/...` → `quote`；`QuoteMark` → `processingInstruction` | 内容有引用色，符号无层级 | 本轮补 `QuoteMark` 深度色 + 行背景 + 左竖线 |
+| 块级 | 围栏代码块 | `FencedCode`；`CodeText` → `monospace`；`CodeInfo` → `labelName` | 代码内容已覆盖 | 本轮补 `codeBlock` 色 + 行背景 |
+| 块级 | 水平线 | `HorizontalRule` → `contentSeparator` | 已覆盖 | 本轮补 `hr` 独立色 |
 | 块级 | 表格 | `TableHeader` → `heading`；`TableCell` → `content`；`TableDelimiter` → `processingInstruction` | 部分覆盖 | 待排期 |
 | 块级 | HTML 块 / 标签 | `HTMLBlock / HTMLTag`（无标签） | 正文色 | 待排期 |
 | 块级 | 独立公式 `$$` | Lezer 不解析 | 预览 KaTeX 专属 | 解析器不支持 |
 | 块级 | 注释 | `Comment / CommentBlock` → `comment` | 正文色 | 待排期 |
 | 列表 | 无序 `-` `*` `+` | `ListMark`（父级 `BulletList`） | 统一语法灰 | 本轮补 `list` 色 + 深度色 |
 | 列表 | 有序 `1.` | `ListMark`（父级 `OrderedList`） | 与无序同色 | 本轮补 `ordered` 色 + 深度色 |
-| 列表 | 待办 `- [ ]` / `- [x]` | `Task` → `list`；`TaskMarker` → `atom` | `[ ]` 无规则 | 本轮补 `task` 色；`[x]` 追加弱化态 |
+| 列表 | 待办 `- [ ]` / `- [x]` | `Task` → `list`；`TaskMarker` → `atom` | `[ ]` 无规则 | 本轮补 `task`（未完成灰）/ `taskDone`（已完成绿） |
 | 列表 | 子列表 2/4 级 | 祖先链 `BulletList / OrderedList` | 无层级区分 | 本轮补 `cm-md-depth-1..5` |
 | 列表 | 定义列表 | Lezer 不解析（预览专属） | 无 | 解析器不支持 |
 | 行内 | 加粗 / 斜体 / 粗斜 | `StrongEmphasis` → `strong`；`Emphasis` → `emphasis` | 已覆盖 | — |
-| 行内 | 行内代码 | `InlineCode` → `monospace` | 已覆盖 | — |
+| 行内 | 行内代码 | `InlineCode` → `monospace`；`CodeMark` → `processingInstruction` | 已覆盖 | 本轮补行内代码色 + 背景 |
 | 行内 | 删除线 | `Strikethrough/...` → `strikethrough` | 已覆盖 | — |
 | 行内 | 链接 / 图片 | `Link/Image` → `link`；`URL` → `url`；`LinkLabel` → `labelName`；`LinkTitle` → `string` | 链接与 URL 已覆盖 | 待排期 |
 | 行内 | 上标 / 下标 | `Superscript/Subscript` → `special(content)` | 内容无独立色 | 待排期 |
@@ -97,11 +98,11 @@
 | 行内 | 转义 / 实体 | `Escape` → `escape`；`Entity` → `character` | 正文色 | 待排期 |
 | 行内 | `==高亮==`、`++插入++`、脚注 | Lezer 不解析（预览扩展专属） | 无 | 解析器不支持 |
 | 行内 | Wiki `[[ ]]` | 预览也未启用 | 无 | 待排期（新特性） |
-| 装饰符 | `HeaderMark` | `ATXHeadingN / SetextHeadingN` 子节点 | 统一语法灰 | 本轮补：按标题级别取 heading1–4 色，字重 600 |
+| 装饰符 | `HeaderMark` | `ATXHeadingN / SetextHeadingN` 子节点 | 统一语法灰 | 本轮补：按标题级别取 heading1–6 色，字重 600 |
 | 装饰符 | `QuoteMark` | `Blockquote` 子节点 | 统一语法灰 | 本轮补：quote 色 + depth 1–5 递减透明度 |
 | 装饰符 | `ListMark`（无序 / 有序） | `BulletList / OrderedList` 子节点 | 统一语法灰 | 本轮补：list / ordered 色 + depth 1–5 递减透明度 |
-| 装饰符 | `TaskMarker` | `Task` 子节点 → `atom` | 默认正文色 | 本轮补：task 色；已完成再降透明度 |
-| 装饰符 | `EmphasisMark / CodeMark / LinkMark / StrikethroughMark / SuperscriptMark / SubscriptMark / TableDelimiter / HardBreak` | `processingInstruction` | 已覆盖 | 统一走 `punctuation` 语法灰（default 由 text3 提到 text2） |
+| 装饰符 | `TaskMarker` | `Task` 子节点 → `atom` | 默认正文色 | 本轮补：未完成 task 灰；已完成 taskDone 绿 |
+| 装饰符 | `EmphasisMark / CodeMark / LinkMark / StrikethroughMark / SuperscriptMark / SubscriptMark / TableDelimiter / HardBreak` | `processingInstruction` | 已覆盖 | 统一走 `punctuation` 语义语法灰 |
 
 快捷语法栏行为：`标题` 按 H1 → H2 → … → H6 → 取消循环；`有序` 插入 `1. `。插入前缀后光标停在符号 + 空格右侧，多行选区则统一落到最后一行正文末尾。
 
@@ -250,6 +251,11 @@
 - 缩进方式：空格 / Tab
 - 缩进宽度：2 / 4 / 8
 - 配置持久化到 `notes:editor-prefs`，重新打开笔记编辑页后生效。
+- 语法高亮：默认「语义默认」配色（VS Code Dark+ 语义色，浅色主题用加深版）+ 每个语法项一行（名称 / 当前色块 / 调色板按钮 / 开关）。点击调色板按钮打开取色器：
+  - 色相环 + 饱和度 / 明度滑块，实时显示 HEX 与 RGB；
+  - 6 个主题预设色，可随时回到「跟随配色主题」；
+  - 自定义颜色以 `#rrggbb` 与语法配置一起持久化，浅色 / 深色主题下都保持所选颜色；
+  - 点击遮罩、按 Esc、Android 返回键或边缘返回手势只关闭取色器，不会连带退出设置页。
 
 **图表预览**
 
@@ -391,15 +397,20 @@ src/
     links.ts                链接分类（复制地址 / 页内锚点 / 可系统打开）
     sync.ts                 预览偏移 ↔ 源码行的纯函数映射
     layout.ts               布局模式/比例配置、持久化、坐标换算
-    commands.ts             Markdown 包裹命令与链接插入
+    commands.ts             Markdown 包裹命令、行前缀与标题循环
     diagnostics.ts          未闭合代码块诊断
     prefs.ts                缩进配置持久化
+    syntaxMarks.ts          标题/列表/待办/引用的节点级与深度高亮
+    elasticOverscroll.ts    编辑器顶部/底部弹性回弹
+    color.ts                HEX / RGB / HSV 取色转换
   system/
     clipboard.ts            剪贴板写入与降级实现
     openExternal.ts         Tauri opener / window.open 外部打开
   markdown-it-extensions.d.ts  非 GFM 插件类型声明
   pages/notes/NoteEditorPage.tsx   编辑态、分屏布局、双向同步、保存联动
   pages/settings/SettingsPage.tsx  Markdown 编辑器、图表与预览布局设置
+  pages/settings/SyntaxColorPicker.tsx  语法高亮 HSV 取色器 Popover
+  pages/settings/settingsOverlay.ts     设置页浮层/返回键关闭注册
   index.css                编辑器/预览/图表/公式/对话框配色与布局
 ```
 

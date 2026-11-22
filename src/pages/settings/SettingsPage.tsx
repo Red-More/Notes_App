@@ -9,6 +9,7 @@ import AboutSection from './AboutSection'
 import EditorSection from './EditorSection'
 import NotificationSection from './NotificationSection'
 import StorageSection from './StorageSection'
+import { SettingsOverlayContext } from './settingsOverlay'
 
 interface Props {
   onBack: () => void
@@ -25,10 +26,25 @@ const QUICK_NAV = [
 ]
 
 export default function SettingsPage({ onBack }: Props) {
-  // Same pop semantics for the edge swipe and the Android back key: return to
-  // the tab that opened settings instead of jumping to a home tab.
-  useEdgeBack(onBack)
-  usePhysicalBack(onBack)
+  const overlayCloseRef = useRef<(() => void) | null>(null)
+  const registerOverlay = useCallback((close: () => void) => {
+    overlayCloseRef.current = close
+    return () => {
+      if (overlayCloseRef.current === close) overlayCloseRef.current = null
+    }
+  }, [])
+
+  // Back gestures dismiss an open popover first; only then do they leave the
+  // page, so the hardware key never skips a visible layer.
+  const handleBack = useCallback(() => {
+    if (overlayCloseRef.current) {
+      overlayCloseRef.current()
+      return
+    }
+    onBack()
+  }, [onBack])
+  useEdgeBack(handleBack)
+  usePhysicalBack(handleBack)
 
   const scrollerRef = useRef<HTMLElement | null>(null)
   const navRef = useRef<HTMLElement | null>(null)
@@ -150,48 +166,50 @@ export default function SettingsPage({ onBack }: Props) {
         </div>
       </header>
 
-      <main className="settings-scroll" ref={scrollerRef}>
-        <nav
-          className="settings-quicknav"
-          aria-label="设置分组"
-          ref={navRef}
-          onPointerDown={beginNavGesture}
-          onWheel={beginNavGesture}
-          onTouchStart={beginNavGesture}
-          onScroll={handleNavScroll}
-        >
-          {QUICK_NAV.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={`settings-quicknav-chip${activeId === item.id ? ' active' : ''}`}
-              data-section={item.id}
-              aria-current={activeId === item.id ? 'true' : undefined}
-              onClick={() => {
-                // A tap is a jump, not a strip swipe; drop the gesture flag so
-                // the follow-up chip centering is not mistaken for navigation.
-                navGestureRef.current = false
-                jumpTo(item.id)
-              }}
-            >
-              {item.label}
-            </button>
-          ))}
-        </nav>
+      <SettingsOverlayContext.Provider value={registerOverlay}>
+        <main className="settings-scroll" ref={scrollerRef}>
+          <nav
+            className="settings-quicknav"
+            aria-label="设置分组"
+            ref={navRef}
+            onPointerDown={beginNavGesture}
+            onWheel={beginNavGesture}
+            onTouchStart={beginNavGesture}
+            onScroll={handleNavScroll}
+          >
+            {QUICK_NAV.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className={`settings-quicknav-chip${activeId === item.id ? ' active' : ''}`}
+                data-section={item.id}
+                aria-current={activeId === item.id ? 'true' : undefined}
+                onClick={() => {
+                  // A tap is a jump, not a strip swipe; drop the gesture flag so
+                  // the follow-up chip centering is not mistaken for navigation.
+                  navGestureRef.current = false
+                  jumpTo(item.id)
+                }}
+              >
+                {item.label}
+              </button>
+            ))}
+          </nav>
 
-        <AccountSection />
-        <NotificationSection />
-        <AppearanceSection />
-        <EditorSection />
-        <AiSection />
-        <StorageSection />
-        <AboutSection />
+          <AccountSection />
+          <NotificationSection />
+          <AppearanceSection />
+          <EditorSection />
+          <AiSection />
+          <StorageSection />
+          <AboutSection />
 
-        <footer className="settings-footer">
-          <span>Notes</span>
-          <span>本地优先 · 数据仅存本机</span>
-        </footer>
-      </main>
+          <footer className="settings-footer">
+            <span>Notes</span>
+            <span>本地优先 · 数据仅存本机</span>
+          </footer>
+        </main>
+      </SettingsOverlayContext.Provider>
     </div>
   )
 }
