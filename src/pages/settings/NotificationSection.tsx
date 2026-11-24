@@ -36,11 +36,20 @@ export default function NotificationSection() {
 
   useEffect(() => {
     let cancelled = false
-    void notificationPermission().then((value) => {
-      if (!cancelled) setPermission(value)
-    })
+    const refresh = () => {
+      void notificationPermission().then((value) => {
+        if (!cancelled) setPermission(value)
+      })
+    }
+    refresh()
+    // The user may grant or revoke permission in system settings and return.
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') refresh()
+    }
+    document.addEventListener('visibilitychange', onVisible)
     return () => {
       cancelled = true
+      document.removeEventListener('visibilitychange', onVisible)
     }
   }, [])
 
@@ -129,7 +138,7 @@ export default function NotificationSection() {
             ? '系统通知可正常送达'
             : permission === 'unavailable'
               ? '当前运行环境不支持系统通知'
-              : '未授权时提醒会退回应用内提示'
+              : '点击请求系统通知权限；未授权时提醒会退回应用内提示'
         }
         value={PERMISSION_LABEL[permission]}
         status={<SaveStatus state={requestSave.state} error={requestSave.error} />}

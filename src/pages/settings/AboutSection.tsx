@@ -3,8 +3,9 @@ import { getVersion } from '@tauri-apps/api/app'
 import { IconEye, IconInfo, IconNote } from '../../components/Icons'
 import { Modal } from '../../components/ui'
 import { SettingsGroup, SettingsRow } from './SettingsPrimitives'
+import thirdPartyLicenses from '../../generated/third-party-licenses.json'
 
-type LegalDoc = 'privacy' | 'terms'
+type LegalDoc = 'privacy' | 'terms' | 'licenses'
 
 export default function AboutSection() {
   const [version, setVersion] = useState('0.1.0')
@@ -54,13 +55,33 @@ export default function AboutSection() {
         chevron
         onClick={() => setLegal('terms')}
       />
+      <SettingsRow
+        icon={<IconInfo size={20} />}
+        title="开源许可"
+        subtitle="从依赖树自动生成的第三方组件与许可证清单"
+        value="查看"
+        chevron
+        onClick={() => setLegal('licenses')}
+      />
 
       {legal && (
         <Modal
-          title={legal === 'privacy' ? '隐私说明' : '用户协议（摘要）'}
+          title={
+            legal === 'privacy'
+              ? '隐私说明'
+              : legal === 'terms'
+                ? '用户协议（摘要）'
+                : '开源许可'
+          }
           onClose={() => setLegal(null)}
         >
-          {legal === 'privacy' ? <PrivacyStatement /> : <TermsStatement />}
+          {legal === 'privacy' ? (
+            <PrivacyStatement />
+          ) : legal === 'terms' ? (
+            <TermsStatement />
+          ) : (
+            <OpenSourceLicenses />
+          )}
         </Modal>
       )}
     </SettingsGroup>
@@ -88,6 +109,46 @@ function TermsStatement() {
       <p>本应用为本地优先的个人知识管理工具，按现状提供。</p>
       <p>你需自行负责数据备份；云端模型由你自行配置，其费用与合规义务由你承担。</p>
       <p>请勿使用本应用处理违法内容。继续使用即表示你理解并接受上述约定。</p>
+    </div>
+  )
+}
+
+interface LicenseEntry {
+  name: string
+  version: string
+  license: string
+}
+
+function LicenseGroup({ title, items }: { title: string; items: LicenseEntry[] }) {
+  return (
+    <>
+      <p className="section-title">{title}</p>
+      <div className="license-list">
+        {items.map((item) => (
+          <div key={item.name} className="license-item">
+            <span className="license-name">
+              {item.name} · v{item.version}
+            </span>
+            <span className="license-meta">许可证：{item.license}</span>
+          </div>
+        ))}
+      </div>
+    </>
+  )
+}
+
+function OpenSourceLicenses() {
+  return (
+    <div className="settings-legal">
+      <p>
+        本应用使用了以下开源组件（清单由 pnpm gen:licenses 从依赖树自动生成，生成于{' '}
+        {thirdPartyLicenses.generatedAt}）。感谢各项目作者与贡献者。
+      </p>
+      <LicenseGroup title="前端依赖" items={thirdPartyLicenses.frontend} />
+      <LicenseGroup title="后端依赖" items={thirdPartyLicenses.backend} />
+      <p className="settings-note">
+        完整许可证文本随各依赖一同分发，可在对应开源项目的源码仓库中查看。
+      </p>
     </div>
   )
 }

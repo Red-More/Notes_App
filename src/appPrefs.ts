@@ -6,9 +6,22 @@ import {
 
 export type FontScale = 's' | 'm' | 'l' | 'xl'
 
+/** Top-level modules that can be chosen as the launch page. */
+export type StartTab = 'chat' | 'notes' | 'todos' | 'diary' | 'contacts'
+
+export const START_TAB_OPTIONS: Array<{ key: StartTab; label: string }> = [
+  { key: 'notes', label: '笔记' },
+  { key: 'chat', label: '对话' },
+  { key: 'todos', label: '待办' },
+  { key: 'diary', label: '日记' },
+  { key: 'contacts', label: '人脉' },
+]
+
 export interface AppPrefs {
   /** Local-only display name; never leaves the device. */
   displayName: string
+  /** Module shown when the app launches; defaults to notes. */
+  startTab: StartTab
   /** Master switch for due reminders (todos). */
   remindersEnabled: boolean
   /** Ringtone played when a todo reminder fires. */
@@ -54,6 +67,7 @@ const LEGACY_FONT_SCALES: Record<string, FontScale> = {
 
 export const DEFAULT_APP_PREFS: AppPrefs = {
   displayName: '本机用户',
+  startTab: 'notes',
   remindersEnabled: true,
   reminderSound: DEFAULT_REMINDER_SOUND,
   forceReminder: false,
@@ -72,6 +86,10 @@ function sanitizeDisplayName(value: unknown): string {
 
 function isFontScale(value: unknown): value is FontScale {
   return FONT_SCALE_OPTIONS.some((option) => option.key === value)
+}
+
+function isStartTab(value: unknown): value is StartTab {
+  return START_TAB_OPTIONS.some((option) => option.key === value)
 }
 
 /** Accept current tier keys and migrate the three legacy names in place. */
@@ -102,6 +120,7 @@ export function parseAppPrefs(raw: string | null): AppPrefs {
   const record = (data && typeof data === 'object' ? data : {}) as Partial<AppPrefs>
   return {
     displayName: sanitizeDisplayName(record.displayName),
+    startTab: isStartTab(record.startTab) ? record.startTab : DEFAULT_APP_PREFS.startTab,
     remindersEnabled:
       typeof record.remindersEnabled === 'boolean'
         ? record.remindersEnabled
@@ -157,6 +176,7 @@ export function setAppPrefs(patch: Partial<AppPrefs>): AppPrefs {
       patch.displayName !== undefined
         ? sanitizeDisplayName(patch.displayName)
         : current.displayName,
+    startTab: isStartTab(patch.startTab) ? patch.startTab : current.startTab,
     remindersEnabled: patch.remindersEnabled ?? current.remindersEnabled,
     reminderSound: isReminderSoundId(patch.reminderSound)
       ? patch.reminderSound

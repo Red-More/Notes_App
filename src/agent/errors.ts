@@ -32,7 +32,7 @@ export interface ErrorInfo {
 
 /** The only user-facing copy table for run failures. */
 export const ERROR_COPY: Record<ErrorCode, string> = {
-  auth_missing: '尚未配置 API Key，请到设置 → AI 助理中填写',
+  auth_missing: '尚未配置 API Key，请到设置 → AI 与能力 → 模型配置中填写',
   auth_invalid: 'API Key 无效或已过期，请更新后重试',
   rate_limited: '请求过于频繁，请稍后重试',
   timeout: '请求超时，请重试',

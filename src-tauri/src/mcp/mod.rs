@@ -271,8 +271,49 @@ fn write_setting(conn: &Connection, key: &str, value: &str) -> Result<(), ToolEr
 }
 
 // ---------------------------------------------------------------------------
-// JSON-RPC over Streamable HTTP
+// JSON-RPC over Streamable HTTP + legacy HTTP+SSE
 // ---------------------------------------------------------------------------
+
+/// Protocol version this client asks for; the server may negotiate another one.
+const INITIALIZE_PROTOCOL_VERSION: &str = "2025-03-26";
+
+/// Structured MCP failure. Keeping the HTTP status and whether the request was
+/// session-bound lets retries target a forgotten session instead of guessing
+/// from error text.
+#[derive(Debug, Clone)]
+struct McpError {
+    message: String,
+    status: Option<u16>,
+    /// True after the session was established (a session id was issued, or the
+    /// SSE endpoint handshake completed).
+    session_bound: bool,
+}
+
+impl McpError {
+    fn transport(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            status: None,
+            session_bound: false,
+        }
+    }
+
+    fn rpc(message: impl Into<String>, session_bound: bool) -> Self {
+        Self {
+            message: message.into(),
+            status: None,
+            session_bound,
+        }
+    }
+
+    fn http(status: reqwest::StatusCode, text: &str, session_bound: bool) -> Self {
+        Self {
+            message: http_status_message(status, text),
+            status: Some(status.as_u16()),
+            session_bound,
+        }
+    }
+}
 
 /// Accept either a plain JSON-RPC body or an SSE stream of `data:` events.
 fn parse_rpc_payload(text: &str, id: u64) -> Result<Value, String> {
@@ -288,7 +329,7 @@ fn parse_rpc_payload(text: &str, id: u64) -> Result<Value, String> {
         let Ok(value) = serde_json::from_str::<Value>(data.trim()) else {
             continue;
         };
-        if value.get("id").and_then(Value::as_u64) == Some(id)
+        if rpc_id_matches(&value, id)
             && (value.get("result").is_some() || value.get("error").is_some())
         {
             last = Some(value);
@@ -297,34 +338,144 @@ fn parse_rpc_payload(text: &str, id: u64) -> Result<Value, String> {
     last.ok_or_else(|| "MCP 响应中没有匹配的 JSON-RPC 结果".to_string())
 }
 
-/// Short-lived session: initialize, then mark the client initialized.
-async fn open(
-    client: &reqwest::Client,
-    url: &str,
-    token: Option<&str>,
-) -> Result<SessionOwned, String> {
-    let mut session = SessionOwned::new(client, url, token);
-    session
-        .request(
-            1,
-            "initialize",
-            json!({
-                "protocolVersion": "2025-03-26",
-                "capabilities": {},
-                "clientInfo": { "name": "notes-app", "version": "0.1.0" },
-            }),
-        )
-        .await?;
-    session.notify("notifications/initialized", json!({})).await;
-    Ok(session)
+fn rpc_body(id: Option<u64>, method: &str, params: Value) -> Value {
+    match id {
+        Some(id) => json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }),
+        None => json!({ "jsonrpc": "2.0", "method": method, "params": params }),
+    }
 }
 
-/// Owned-string variant so the session can outlive its constructor arguments.
+/// JSON-RPC ids may be echoed back as numbers or strings; accept both.
+fn rpc_id_matches(payload: &Value, id: u64) -> bool {
+    match payload.get("id") {
+        Some(value) => value.as_u64() == Some(id) || value.as_str() == Some(&id.to_string()),
+        None => false,
+    }
+}
+
+fn rpc_result(payload: Value, session_bound: bool) -> Result<Value, McpError> {
+    if let Some(error) = payload.get("error") {
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("未知错误");
+        return Err(McpError::rpc(format!("MCP 错误：{message}"), session_bound));
+    }
+    payload
+        .get("result")
+        .cloned()
+        .ok_or_else(|| McpError::rpc("MCP 响应缺少 result", session_bound))
+}
+
+fn initialize_params() -> Value {
+    json!({
+        "protocolVersion": INITIALIZE_PROTOCOL_VERSION,
+        "capabilities": {},
+        "clientInfo": { "name": "notes-app", "version": "0.1.0" },
+    })
+}
+
+/// Turn a non-success HTTP response into an actionable error. 410 usually means
+/// the endpoint itself (often a signed or temporary URL) is no longer valid.
+fn http_status_message(status: reqwest::StatusCode, text: &str) -> String {
+    let snippet: String = text.chars().take(200).collect();
+    if status == reqwest::StatusCode::GONE {
+        return format!(
+            "MCP 服务器返回 HTTP 410 Gone：{snippet}。该服务器地址可能已过期或已停用，请在服务提供方重新生成地址后，编辑该 MCP 服务器。"
+        );
+    }
+    format!("MCP 服务器返回 HTTP {status}：{snippet}")
+}
+
+/// Only a 404/410 on a request that already carried a session can mean the
+/// server forgot the session. Initialize failures are configuration errors.
+fn is_retryable_session_error(error: &McpError) -> bool {
+    error.session_bound && matches!(error.status, Some(404) | Some(410))
+}
+
+/// Legacy SSE endpoints (`.../sse`) expect GET + an `endpoint` event first.
+fn uses_legacy_sse(url: &str) -> bool {
+    url::Url::parse(url)
+        .map(|parsed| {
+            parsed
+                .path()
+                .trim_end_matches('/')
+                .to_ascii_lowercase()
+                .ends_with("/sse")
+        })
+        .unwrap_or(false)
+}
+
+/// A POST rejected with these statuses usually means the URL is an SSE endpoint.
+fn should_fallback_to_sse(error: &McpError) -> bool {
+    matches!(error.status, Some(405 | 406 | 415))
+}
+
+/// Resolve the message endpoint announced on the SSE stream and keep the same
+/// SSRF boundary (HTTPS, public host, no credentials) while allowing the
+/// session query string the server itself issued.
+fn resolve_sse_endpoint(base: &str, endpoint: &str) -> Result<String, McpError> {
+    let base_url =
+        url::Url::parse(base).map_err(|e| McpError::transport(format!("MCP 地址解析失败：{e}")))?;
+    let joined = base_url
+        .join(endpoint.trim())
+        .map_err(|e| McpError::transport(format!("MCP SSE 消息地址解析失败：{e}")))?;
+    model_store::validate_public_https(&joined).map_err(|e| McpError::transport(e.to_string()))?;
+    // Pin the message endpoint to the server's own host: an announced
+    // cross-host URL would leak the bearer token to a third party.
+    if joined.host_str() != base_url.host_str() {
+        return Err(McpError::transport("MCP SSE 消息地址必须与服务器同主机"));
+    }
+    if joined.fragment().is_some() {
+        return Err(McpError::transport("MCP SSE 消息地址不能包含片段"));
+    }
+    Ok(joined.to_string())
+}
+
+/// Pull one complete SSE event out of the byte buffer.
+fn take_sse_event(buffer: &mut Vec<u8>) -> Option<(String, String)> {
+    loop {
+        let lf = buffer.windows(2).position(|w| w == b"\n\n".as_slice());
+        let crlf = buffer.windows(4).position(|w| w == b"\r\n\r\n".as_slice());
+        let (pos, separator) = match (lf, crlf) {
+            (Some(a), Some(b)) => {
+                if a <= b {
+                    (a, 2)
+                } else {
+                    (b, 4)
+                }
+            }
+            (Some(a), None) => (a, 2),
+            (None, Some(b)) => (b, 4),
+            (None, None) => return None,
+        };
+        let event_bytes: Vec<u8> = buffer.drain(..pos + separator).collect();
+        let text = String::from_utf8_lossy(&event_bytes[..pos]);
+        let mut event = "message".to_string();
+        let mut data: Vec<String> = Vec::new();
+        for line in text.lines() {
+            let line = line.trim_end_matches('\r');
+            if let Some(value) = line.strip_prefix("event:") {
+                event = value.trim().to_string();
+            } else if let Some(value) = line.strip_prefix("data:") {
+                data.push(value.strip_prefix(' ').unwrap_or(value).to_string());
+            }
+        }
+        if data.is_empty() {
+            // Keep-alive comments have no data; skip and parse the next event.
+            continue;
+        }
+        return Some((event, data.join("\n")));
+    }
+}
+
+/// Streamable HTTP session: initialize, then send the follow-up request.
 struct SessionOwned {
     client: reqwest::Client,
     url: String,
     token: Option<String>,
     session_id: Option<String>,
+    protocol_version: String,
 }
 
 impl SessionOwned {
@@ -334,28 +485,58 @@ impl SessionOwned {
             url: url.to_string(),
             token: token.map(str::to_string),
             session_id: None,
+            protocol_version: String::new(),
         }
     }
 
-    async fn request(&mut self, id: u64, method: &str, params: Value) -> Result<Value, String> {
-        let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-        let mut request = self
-            .client
-            .post(&self.url)
-            .header("content-type", "application/json")
-            .header("accept", "application/json, text/event-stream")
-            .timeout(RPC_TIMEOUT)
-            .json(&body);
+    async fn open(
+        client: &reqwest::Client,
+        url: &str,
+        token: Option<&str>,
+    ) -> Result<Self, McpError> {
+        let mut session = Self::new(client, url, token);
+        let result = session
+            .request(1, "initialize", initialize_params())
+            .await?;
+        session.protocol_version = result
+            .get("protocolVersion")
+            .and_then(Value::as_str)
+            .unwrap_or(INITIALIZE_PROTOCOL_VERSION)
+            .to_string();
+        session.notify("notifications/initialized", json!({})).await;
+        Ok(session)
+    }
+
+    fn apply_headers(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         if let Some(token) = &self.token {
             request = request.bearer_auth(token);
         }
         if let Some(session) = &self.session_id {
             request = request.header("mcp-session-id", session);
         }
-        let response = request
+        if !self.protocol_version.is_empty() {
+            request = request.header("mcp-protocol-version", &self.protocol_version);
+        }
+        request
+    }
+
+    async fn request(&mut self, id: u64, method: &str, params: Value) -> Result<Value, McpError> {
+        // Only requests that already carry a session id can reveal a session
+        // the server has forgotten; initialize itself is always session-free.
+        let session_bound = self.session_id.is_some();
+        let body = rpc_body(Some(id), method, params);
+        let request = self
+            .client
+            .post(&self.url)
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .timeout(RPC_TIMEOUT)
+            .json(&body);
+        let response = self
+            .apply_headers(request)
             .send()
             .await
-            .map_err(|e| format!("MCP 网络请求失败：{e}"))?;
+            .map_err(|e| McpError::transport(format!("MCP 网络请求失败：{e}")))?;
         if let Some(session) = response
             .headers()
             .get("mcp-session-id")
@@ -367,41 +548,215 @@ impl SessionOwned {
         let text = response
             .text()
             .await
-            .map_err(|e| format!("读取 MCP 响应失败：{e}"))?;
+            .map_err(|e| McpError::transport(format!("读取 MCP 响应失败：{e}")))?;
         if !status.is_success() {
-            let snippet: String = text.chars().take(200).collect();
-            return Err(format!("MCP 服务器返回 HTTP {status}：{snippet}"));
+            return Err(McpError::http(status, &text, session_bound));
         }
-        let payload = parse_rpc_payload(&text, id)?;
-        if let Some(error) = payload.get("error") {
-            let message = error
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("未知错误");
-            return Err(format!("MCP 错误：{message}"));
-        }
-        payload
-            .get("result")
-            .cloned()
-            .ok_or_else(|| "MCP 响应缺少 result".to_string())
+        let payload = parse_rpc_payload(&text, id)
+            .map_err(|message| McpError::rpc(message, session_bound))?;
+        rpc_result(payload, session_bound)
     }
 
     async fn notify(&mut self, method: &str, params: Value) {
-        let body = json!({ "jsonrpc": "2.0", "method": method, "params": params });
-        let mut request = self
+        let body = rpc_body(None, method, params);
+        let request = self
             .client
             .post(&self.url)
             .header("content-type", "application/json")
             .header("accept", "application/json, text/event-stream")
             .timeout(RPC_TIMEOUT)
             .json(&body);
+        let _ = self.apply_headers(request).send().await;
+    }
+}
+
+/// Legacy HTTP+SSE session: GET the stream, read the announced endpoint, then
+/// POST JSON-RPC messages there and read responses from the stream.
+struct SseSession {
+    client: reqwest::Client,
+    response: reqwest::Response,
+    buffer: Vec<u8>,
+    post_url: String,
+    token: Option<String>,
+    protocol_version: String,
+}
+
+impl SseSession {
+    async fn open(
+        client: &reqwest::Client,
+        url: &str,
+        token: Option<&str>,
+    ) -> Result<Self, McpError> {
+        // No request timeout on the stream: reqwest's timeout covers the whole
+        // body and would kill a healthy long-lived SSE connection. Idle time is
+        // bounded per event inside `next_event` instead.
+        let mut request = client
+            .get(url)
+            .header("accept", "text/event-stream");
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| McpError::transport(format!("MCP 网络请求失败：{e}")))?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(McpError::http(status, &text, false));
+        }
+        let mut session = Self {
+            client: client.clone(),
+            response,
+            buffer: Vec::new(),
+            post_url: String::new(),
+            token: token.map(str::to_string),
+            protocol_version: String::new(),
+        };
+        let endpoint = session.read_endpoint().await?;
+        session.post_url = resolve_sse_endpoint(url, &endpoint)?;
+        Ok(session)
+    }
+
+    async fn next_event(&mut self) -> Result<Option<(String, String)>, McpError> {
+        loop {
+            if let Some(event) = take_sse_event(&mut self.buffer) {
+                return Ok(Some(event));
+            }
+            let chunk = tokio::time::timeout(RPC_TIMEOUT, self.response.chunk())
+                .await
+                .map_err(|_| McpError::transport("MCP SSE 读取超时"))?
+                .map_err(|e| McpError::transport(format!("读取 MCP SSE 响应失败：{e}")))?;
+            match chunk {
+                Some(bytes) => self.buffer.extend_from_slice(&bytes),
+                None => return Ok(None),
+            }
+        }
+    }
+
+    async fn read_endpoint(&mut self) -> Result<String, McpError> {
+        loop {
+            let Some((event, data)) = self.next_event().await? else {
+                return Err(McpError::transport("MCP SSE 连接在返回消息地址前已关闭"));
+            };
+            if event == "endpoint" {
+                return Ok(data);
+            }
+        }
+    }
+
+    fn apply_headers(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         if let Some(token) = &self.token {
             request = request.bearer_auth(token);
         }
-        if let Some(session) = &self.session_id {
-            request = request.header("mcp-session-id", session);
+        if !self.protocol_version.is_empty() {
+            request = request.header("mcp-protocol-version", &self.protocol_version);
         }
-        let _ = request.send().await;
+        request
+    }
+
+    async fn post(&self, body: &Value) -> Result<(reqwest::StatusCode, String), McpError> {
+        let request = self
+            .client
+            .post(&self.post_url)
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .timeout(RPC_TIMEOUT)
+            .json(body);
+        let response = self
+            .apply_headers(request)
+            .send()
+            .await
+            .map_err(|e| McpError::transport(format!("MCP 网络请求失败：{e}")))?;
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .map_err(|e| McpError::transport(format!("读取 MCP 响应失败：{e}")))?;
+        Ok((status, text))
+    }
+
+    async fn request(&mut self, id: u64, method: &str, params: Value) -> Result<Value, McpError> {
+        // The SSE endpoint handshake already completed, so a 404/410 here is a
+        // stale session URL that is worth one fresh handshake.
+        let session_bound = true;
+        let body = rpc_body(Some(id), method, params);
+        let (status, text) = self.post(&body).await?;
+        if !status.is_success() {
+            return Err(McpError::http(status, &text, session_bound));
+        }
+        // Some servers reply inline; the legacy transport replies over the stream.
+        if !text.trim().is_empty() {
+            if let Ok(payload) = parse_rpc_payload(&text, id) {
+                return rpc_result(payload, session_bound);
+            }
+        }
+        loop {
+            let Some((event, data)) = self.next_event().await? else {
+                return Err(McpError::transport("MCP SSE 连接已关闭"));
+            };
+            if event != "message" {
+                continue;
+            }
+            let Ok(payload) = serde_json::from_str::<Value>(&data) else {
+                continue;
+            };
+            if rpc_id_matches(&payload, id) {
+                return rpc_result(payload, session_bound);
+            }
+        }
+    }
+
+    async fn notify(&mut self, method: &str, params: Value) {
+        let body = rpc_body(None, method, params);
+        let _ = self.post(&body).await;
+    }
+
+    async fn initialize(&mut self) -> Result<(), McpError> {
+        let result = self.request(1, "initialize", initialize_params()).await?;
+        self.protocol_version = result
+            .get("protocolVersion")
+            .and_then(Value::as_str)
+            .unwrap_or(INITIALIZE_PROTOCOL_VERSION)
+            .to_string();
+        self.notify("notifications/initialized", json!({})).await;
+        Ok(())
+    }
+}
+
+enum McpSession {
+    Streamable(SessionOwned),
+    Sse(SseSession),
+}
+
+impl McpSession {
+    async fn open(
+        client: &reqwest::Client,
+        url: &str,
+        token: Option<&str>,
+    ) -> Result<Self, McpError> {
+        if uses_legacy_sse(url) {
+            let mut session = SseSession::open(client, url, token).await?;
+            session.initialize().await?;
+            return Ok(Self::Sse(session));
+        }
+        match SessionOwned::open(client, url, token).await {
+            Ok(session) => Ok(Self::Streamable(session)),
+            Err(error) if should_fallback_to_sse(&error) => {
+                // A POST-rejected endpoint is often a legacy SSE one.
+                let mut session = SseSession::open(client, url, token).await?;
+                session.initialize().await?;
+                Ok(Self::Sse(session))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn request(&mut self, id: u64, method: &str, params: Value) -> Result<Value, McpError> {
+        match self {
+            Self::Streamable(session) => session.request(id, method, params).await,
+            Self::Sse(session) => session.request(id, method, params).await,
+        }
     }
 }
 
@@ -460,7 +815,29 @@ pub async fn fetch_tools(
     let Some(client) = &state.client else {
         return Err("HTTP 客户端初始化失败，请重启应用".to_string());
     };
-    let mut session = open(client, &server.url, token).await?;
+    match fetch_tools_once(client, server, token).await {
+        // Only a session-bound 404/410 can mean the server forgot the session;
+        // initialize failures and non-HTTP errors are configuration problems.
+        Err(error) if is_retryable_session_error(&error) => {
+            log::warn!(
+                "mcp server {} session expired, retrying: {}",
+                server.id,
+                error.message
+            );
+            fetch_tools_once(client, server, token)
+                .await
+                .map_err(|error| error.message)
+        }
+        result => result.map_err(|error| error.message),
+    }
+}
+
+async fn fetch_tools_once(
+    client: &reqwest::Client,
+    server: &McpServer,
+    token: Option<&str>,
+) -> Result<Vec<McpTool>, McpError> {
+    let mut session = McpSession::open(client, &server.url, token).await?;
     let result = session.request(2, "tools/list", json!({})).await?;
     Ok(tools_from_result(&result, server))
 }
@@ -485,8 +862,13 @@ pub async fn call_tool(
     let Some(client) = &state.client else {
         return Err("HTTP 客户端初始化失败，请重启应用".to_string());
     };
-    let mut session = open(client, &server.url, token).await?;
-    let listed = session.request(2, "tools/list", json!({})).await?;
+    let mut session = McpSession::open(client, &server.url, token)
+        .await
+        .map_err(|error| error.message)?;
+    let listed = session
+        .request(2, "tools/list", json!({}))
+        .await
+        .map_err(|error| error.message)?;
     let tools = tools_from_result(&listed, server);
     if !tools.iter().any(|item| item.name == tool) {
         return Err(format!("MCP 服务器没有声明工具：{tool}"));
@@ -497,7 +879,8 @@ pub async fn call_tool(
             "tools/call",
             json!({ "name": tool, "arguments": arguments }),
         )
-        .await?;
+        .await
+        .map_err(|error| error.message)?;
     render_call_result(&result)
 }
 
@@ -557,5 +940,91 @@ mod tests {
         assert_eq!(render_call_result(&ok).unwrap(), "hello");
         let failed = json!({"content": [{"type": "text", "text": "bad"}], "isError": true});
         assert!(render_call_result(&failed).is_err());
+    }
+
+    #[test]
+    fn legacy_sse_urls_are_detected_by_path() {
+        assert!(uses_legacy_sse("https://example.com/sse"));
+        assert!(uses_legacy_sse("https://example.com/mcp/sse/"));
+        assert!(!uses_legacy_sse("https://example.com/mcp"));
+        assert!(!uses_legacy_sse("not a url"));
+    }
+
+    #[test]
+    fn sse_events_parse_endpoint_and_crlf_bodies() {
+        let mut buffer = b"event: endpoint\ndata: /messages?sessionId=abc\n\n".to_vec();
+        assert_eq!(
+            take_sse_event(&mut buffer),
+            Some((
+                "endpoint".to_string(),
+                "/messages?sessionId=abc".to_string()
+            ))
+        );
+        assert!(buffer.is_empty());
+
+        // CRLF separators and multi-line data are both valid SSE framing.
+        let mut crlf =
+            b"event: message\r\ndata: {\"id\":1,\r\ndata: \"result\":{}}\r\n\r\n".to_vec();
+        assert_eq!(
+            take_sse_event(&mut crlf),
+            Some((
+                "message".to_string(),
+                "{\"id\":1,\n\"result\":{}}".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn sse_message_endpoints_keep_the_public_https_boundary() {
+        let resolved =
+            resolve_sse_endpoint("https://mcp.example.com/sse", "/messages?sessionId=abc").unwrap();
+        assert_eq!(resolved, "https://mcp.example.com/messages?sessionId=abc");
+        assert!(
+            resolve_sse_endpoint("https://mcp.example.com/sse", "http://localhost/messages")
+                .is_err()
+        );
+        assert!(
+            resolve_sse_endpoint("https://mcp.example.com/sse", "https://127.0.0.1/messages")
+                .is_err()
+        );
+        // A cross-host announcement would leak the bearer token to a third party.
+        assert!(
+            resolve_sse_endpoint("https://mcp.example.com/sse", "https://evil.example/messages")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn numeric_and_string_echoed_ids_both_match() {
+        assert!(rpc_id_matches(&json!({ "id": 7 }), 7));
+        assert!(rpc_id_matches(&json!({ "id": "7" }), 7));
+        assert!(!rpc_id_matches(&json!({ "id": "8" }), 7));
+        assert!(!rpc_id_matches(&json!({}), 7));
+    }
+
+    #[test]
+    fn gone_responses_point_users_to_a_fresh_url() {
+        let message = http_status_message(reqwest::StatusCode::GONE, "URL is Expired.");
+        assert!(message.contains("HTTP 410 Gone"));
+        assert!(message.contains("重新生成地址"));
+    }
+
+    #[test]
+    fn retries_only_apply_to_session_bound_404_or_410() {
+        // Initialize carries no session id: a 404 there is a configuration error.
+        let initialize_404 = McpError::http(reqwest::StatusCode::NOT_FOUND, "missing", false);
+        assert!(!is_retryable_session_error(&initialize_404));
+
+        // A follow-up request that carried a session id may be recovered.
+        let expired_session = McpError::http(reqwest::StatusCode::GONE, "gone", true);
+        assert!(is_retryable_session_error(&expired_session));
+        let forgotten_session = McpError::http(reqwest::StatusCode::NOT_FOUND, "gone", true);
+        assert!(is_retryable_session_error(&forgotten_session));
+
+        // Other statuses and plain text that merely mentions HTTP 404 never retry.
+        let server_error = McpError::http(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "boom", true);
+        assert!(!is_retryable_session_error(&server_error));
+        let misleading_text = McpError::transport("upstream said HTTP 404 for a tool");
+        assert!(!is_retryable_session_error(&misleading_text));
     }
 }

@@ -456,30 +456,15 @@ fn validate_model_id(raw: &str) -> Result<String, ToolError> {
     Ok(model.to_string())
 }
 
-/// HTTPS-only, no credentials, no query/fragment, public host only.
-pub(crate) fn validate_base_url(raw: &str) -> Result<String, ToolError> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(ToolError::invalid("Base URL 不能为空"));
-    }
-    if trimmed.chars().count() > MAX_BASE_URL_CHARS {
-        return Err(ToolError::invalid(format!(
-            "Base URL 超过 {MAX_BASE_URL_CHARS} 字符"
-        )));
-    }
-    let parsed =
-        Url::parse(trimmed).map_err(|e| ToolError::invalid(format!("Base URL 解析失败：{e}")))?;
+/// HTTPS-only, no credentials, public host only. Query and fragments are
+/// checked separately so runtime endpoints (e.g. MCP SSE message URLs) can
+/// carry a signed query while keeping the same SSRF boundary.
+pub(crate) fn validate_public_https(parsed: &Url) -> Result<(), ToolError> {
     if parsed.scheme() != "https" {
         return Err(ToolError::invalid("Base URL 必须是 https:// 开头"));
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(ToolError::invalid("Base URL 不能包含用户名或密码"));
-    }
-    if parsed.query().is_some() || parsed.fragment().is_some() {
-        return Err(ToolError::invalid("Base URL 不能包含查询串或片段"));
-    }
-    if parsed.path().contains("..") {
-        return Err(ToolError::invalid("Base URL 路径不能包含 .."));
     }
     let host = parsed
         .host()
@@ -516,6 +501,29 @@ pub(crate) fn validate_base_url(raw: &str) -> Result<String, ToolError> {
                 return Err(ToolError::invalid("Base URL 不能指向内网、回环或保留地址"));
             }
         }
+    }
+    Ok(())
+}
+
+/// HTTPS-only, no credentials, no query/fragment, public host only.
+pub(crate) fn validate_base_url(raw: &str) -> Result<String, ToolError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(ToolError::invalid("Base URL 不能为空"));
+    }
+    if trimmed.chars().count() > MAX_BASE_URL_CHARS {
+        return Err(ToolError::invalid(format!(
+            "Base URL 超过 {MAX_BASE_URL_CHARS} 字符"
+        )));
+    }
+    let parsed =
+        Url::parse(trimmed).map_err(|e| ToolError::invalid(format!("Base URL 解析失败：{e}")))?;
+    validate_public_https(&parsed)?;
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(ToolError::invalid("Base URL 不能包含查询串或片段"));
+    }
+    if parsed.path().contains("..") {
+        return Err(ToolError::invalid("Base URL 路径不能包含 .."));
     }
     Ok(trimmed.trim_end_matches('/').to_string())
 }

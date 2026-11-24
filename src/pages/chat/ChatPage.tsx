@@ -1554,7 +1554,7 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
       // BUG-01: a draft chat no longer blocks on "会话尚未就绪". The first send
       // creates the conversation atomically in the backend.
       if (!settingsRef.current?.activeId) {
-        toast('请先在设置 → AI 助理中添加并启用一个对话模型')
+        toast('请先在设置 → AI 与能力 → 添加模型中添加并启用一个对话模型')
         return
       }
       const previous = attachmentRef.current
@@ -1828,7 +1828,7 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
   /** Start an unsaved chat. Nothing is written until the first message sends. */
   const newConversation = useCallback(async () => {
     if (!settings?.activeId) {
-      toast('请先在设置 → AI 助理中添加并启用一个对话模型')
+      toast('请先在设置 → AI 与能力 → 添加模型中添加并启用一个对话模型')
       return
     }
     try {
@@ -2105,7 +2105,7 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
               text={
                 hasModel
                   ? '说一句话就能记事：试试“记下今天吃了拉面”'
-                  : '请先在设置 → AI 助理中添加并启用一个模型'
+                  : '请先在设置 → AI 与能力 → 添加模型中添加并启用一个模型'
               }
             />
           ) : (
@@ -2481,7 +2481,7 @@ export default function ChatPage({ isActive, onOpenSettings }: Props) {
                 type="button"
                 className="chat-attach"
                 aria-label="添加附件"
-                title={hasModel ? '添加附件' : '请先在设置 → AI 助理中添加并启用一个模型'}
+                title={hasModel ? '添加附件' : '请先在设置 → AI 与能力 → 添加模型中添加并启用一个模型'}
                 disabled={!hasModel || loading}
                 onClick={() => {
                   if (hasModel && !loading) setAttachMenuOpen(true)

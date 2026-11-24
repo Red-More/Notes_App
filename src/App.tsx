@@ -3,7 +3,7 @@ import { ToastHost } from './components/ui'
 import ReminderScheduler from './components/ReminderScheduler'
 import { IconCalendar, IconChat, IconNote, IconTodo, IconUsers } from './components/Icons'
 import { applyTheme, getStoredTheme } from './theme'
-import { applyFontScale } from './appPrefs'
+import { applyFontScale, getAppPrefs, subscribeAppPrefs, type StartTab } from './appPrefs'
 import { installKeyboardViewport } from './system/keyboard'
 import type { FolderScope } from './types'
 import { NOTES_ROOT_SCOPE } from './types'
@@ -20,7 +20,7 @@ const NoteEditorPage = lazy(() => import('./pages/notes/NoteEditorPage'))
 const ChatPage = lazy(() => import('./pages/chat/ChatPage'))
 const SettingsPage = lazy(() => import('./pages/settings/SettingsPage'))
 
-type Tab = 'chat' | 'notes' | 'todos' | 'diary' | 'contacts'
+type Tab = StartTab
 
 type EditorMode = 'note' | 'diary'
 
@@ -47,6 +47,12 @@ const TABS: Array<{ key: Tab; label: string; icon: typeof IconNote }> = [
   { key: 'diary', label: '日记', icon: IconCalendar },
   { key: 'contacts', label: '人脉', icon: IconUsers },
 ]
+
+/** Resolve the persisted launch module to a pager index. */
+function startTabIndex(tab: StartTab): number {
+  const index = TABS.findIndex((item) => item.key === tab)
+  return index >= 0 ? index : 0
+}
 
 /** Horizontal paging constants: snap threshold, slop, direction angle ratio, edge zones. */
 const SNAP_RATIO = 0.2
@@ -84,7 +90,7 @@ function findHorizontalScroller(target: Element): HTMLElement | null {
 }
 
 function App() {
-  const [index, setIndex] = useState(0)
+  const [index, setIndex] = useState(() => startTabIndex(getAppPrefs().startTab))
   const [overlay, setOverlay] = useState<Overlay | null>(null)
   // Bumped when the editor / folder pages close so lists reload.
   const [dataVersion, setDataVersion] = useState(0)
@@ -92,7 +98,7 @@ function App() {
   // the folder manager always describe the same namespace subtree.
   const [notesScope, setNotesScope] = useState<FolderScope>(NOTES_ROOT_SCOPE)
 
-  const indexRef = useRef(0)
+  const indexRef = useRef(index)
   const trackRef = useRef<HTMLDivElement>(null)
   const pagerRef = useRef<HTMLDivElement>(null)
   /** Cancel callback for the notes selection on the visible tab; null when idle. */
@@ -137,6 +143,20 @@ function App() {
     }
     setIndex(idx)
   }, [])
+
+  // A changed launch page takes effect at once: the pager behind the settings
+  // overlay moves to the new module before the overlay closes.
+  const appliedStartTab = useRef(getAppPrefs().startTab)
+  useEffect(
+    () =>
+      subscribeAppPrefs(() => {
+        const next = getAppPrefs().startTab
+        if (next === appliedStartTab.current) return
+        appliedStartTab.current = next
+        goTo(startTabIndex(next), false)
+      }),
+    [goTo],
+  )
 
   // The pager unmounts while an overlay (editor / folders) is open, so the
   // freshly mounted track starts at translateX(0) and would show the first page

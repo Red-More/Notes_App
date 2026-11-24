@@ -7,8 +7,10 @@ import AiSection from './AiSection'
 import AppearanceSection from './AppearanceSection'
 import AboutSection from './AboutSection'
 import EditorSection from './EditorSection'
+import GeneralSection from './GeneralSection'
 import NotificationSection from './NotificationSection'
 import StorageSection from './StorageSection'
+import UsageGuideSection from './UsageGuideSection'
 import { SettingsOverlayContext } from './settingsOverlay'
 
 interface Props {
@@ -17,11 +19,13 @@ interface Props {
 
 const QUICK_NAV = [
   { id: 'settings-account', label: '账号' },
+  { id: 'settings-general', label: '通用' },
   { id: 'settings-notifications', label: '通知' },
   { id: 'settings-appearance', label: '外观' },
   { id: 'settings-editor', label: '编辑' },
   { id: 'settings-ai', label: 'AI' },
   { id: 'settings-storage', label: '存储' },
+  { id: 'settings-guide', label: '使用说明' },
   { id: 'settings-about', label: '关于' },
 ]
 
@@ -197,11 +201,13 @@ export default function SettingsPage({ onBack }: Props) {
           </nav>
 
           <AccountSection />
+          <GeneralSection />
           <NotificationSection />
           <AppearanceSection />
           <EditorSection />
           <AiSection />
           <StorageSection />
+          <UsageGuideSection />
           <AboutSection />
 
           <footer className="settings-footer">

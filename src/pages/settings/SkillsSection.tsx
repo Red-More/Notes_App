@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { skillApi } from '../../api'
-import type { SkillDetail, SkillSummary } from '../../types'
+import { chatApi, skillApi } from '../../api'
+import type { AgentSettings, SkillDetail, SkillSummary } from '../../types'
 import { parseTriggerInput } from '../../agent/skills'
 import { ConfirmDialog, Modal } from '../../components/ui'
 import { IconEdit, IconTrash } from '../../components/Icons'
+import { InfoHint, SaveStatus } from './SettingsPrimitives'
+import { useSettingSave } from './useSettingSave'
 import { friendlyError } from '../../utils'
 import { toast } from '../../toast'
 
@@ -56,6 +58,9 @@ export default function SkillsSection() {
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT)
   const [saving, setSaving] = useState(false)
   const [importing, setImporting] = useState(false)
+  const [promptSettings, setPromptSettings] = useState<AgentSettings | null>(null)
+  const [injectSkills, setInjectSkills] = useState(false)
+  const injectSave = useSettingSave()
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Live normalization for the trigger input; errors block saving.
@@ -78,10 +83,18 @@ export default function SkillsSection() {
     let cancelled = false
     const run = async () => {
       try {
-        const [list, draftList] = await Promise.all([skillApi.list(), skillApi.draftList()])
+        const [list, draftList, settings] = await Promise.all([
+          skillApi.list(),
+          skillApi.draftList(),
+          chatApi.settings().catch(() => null),
+        ])
         if (cancelled) return
         setSkills(list)
         setDrafts(draftList)
+        if (settings) {
+          setPromptSettings(settings)
+          setInjectSkills(settings.injectSkills)
+        }
       } catch (error) {
         if (!cancelled) toast(friendlyError(error))
       } finally {
@@ -246,6 +259,28 @@ export default function SkillsSection() {
     }
   }
 
+  const toggleInjectSkills = () => {
+    if (!promptSettings) return
+    const next = !injectSkills
+    // Switch immediately; a rejected save rolls the state back.
+    setInjectSkills(next)
+    void injectSave.run(async () => {
+      try {
+        await chatApi.savePromptConfig({
+          systemPrompt: promptSettings.systemPrompt,
+          rules: promptSettings.rules,
+          injectSkills: next,
+        })
+        const updated = await chatApi.settings()
+        setPromptSettings(updated)
+        setInjectSkills(updated.injectSkills)
+      } catch (error) {
+        setInjectSkills(!next)
+        throw error
+      }
+    })
+  }
+
   const enabledCount = skills.filter((skill) => skill.enabled).length
 
   return (
@@ -255,6 +290,30 @@ export default function SkillsSection() {
         <span className="form-label">
           已安装 {skills.length} 个 · 启用 {enabledCount} 个
         </span>
+        <div className="skill-inject-row">
+          <span className="skill-inject-text">
+            <span className="skill-inject-title">附加技能索引到系统提示词</span>
+            <span className="skill-inject-desc">
+              开启后已启用技能的索引会写入系统消息；技能正文仍由 load_skill 读取。
+            </span>
+          </span>
+          <SaveStatus state={injectSave.state} error={injectSave.error} />
+          <InfoHint label="技能索引说明">
+            开启后，已启用技能的名称、id、描述与触发词会追加到 system 消息末尾；关闭时请求中不包含技能索引。
+            技能正文始终由 load_skill 按需读取。
+          </InfoHint>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={injectSkills}
+            aria-label="附加技能索引到系统提示词"
+            className={`settings-switch ${injectSkills ? 'on' : ''}`}
+            disabled={!promptSettings || injectSave.state === 'saving'}
+            onClick={toggleInjectSkills}
+          >
+            <span className="settings-switch-thumb" />
+          </button>
+        </div>
         <div
           className={`skill-import ${importing ? 'busy' : ''}`}
           role="button"
@@ -273,11 +332,20 @@ export default function SkillsSection() {
             if (file) void importPackage(file)
           }}
         >
-          <span className="skill-import-title">
-            {importing ? '正在解析技能包…' : '拖拽或点击载入技能包'}
-          </span>
-          <span className="skill-import-desc">
-            .zip 或 .skill，根目录需包含 SKILL.md（YAML frontmatter 写 name 与 description）
+          <span className="skill-import-head">
+            <span className="skill-import-title">
+              {importing ? '正在解析技能包…' : '拖拽或点击载入技能包'}
+            </span>
+            <span
+              className="skill-import-help"
+              onClick={(e) => e.stopPropagation()}
+              onKeyDown={(e) => e.stopPropagation()}
+            >
+              <InfoHint label="技能包格式说明">
+                .zip 或 .skill，根目录需包含 SKILL.md（YAML frontmatter 写 name 与
+                description）；单个技能包不超过 2MB。
+              </InfoHint>
+            </span>
           </span>
           <input
             ref={fileInputRef}
@@ -346,8 +414,7 @@ export default function SkillsSection() {
           ))
         )}
         <p className="settings-note">
-          启用技能只决定 load_skill 是否可读取；是否把技能索引注入系统提示词由「AI
-          助理 → Prompt 配置」显式控制。
+          启用技能只决定 load_skill 是否可读取；是否把技能索引附加到系统提示词，由上方开关控制。
         </p>
         <button type="button" className="restore-default" onClick={openCreate}>
           新建技能

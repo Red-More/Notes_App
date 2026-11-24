@@ -9,6 +9,7 @@
     "build": "tsc -b && vite build",
     "test": "vitest run",
     "lint": "oxlint",
+    "gen:licenses": "node scripts/gen-licenses.mjs",
     "tauri": "tauri",
     "preview": "vite preview"
   },

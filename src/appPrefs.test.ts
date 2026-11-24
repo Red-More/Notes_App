@@ -21,6 +21,15 @@ function fakeStorage(initial?: Record<string, string>): Storage {
   }
 }
 
+describe('startup page preferences', () => {
+  it('default to notes and reject unknown tabs', () => {
+    expect(DEFAULT_APP_PREFS.startTab).toBe('notes')
+    expect(parseAppPrefs(null).startTab).toBe('notes')
+    expect(parseAppPrefs('{"startTab":"todos"}').startTab).toBe('todos')
+    expect(parseAppPrefs('{"startTab":"settings"}').startTab).toBe('notes')
+  })
+})
+
 describe('reminder preferences', () => {
   it('default to the built-in default tone without forced ringing', () => {
     expect(DEFAULT_APP_PREFS.reminderSound).toBe('default')

@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { IconCheck, IconChevronRight, IconInfo } from '../../components/Icons'
 import type { SaveState } from './useSettingSave'
 
@@ -182,5 +182,52 @@ export function SettingsExpandableRow({
       <SettingsRow {...row} onClick={onToggle} chevron expanded={open} />
       {open && <div className="settings-row-detail">{children}</div>}
     </div>
+  )
+}
+
+interface InfoHintProps {
+  /** Accessible label for the trigger button. */
+  label: string
+  children: ReactNode
+}
+
+/** Small info icon that reveals an explanatory bubble; outside taps close it. */
+export function InfoHint({ label, children }: InfoHintProps) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLSpanElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onPointerDown = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [open])
+
+  return (
+    <span className="info-hint" ref={rootRef}>
+      <button
+        type="button"
+        className="info-hint-btn"
+        aria-label={label}
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <IconInfo size={15} />
+      </button>
+      {open && (
+        <span className="info-hint-pop" role="tooltip">
+          {children}
+        </span>
+      )}
+    </span>
   )
 }

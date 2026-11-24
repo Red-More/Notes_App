@@ -2801,6 +2801,35 @@ body.split-resizing {
 }
 
 /* ---- Settings: skills (M3) ---- */
+.skill-inject-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 4px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.skill-inject-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.skill-inject-title {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.skill-inject-desc {
+  font-size: 0.6875rem;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
 .skill-import {
   display: flex;
   flex-direction: column;
@@ -2826,10 +2855,19 @@ body.split-resizing {
   color: var(--text);
 }
 
-.skill-import-desc {
-  font-size: 0.75rem;
-  line-height: 1.5;
-  color: var(--text-3);
+.skill-import-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.skill-import-help {
+  display: inline-flex;
+}
+
+.skill-import-help .info-hint-btn {
+  width: 22px;
+  height: 22px;
 }
 
 .skill-row {
@@ -2936,6 +2974,121 @@ body.split-resizing {
   min-height: 160px;
   resize: vertical;
   line-height: 1.5;
+}
+
+/* ---- Settings: MCP management cards ---- */
+.mcp-card {
+  display: flex;
+  flex-direction: column;
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.mcp-card-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+}
+
+.mcp-card-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.mcp-card-label {
+  font-size: 0.6875rem;
+  color: var(--text-3);
+}
+
+.mcp-card-value {
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.mcp-card-value .skill-tag {
+  margin-left: 6px;
+}
+
+/* Long MCP endpoints wrap instead of being truncated. */
+.mcp-card-url {
+  word-break: break-all;
+}
+
+.mcp-card-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 14px 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.mcp-card-error-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+.mcp-error-action {
+  flex: none;
+  padding: 4px 8px;
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  background: none;
+  color: var(--danger);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.mcp-card-actions {
+  display: flex;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.mcp-action {
+  flex: 1 1 0;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 2.25rem;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 0.8125rem;
+  white-space: nowrap;
+}
+
+.mcp-action:active {
+  background: var(--accent-weak);
+}
+
+.mcp-action:disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.mcp-action.danger {
+  color: var(--danger);
 }
 
 /* ---- Settings: Mermaid enhancement switch ---- */
@@ -3705,12 +3858,6 @@ body.split-resizing {
 
 .todo-title .pin-badge {
   margin-right: 4px;
-}
-
-/* Snippet insert: a secondary action under the rules counter. */
-.rules-insert {
-  margin-top: 8px;
-  font-size: 0.8125rem;
 }
 
 .section-title {
@@ -6904,6 +7051,59 @@ body.kb-open .chat-page.expanded .chat-composer {
   width: 100%;
 }
 
+/* ---- Settings: itemized rules editor ---- */
+.rule-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.rule-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.rule-item-index {
+  flex: none;
+  width: 1.5rem;
+  padding-top: 0.65rem;
+  text-align: center;
+  font-size: 0.75rem;
+  color: var(--text-3);
+}
+
+.rule-item-input {
+  flex: 1;
+  min-width: 0;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.rule-item .icon-btn {
+  flex: none;
+  margin-top: 0.35rem;
+}
+
+/* ---- Settings: usage guide ---- */
+.guide-format {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.guide-format-body {
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.6;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* Batch model binding: one API key, many selectable model ids. */
 .batch-model-list {
   display: flex;
@@ -7443,6 +7643,48 @@ body.kb-open .chat-page.expanded .chat-composer {
   padding: 10px 2px;
 }
 
+/* Inline info trigger with an anchored bubble; outside taps close it. */
+.info-hint {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
+.info-hint-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-3);
+  cursor: pointer;
+}
+
+.info-hint-btn:active {
+  background: var(--surface-2);
+}
+
+.info-hint-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 80;
+  width: min(260px, 72vw);
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 8px 24px rgba(20, 22, 28, 0.16);
+  font-size: 0.75rem;
+  line-height: 1.6;
+  color: var(--text);
+  text-align: left;
+  animation: pop-in 0.15s ease;
+}
+
 /* Embedded legacy sections: drop their duplicate titles and keep card padding. */
 .settings-embed {
   padding: 0 16px 10px;
@@ -7492,6 +7734,35 @@ body.kb-open .chat-page.expanded .chat-composer {
   background: var(--surface-2);
   font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace;
   font-size: 0.875em;
+}
+
+.license-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0 0 12px;
+}
+
+.license-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.license-name {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.license-meta {
+  font-size: 0.75rem;
+  color: var(--text-2);
 }
 
 .settings-footer {
