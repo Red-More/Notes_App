@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Notes">
+  <rect width="512" height="512" rx="116" fill="#ff7a1a"/>
+  <rect x="150" y="90" width="222" height="332" rx="28" fill="#1a1512"/>
+  <rect x="206" y="90" width="166" height="332" rx="26" fill="#f6ecdf"/>
+  <path d="M332 90h26c7.7 0 14 6.3 14 14v26h-40V90Z" fill="#e2d1bc"/>
+  <rect x="240" y="250" width="102" height="28" rx="14" fill="#ff7a1a"/>
+  <rect x="240" y="298" width="102" height="28" rx="14" fill="#ff7a1a"/>
+</svg>

@@ -1,0 +1,655 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Notes — 离线优先的个人助手 | 笔记 · 待办 · 日记 · 人脉</title>
+    <meta
+      name="description"
+      content="Notes 是离线优先的个人助手：笔记、待办、日记、人脉和 AI 对话，全部以 Markdown 存进一个 life.db。开源、无账号、无云端、无遥测。下载 Android APK。"
+    />
+    <link rel="canonical" href="https://red-more.github.io/Notes_App/" />
+    <meta name="theme-color" content="#ff7a1a" />
+    <link rel="icon" type="image/svg+xml" href="./assets/logo.svg" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Notes" />
+    <meta property="og:title" content="Notes — 把一整套生活，装进一个文件" />
+    <meta
+      property="og:description"
+      content="离线优先的个人助手：笔记、待办、日记、人脉与 AI 对话，全部存进一个 life.db。开源、无账号、无遥测。"
+    />
+    <meta property="og:url" content="https://red-more.github.io/Notes_App/" />
+    <meta name="twitter:card" content="summary" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳到主要内容</a>
+
+    <header class="site-header" data-header>
+      <div class="container header-inner">
+        <a class="brand" href="./" aria-label="Notes 首页">
+          <img src="./assets/logo.svg" alt="" width="36" height="36" />
+          <span class="brand-name">Notes</span>
+          <span class="brand-tag">LifeOS</span>
+        </a>
+        <nav class="site-nav" aria-label="站点导航">
+          <a href="#why">为什么</a>
+          <a href="#features">功能</a>
+          <a href="#screens">界面</a>
+          <a href="#download">下载</a>
+          <a href="#faq">常见问题</a>
+        </nav>
+        <div class="header-actions">
+          <a
+            class="icon-link"
+            href="https://github.com/Red-More/Notes_App"
+            aria-label="在 GitHub 查看源码"
+            rel="noopener"
+          >
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+              <path
+                fill="currentColor"
+                d="M12 .5a11.5 11.5 0 0 0-3.64 22.42c.58.1.79-.25.79-.56v-2.17c-3.2.7-3.88-1.36-3.88-1.36-.53-1.33-1.29-1.69-1.29-1.69-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.2 1.77 1.2 1.04 1.77 2.72 1.26 3.38.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.41-2.7 5.38-5.26 5.67.41.35.78 1.05.78 2.12v3.14c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5Z"
+              />
+            </svg>
+          </a>
+          <a class="btn btn-primary btn-sm" href="#download">下载 Android APK</a>
+        </div>
+      </div>
+    </header>
+
+    <main id="main">
+      <!-- Hero -->
+      <section class="hero">
+        <div class="container hero-grid">
+          <div class="hero-copy">
+            <p class="badge">
+              <span class="badge-dot" aria-hidden="true"></span>
+              v0.1.0 · Android 预览版已发布
+            </p>
+            <h1>把一整套生活，<br />装进<mark>一个文件</mark>。</h1>
+            <p class="lead">
+              Notes 是离线优先的个人助手。笔记、待办、日记、人脉与 AI
+              对话，全部以 Markdown 写进一个 <code>life.db</code>——没有账号，没有云端，没有遥测。
+            </p>
+            <div class="hero-cta">
+              <a class="btn btn-primary" href="#download">下载 Android APK</a>
+              <a
+                class="btn btn-ghost"
+                href="https://github.com/Red-More/Notes_App"
+                rel="noopener"
+              >
+                <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                  <path
+                    fill="currentColor"
+                    d="M12 .5a11.5 11.5 0 0 0-3.64 22.42c.58.1.79-.25.79-.56v-2.17c-3.2.7-3.88-1.36-3.88-1.36-.53-1.33-1.29-1.69-1.29-1.69-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.2 1.77 1.2 1.04 1.77 2.72 1.26 3.38.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.41-2.7 5.38-5.26 5.67.41.35.78 1.05.78 2.12v3.14c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5Z"
+                  />
+                </svg>
+                查看源码
+              </a>
+            </div>
+            <ul class="hero-meta" aria-label="运行要求">
+              <li>Android 8.0+</li>
+              <li>arm64-v8a / armeabi-v7a</li>
+              <li>MIT License</li>
+            </ul>
+          </div>
+
+          <div class="hero-visual" aria-hidden="true">
+            <div class="phone">
+              <div class="phone-notch"></div>
+              <div class="phone-screen">
+                <div class="phone-status"><span>9:41</span><span class="status-icons">▮▮▮ ⌁ ▰</span></div>
+                <div class="app-topbar">
+                  <span class="app-title">笔记</span>
+                  <span class="app-topbar-icons">⌕ ⋯</span>
+                </div>
+                <div class="app-chips">
+                  <span class="chip chip-on">全部</span>
+                  <span class="chip">工作</span>
+                  <span class="chip">想法</span>
+                  <span class="chip">阅读</span>
+                </div>
+                <div class="app-list">
+                  <div class="note-row note-row-active">
+                    <div class="note-row-title">把一整套生活装进一个文件</div>
+                    <div class="note-row-meta">今天 09:12 · 笔记</div>
+                  </div>
+                  <div class="note-row">
+                    <div class="note-row-title">本周回顾与下周计划</div>
+                    <div class="note-row-meta">昨天 · 日记</div>
+                  </div>
+                  <div class="note-row">
+                    <div class="note-row-title">待办 · 11 月 24 日</div>
+                    <div class="note-row-meta">今天 · 待办</div>
+                  </div>
+                  <div class="note-row">
+                    <div class="note-row-title">张三 · 产品合作</div>
+                    <div class="note-row-meta">11 月 21 日 · 人脉</div>
+                  </div>
+                  <div class="note-row">
+                    <div class="note-row-title">周报 · 11 月 24 日</div>
+                    <div class="note-row-meta">今天 08:40 · 笔记</div>
+                  </div>
+                  <div class="note-row">
+                    <div class="note-row-title">读书笔记 · 卡片盒</div>
+                    <div class="note-row-meta">11 月 20 日 · 笔记</div>
+                  </div>
+                </div>
+                <div class="app-tabbar">
+                  <span class="tab"><i>◌</i>对话</span>
+                  <span class="tab tab-on"><i>▤</i>笔记</span>
+                  <span class="tab"><i>✓</i>待办</span>
+                  <span class="tab"><i>▦</i>日记</span>
+                  <span class="tab"><i>◎</i>人脉</span>
+                </div>
+              </div>
+            </div>
+            <div class="float-chip chip-db">
+              <span class="mono">life.db</span>
+              <span class="float-chip-sub">SQLite · WAL</span>
+            </div>
+            <div class="float-chip chip-md">
+              <span class="mono">.md</span>
+              <span class="float-chip-sub">纯文本，可带走</span>
+            </div>
+            <div class="float-chip chip-offline">
+              <span class="pulse"></span>
+              <span class="mono">offline</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Stats -->
+      <section class="stats" aria-label="项目概览">
+        <div class="container stats-grid">
+          <div class="stat">
+            <span class="stat-num">1</span>
+            <span class="stat-label">个文件<br />装下全部数据</span>
+          </div>
+          <div class="stat">
+            <span class="stat-num">5</span>
+            <span class="stat-label">个模块<br />对话 · 笔记 · 待办 · 日记 · 人脉</span>
+          </div>
+          <div class="stat">
+            <span class="stat-num">0</span>
+            <span class="stat-label">台服务器<br />无账号、无遥测</span>
+          </div>
+          <div class="stat">
+            <span class="stat-num stat-num-text">MIT</span>
+            <span class="stat-label">开源许可<br />代码随时可查</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Why -->
+      <section class="section" id="why">
+        <div class="container why-grid">
+          <div class="why-copy">
+            <p class="eyebrow">数据主权</p>
+            <h2>你的笔记，应该住在一个<br />你能带走的文件里。</h2>
+            <p class="section-lead">
+              Notes 不把内容锁进私有格式。每条笔记、每个待办、每份联系人，都是
+              <code>life.db</code> 虚拟文件系统中的一篇 Markdown；整个库就是一个 SQLite
+              文件。复制它，就是一次完整备份。
+            </p>
+            <ul class="point-list">
+              <li>
+                <span class="point-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l2 2h5.5A2.5 2.5 0 0 1 20 9.5v7A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5v-9Z" /></svg>
+                </span>
+                <div>
+                  <h3>单文件即备份</h3>
+                  <p>把 life.db 复制到新设备，数据完整迁移，不依赖任何云服务。</p>
+                </div>
+              </li>
+              <li>
+                <span class="point-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><path d="M6 3.5h9l3 3V20a.5.5 0 0 1-.5.5h-11A.5.5 0 0 1 6 20V3.5Z" /><path d="M14.5 3.5V7h3.5M9 11h6M9 14.5h6" /></svg>
+                </span>
+                <div>
+                  <h3>普通 Markdown</h3>
+                  <p>离开 Notes，任何一个编辑器都能打开这些文件，没有导出锁。</p>
+                </div>
+              </li>
+              <li>
+                <span class="point-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" /><path d="m16 16 4.5 4.5" /></svg>
+                </span>
+                <div>
+                  <h3>本地全文索引</h3>
+                  <p>SQLite FTS5 建立索引并提供 LIKE 回退，搜索不出这台设备。</p>
+                </div>
+              </li>
+            </ul>
+          </div>
+
+          <figure class="code-card" aria-label="life.db 虚拟文件系统结构示意">
+            <figcaption class="code-card-head">
+              <span class="code-dots"><i></i><i></i><i></i></span>
+              <span class="mono">life.db · 虚拟文件系统</span>
+            </figcaption>
+            <pre class="code-body"><code><span class="c-file">life.db</span>
+<span class="c-tree">└──</span> <span class="c-dir">/life</span>
+    <span class="c-tree">├──</span> <span class="c-dir">notes/</span><span class="c-dir">2026/</span><span class="c-path">11-24-把生活装进一个文件.md</span>
+    <span class="c-tree">├──</span> <span class="c-dir">todos/</span><span class="c-path">todo-2026-11-24.md</span>
+    <span class="c-tree">├──</span> <span class="c-dir">diary/</span><span class="c-path">2026-11.md</span>
+    <span class="c-tree">├──</span> <span class="c-dir">contacts/</span><span class="c-path">张三-8f2c.md</span>
+    <span class="c-tree">└──</span> <span class="c-dir">.agents/skills/</span><span class="c-path">weekly-review/SKILL.md</span></code></pre>
+            <div class="code-card-foot">
+              <span class="mono">read / write / edit / glob / grep</span>
+              <span class="mono code-accent">CapGate 校验</span>
+            </div>
+          </figure>
+        </div>
+      </section>
+
+      <!-- Features -->
+      <section class="section" id="features">
+        <div class="container">
+          <div class="section-head">
+            <p class="eyebrow">功能</p>
+            <h2>该有的都有，不该发的都不发。</h2>
+            <p class="section-lead">
+              一个本地应用能做的事，尽量不交给服务器：写作、搜索、版本、提醒，以及一个可选的
+              AI 助手。
+            </p>
+          </div>
+
+          <div class="bento">
+            <!-- Editor -->
+            <article class="card card-editor">
+              <div class="card-head">
+                <p class="eyebrow">写作</p>
+                <h3>写 Markdown，也写公式、图表与代码。</h3>
+                <p>
+                  CodeMirror 6 编辑器配端侧预览：GFM 表格、任务列表、脚注与上下标，KaTeX
+                  公式和 Mermaid 图表直接渲染，代码块完整高亮。
+                </p>
+              </div>
+              <div class="editor-mock" aria-hidden="true">
+                <div class="editor-pane">
+                  <div class="editor-pane-head mono">untitled.md</div>
+                  <div class="editor-lines mono">
+                    <div><span class="t-h">## 周回顾</span></div>
+                    <div><span class="t-b">- 完成 </span><span class="t-code">VirtualFs</span><span class="t-b"> 五工具</span></div>
+                    <div><span class="t-b">- 修复 </span><span class="t-code">expect_rev</span><span class="t-b"> 冲突</span></div>
+                    <div><span class="t-b">$$</span><span class="t-math">E = mc^2</span><span class="t-b">$$</span></div>
+                    <div><span class="t-b">```mermaid</span></div>
+                    <div><span class="t-b">graph LR; A--&gt;B</span></div>
+                  </div>
+                </div>
+                <div class="preview-pane">
+                  <div class="preview-pane-head mono">预览</div>
+                  <div class="rendered">
+                    <h4>周回顾</h4>
+                    <ul>
+                      <li>完成 <code>VirtualFs</code> 五工具</li>
+                      <li>修复 <code>expect_rev</code> 冲突</li>
+                    </ul>
+                    <p class="math-line"><span class="math">E = mc²</span></p>
+                    <div class="mini-flow">
+                      <span>笔记</span><i></i><span>索引</span><i></i><span>搜索</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </article>
+
+            <!-- Agent -->
+            <article class="card card-agent">
+              <div class="card-head">
+                <p class="eyebrow">助手</p>
+                <h3>一个能读写你笔记的 Agent。</h3>
+                <p>
+                  接入 OpenAI Chat Completions / Responses 或 Anthropic Messages
+                  兼容接口，Base URL 可自定义。模型通过虚拟文件系统读写
+                  <code>/life/...</code>，每次调用都经 CapGate 校验路径与配额。
+                </p>
+              </div>
+              <div class="chat-mock" aria-hidden="true">
+                <div class="msg msg-user">把本周待办整理成一篇周报</div>
+                <div class="tool-call mono"><span class="tool-dot"></span>grep <span class="tool-arg">"/life/todos"</span></div>
+                <div class="tool-call mono"><span class="tool-dot"></span>doc_write <span class="tool-arg">"/life/notes/周报-11-24.md"</span></div>
+                <div class="msg msg-agent">已整理 12 条待办，写入笔记《周报 · 11-24》。</div>
+                <div class="chat-skills">
+                  <span class="chip chip-mono">SKILL.md</span>
+                  <span class="chip chip-mono">MCP tools</span>
+                </div>
+              </div>
+            </article>
+
+            <!-- Small cards -->
+            <article class="card card-small">
+              <span class="card-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" /><path d="m16 16 4.5 4.5" /></svg>
+              </span>
+              <h3>全文搜索，输入即命中。</h3>
+              <p>FTS5 索引加 LIKE 回退，标题与正文一起搜，结果直接跳回原文。</p>
+            </article>
+
+            <article class="card card-small">
+              <span class="card-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M12 7v5l3 2" /><circle cx="12" cy="12" r="8.5" /><path d="M4.5 4.5 3 3m18 1.5L21 3" /></svg>
+              </span>
+              <h3>改错了，可以退回去。</h3>
+              <p>每次保存保留版本，支持版本回溯与恢复；误删先进回收站，再决定是否彻底删除。</p>
+            </article>
+
+            <article class="card card-small">
+              <span class="card-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="1.5" /><rect x="13.5" y="3.5" width="7" height="7" rx="1.5" /><rect x="3.5" y="13.5" width="7" height="7" rx="1.5" /><rect x="13.5" y="13.5" width="7" height="7" rx="1.5" /></svg>
+              </span>
+              <h3>一份数据，五个入口。</h3>
+              <p>待办以 todo-YYYY-MM-DD.md 落盘，日记自动汇总当天待办，联系人与笔记互相引用。</p>
+            </article>
+
+            <article class="card card-small">
+              <span class="card-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M12 3.5 19 6v6c0 4-3 7-7 8.5-4-1.5-7-4.5-7-8.5V6l7-2.5Z" /><path d="m9 12 2 2 4-4" /></svg>
+              </span>
+              <h3>权限收口到最小。</h3>
+              <p>capability 不开放 shell 与任意文件系统；CSP 只允许 self 与 ipc，模型只看得见 /life/...。</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- Screens -->
+      <section class="section section-tinted" id="screens">
+        <div class="container">
+          <div class="section-head">
+            <p class="eyebrow">界面</p>
+            <h2>从列表到成稿，尽量少的点击。</h2>
+            <p class="section-lead">
+              五个标签横向滑动切换，编辑器与预览一屏并排；深色、浅色与跟随系统三种主题，字号也能单独调。
+            </p>
+          </div>
+
+          <div class="screens-row">
+            <figure class="screen-item">
+              <div class="phone phone-sm" aria-hidden="true">
+                <div class="phone-notch"></div>
+                <div class="phone-screen">
+                  <div class="phone-status"><span>9:41</span><span class="status-icons">▮▮▮ ⌁ ▰</span></div>
+                  <div class="app-topbar"><span class="app-title">笔记</span><span class="app-topbar-icons">⌕ ⋯</span></div>
+                  <div class="app-chips">
+                    <span class="chip chip-on">全部</span>
+                    <span class="chip">工作</span>
+                    <span class="chip">想法</span>
+                  </div>
+                  <div class="app-list">
+                    <div class="note-row note-row-active">
+                      <div class="note-row-title">把一整套生活装进一个文件</div>
+                      <div class="note-row-meta">今天 09:12</div>
+                    </div>
+                    <div class="note-row"><div class="note-row-title">本周回顾与下周计划</div><div class="note-row-meta">昨天</div></div>
+                    <div class="note-row"><div class="note-row-title">产品命名的一些想法</div><div class="note-row-meta">11 月 22 日</div></div>
+                    <div class="note-row"><div class="note-row-title">读书笔记 · 卡片盒</div><div class="note-row-meta">11 月 20 日</div></div>
+                    <div class="note-row"><div class="note-row-title">周报 · 11 月 24 日</div><div class="note-row-meta">今天 08:40</div></div>
+                    <div class="note-row"><div class="note-row-title">会议记录 · 本地优先</div><div class="note-row-meta">11 月 18 日</div></div>
+                  </div>
+                  <div class="app-tabbar">
+                    <span class="tab"><i>◌</i>对话</span>
+                    <span class="tab tab-on"><i>▤</i>笔记</span>
+                    <span class="tab"><i>✓</i>待办</span>
+                    <span class="tab"><i>▦</i>日记</span>
+                    <span class="tab"><i>◎</i>人脉</span>
+                  </div>
+                </div>
+              </div>
+              <figcaption>笔记列表：分类与全文搜索</figcaption>
+            </figure>
+
+            <figure class="screen-item">
+              <div class="phone phone-sm" aria-hidden="true">
+                <div class="phone-notch"></div>
+                <div class="phone-screen screen-editor">
+                  <div class="phone-status"><span>9:41</span><span class="status-icons">▮▮▮ ⌁ ▰</span></div>
+                  <div class="app-topbar"><span class="app-back">‹</span><span class="app-title app-title-sm">把一整套生活装进一个文件</span><span class="app-topbar-icons">⋯</span></div>
+                  <div class="editor-lines mono editor-lines-sm">
+                    <div><span class="t-h">## 数据主权</span></div>
+                    <div><span class="t-b">每条笔记都是</span></div>
+                    <div><span class="t-b">一篇可带走的 </span><span class="t-code">.md</span></div>
+                    <div><span class="t-b">- [x] 复制就是备份</span></div>
+                    <div><span class="t-b">- [ ] 迁到新设备</span></div>
+                  </div>
+                  <div class="preview-strip">
+                    <h4>数据主权</h4>
+                    <p>每条笔记都是一篇可带走的 <code>.md</code></p>
+                  </div>
+                  <div class="app-tabbar">
+                    <span class="tab"><i>◌</i>对话</span>
+                    <span class="tab tab-on"><i>▤</i>笔记</span>
+                    <span class="tab"><i>✓</i>待办</span>
+                    <span class="tab"><i>▦</i>日记</span>
+                    <span class="tab"><i>◎</i>人脉</span>
+                  </div>
+                </div>
+              </div>
+              <figcaption>编辑器：Markdown 与实时预览</figcaption>
+            </figure>
+
+            <figure class="screen-item">
+              <div class="phone phone-sm" aria-hidden="true">
+                <div class="phone-notch"></div>
+                <div class="phone-screen screen-chat">
+                  <div class="phone-status"><span>9:41</span><span class="status-icons">▮▮▮ ⌁ ▰</span></div>
+                  <div class="app-topbar"><span class="app-title">对话</span><span class="app-topbar-icons">＋</span></div>
+                  <div class="chat-mock chat-mock-sm">
+                    <div class="msg msg-user">整理今天的待办</div>
+                    <div class="tool-call mono"><span class="tool-dot"></span>list <span class="tool-arg">"/life/todos"</span></div>
+                    <div class="msg msg-agent">今天还剩 3 项：写周报、备份 life.db、回复张三。</div>
+                  </div>
+                  <div class="chat-input mono">发消息…</div>
+                  <div class="app-tabbar">
+                    <span class="tab tab-on"><i>◌</i>对话</span>
+                    <span class="tab"><i>▤</i>笔记</span>
+                    <span class="tab"><i>✓</i>待办</span>
+                    <span class="tab"><i>▦</i>日记</span>
+                    <span class="tab"><i>◎</i>人脉</span>
+                  </div>
+                </div>
+              </div>
+              <figcaption>对话：Agent 调用工具读写笔记</figcaption>
+            </figure>
+          </div>
+          <p class="screens-note">界面按应用内样式用 CSS 还原，细节以实际安装版本为准。</p>
+        </div>
+      </section>
+
+      <!-- Download -->
+      <section class="section" id="download">
+        <div class="container">
+          <div class="section-head">
+            <p class="eyebrow">下载</p>
+            <h2>下载 Notes for Android</h2>
+            <p class="section-lead">
+              一个 APK，没有捆绑、没有广告。按手机架构选择版本；不确定就选 arm64-v8a。
+            </p>
+          </div>
+
+          <div class="download-grid">
+            <article class="download-card download-card-primary">
+              <div class="download-card-top">
+                <span class="arch mono">arm64-v8a</span>
+                <span class="tag">推荐</span>
+              </div>
+              <p class="download-desc">适用于绝大多数 2017 年后的安卓手机。</p>
+              <div class="download-meta">
+                <span>v0.1.0</span>
+                <span>约 35 MB</span>
+                <span>Android 8.0+</span>
+              </div>
+              <a
+                class="btn btn-primary btn-block"
+                href="https://github.com/Red-More/Notes_App/releases/latest/download/Notes-android-arm64-v8a.apk"
+                rel="noopener"
+                >下载 Android APK</a
+              >
+            </article>
+
+            <article class="download-card">
+              <div class="download-card-top">
+                <span class="arch mono">armeabi-v7a</span>
+              </div>
+              <p class="download-desc">适用于 32 位架构的旧机型与部分平板。</p>
+              <div class="download-meta">
+                <span>v0.1.0</span>
+                <span>约 20 MB</span>
+                <span>Android 8.0+</span>
+              </div>
+              <a
+                class="btn btn-ghost btn-block"
+                href="https://github.com/Red-More/Notes_App/releases/latest/download/Notes-android-armeabi-v7a.apk"
+                rel="noopener"
+                >下载 Android APK</a
+              >
+            </article>
+          </div>
+
+          <p class="download-links">
+            全部版本与 SHA-256 校验值见
+            <a href="https://github.com/Red-More/Notes_App/releases" rel="noopener">GitHub Releases</a>。
+            APK 使用项目自签名证书，安装时系统会提示「未知来源」。
+          </p>
+
+          <ol class="steps">
+            <li>
+              <span class="step-num">01</span>
+              <h3>按架构下载</h3>
+              <p>查看手机参数，或直接选 arm64-v8a；下载完成后打开 APK。</p>
+            </li>
+            <li>
+              <span class="step-num">02</span>
+              <h3>允许安装</h3>
+              <p>在系统提示中允许浏览器或文件管理器「安装未知应用」。</p>
+            </li>
+            <li>
+              <span class="step-num">03</span>
+              <h3>完成安装</h3>
+              <p>安装并打开 Notes，首次启动会初始化 life.db 与默认目录。</p>
+            </li>
+            <li>
+              <span class="step-num">04</span>
+              <h3>备份数据</h3>
+              <p>数据只在本机，建议定期复制 life.db 到你的电脑或移动硬盘。</p>
+            </li>
+          </ol>
+
+          <aside class="desktop-note">
+            <div>
+              <h3>想在电脑上用？</h3>
+              <p>
+                桌面端同样基于 Tauri 2，支持 Windows、macOS 与 Linux。目前 Release
+                只提供 Android 安装包，桌面版可按 README 中的步骤从源码构建。
+              </p>
+            </div>
+            <a class="btn btn-ghost btn-sm" href="https://github.com/Red-More/Notes_App#readme" rel="noopener">查看构建说明</a>
+          </aside>
+        </div>
+      </section>
+
+      <!-- FAQ -->
+      <section class="section section-tight" id="faq">
+        <div class="container faq-grid">
+          <div class="faq-head">
+            <p class="eyebrow">常见问题</p>
+            <h2>你可能想先确认的事。</h2>
+          </div>
+          <div class="faq-list">
+            <details open>
+              <summary>Notes 会把我的数据上传吗？</summary>
+              <p>
+                不会。应用没有账号体系、没有服务器，也没有遥测。AI
+                功能可选，只有你在对话里主动发送的内容，才会请求到你自己配置的模型接口。
+              </p>
+            </details>
+            <details>
+              <summary>为什么 AI 功能需要自己配置模型？</summary>
+              <p>
+                Notes 不代管模型账号。你可以在设置中添加 OpenAI Chat Completions、OpenAI
+                Responses 或 Anthropic Messages 兼容接口，填写 Base URL 与 API Key，密钥只保存在本机。
+              </p>
+            </details>
+            <details>
+              <summary>怎么备份或迁移到新设备？</summary>
+              <p>
+                找到应用数据目录中的 life.db，复制到新设备对应位置即可；单篇文档也可以通过导出功能写到系统目录。
+              </p>
+            </details>
+            <details>
+              <summary>有桌面版安装包吗？</summary>
+              <p>
+                暂未提供预编译桌面安装包。项目支持 Tauri 2 桌面构建，可按
+                README 在 Windows / macOS / Linux 上自行编译。
+              </p>
+            </details>
+            <details>
+              <summary>为什么安装时提示「未知来源」？</summary>
+              <p>
+                APK 使用项目自签名证书，没有上架应用商店。安装前需要在系统中允许当前应用安装未知应用；SHA-256
+                校验值可在 Release 页面核对。
+              </p>
+            </details>
+          </div>
+        </div>
+      </section>
+
+      <!-- Final CTA -->
+      <section class="cta-section">
+        <div class="container">
+          <div class="cta-panel">
+            <p class="eyebrow">开始使用</p>
+            <h2>现在，把它装进你的手机。</h2>
+            <p class="cta-lead">离线可用，数据自持，源代码公开。</p>
+            <div class="cta-actions">
+              <a class="btn btn-primary" href="#download">下载 Android APK</a>
+              <a class="btn btn-dark-ghost" href="https://github.com/Red-More/Notes_App" rel="noopener">查看源码</a>
+            </div>
+            <p class="cta-meta mono">v0.1.0 · arm64-v8a / armeabi-v7a · MIT</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="container footer-grid">
+        <div class="footer-brand">
+          <a class="brand" href="./" aria-label="Notes 首页">
+            <img src="./assets/logo.svg" alt="" width="32" height="32" />
+            <span class="brand-name">Notes</span>
+          </a>
+          <p>离线优先的个人助手。<br />笔记、待办、日记、人脉与 AI 对话，一个文件装下。</p>
+        </div>
+        <nav class="footer-col" aria-label="产品链接">
+          <h3>产品</h3>
+          <a href="#features">功能</a>
+          <a href="#screens">界面</a>
+          <a href="#download">下载</a>
+          <a href="#faq">常见问题</a>
+        </nav>
+        <nav class="footer-col" aria-label="资源链接">
+          <h3>资源</h3>
+          <a href="https://github.com/Red-More/Notes_App" rel="noopener">GitHub 仓库</a>
+          <a href="https://github.com/Red-More/Notes_App/releases" rel="noopener">版本发布</a>
+          <a href="https://github.com/Red-More/Notes_App/blob/main/README.md" rel="noopener">构建文档</a>
+          <a href="https://github.com/Red-More/Notes_App/blob/main/LICENSE" rel="noopener">MIT License</a>
+        </nav>
+        <nav class="footer-col" aria-label="法律链接">
+          <h3>法律</h3>
+          <a href="https://github.com/Red-More/Notes_App/blob/main/docs/PRIVACY.md" rel="noopener">隐私政策</a>
+          <a href="https://github.com/Red-More/Notes_App/blob/main/docs/TERMS.md" rel="noopener">用户协议</a>
+          <a href="https://github.com/Red-More/Notes_App/blob/main/NOTICE" rel="noopener">第三方声明</a>
+        </nav>
+      </div>
+      <div class="container footer-bottom">
+        <p>© <span data-year>2026</span> Red-More · MIT License</p>
+        <p class="footer-host mono">Hosted on GitHub Pages</p>
+      </div>
+    </footer>
+
+    <script src="./main.js" defer></script>
+  </body>
+</html>

@@ -1,5 +1,11 @@
 # LifeOS / Notes
 
+[![CI](https://github.com/Red-More/Notes_App/actions/workflows/ci.yml/badge.svg)](https://github.com/Red-More/Notes_App/actions/workflows/ci.yml)
+[![Deploy website](https://github.com/Red-More/Notes_App/actions/workflows/pages.yml/badge.svg)](https://github.com/Red-More/Notes_App/actions/workflows/pages.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-ff7a1a.svg)](LICENSE)
+
+官网：[red-more.github.io/Notes_App](https://red-more.github.io/Notes_App/) · 下载：[Android APK](https://github.com/Red-More/Notes_App/releases/latest)
+
 离线优先的个人助手。笔记、待办、日程、人脉统一存放在单库 `life.db` 的虚拟文件系统中，每条内容都是一篇可被普通编辑器打开的 Markdown。
 
 ## 技术栈
