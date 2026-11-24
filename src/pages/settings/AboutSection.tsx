@@ -1,15 +1,33 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { getVersion } from '@tauri-apps/api/app'
 import { IconEye, IconInfo, IconNote } from '../../components/Icons'
 import { Modal } from '../../components/ui'
 import { SettingsGroup, SettingsRow } from './SettingsPrimitives'
-import thirdPartyLicenses from '../../generated/third-party-licenses.json'
 
 type LegalDoc = 'privacy' | 'terms' | 'licenses'
+
+interface LicenseEntry {
+  name: string
+  version: string
+  license: string
+  repository?: string
+  textId?: string
+  textKind?: 'file' | 'canonical'
+}
+
+interface LicensesData {
+  generatedAt: string
+  licenseTexts: Record<string, string>
+  frontend: LicenseEntry[]
+  backend: LicenseEntry[]
+  assets: LicenseEntry[]
+}
 
 export default function AboutSection() {
   const [version, setVersion] = useState('0.1.0')
   const [legal, setLegal] = useState<LegalDoc | null>(null)
+  const [licenses, setLicenses] = useState<LicensesData | null>(null)
+  const licensesFetched = useRef(false)
 
   useEffect(() => {
     let cancelled = false
@@ -24,6 +42,28 @@ export default function AboutSection() {
       cancelled = true
     }
   }, [])
+
+  // The notices JSON is ~2 MB, so it is fetched only when the dialog opens.
+  // A ref (not the state) guards re-fetching, keeping the dependency array
+  // free of `licenses` and avoiding a redundant effect run after loading.
+  useEffect(() => {
+    if (legal !== 'licenses' || licensesFetched.current) return
+    let cancelled = false
+    void fetch('/third-party-licenses.json')
+      .then((res) => res.json())
+      .then((data: LicensesData) => {
+        if (!cancelled) {
+          licensesFetched.current = true
+          setLicenses(data)
+        }
+      })
+      .catch(() => {
+        // Generation script not run yet: the dialog shows a loading hint.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [legal])
 
   return (
     <SettingsGroup id="settings-about" title="关于与协议">
@@ -58,7 +98,7 @@ export default function AboutSection() {
       <SettingsRow
         icon={<IconInfo size={20} />}
         title="开源许可"
-        subtitle="从依赖树自动生成的第三方组件与许可证清单"
+        subtitle="含全部传递依赖的组件清单与许可证原文"
         value="查看"
         chevron
         onClick={() => setLegal('licenses')}
@@ -80,7 +120,7 @@ export default function AboutSection() {
           ) : legal === 'terms' ? (
             <TermsStatement />
           ) : (
-            <OpenSourceLicenses />
+            <OpenSourceLicenses data={licenses} />
           )}
         </Modal>
       )}
@@ -113,41 +153,137 @@ function TermsStatement() {
   )
 }
 
-interface LicenseEntry {
-  name: string
-  version: string
-  license: string
-}
-
-function LicenseGroup({ title, items }: { title: string; items: LicenseEntry[] }) {
+function LicenseGroup({
+  title,
+  items,
+  texts,
+  query,
+  expanded,
+  onToggle,
+}: {
+  title: string
+  items: LicenseEntry[]
+  texts: Record<string, string>
+  query: string
+  expanded: string | null
+  onToggle: (key: string | null) => void
+}) {
+  const visible = items.filter((item) => !query || item.name.toLowerCase().includes(query))
+  if (visible.length === 0) return null
   return (
     <>
-      <p className="section-title">{title}</p>
+      <p className="section-title">
+        {title}（{visible.length}
+        {query ? ` / ${items.length}` : ''}）
+      </p>
       <div className="license-list">
-        {items.map((item) => (
-          <div key={item.name} className="license-item">
-            <span className="license-name">
-              {item.name} · v{item.version}
-            </span>
-            <span className="license-meta">许可证：{item.license}</span>
-          </div>
-        ))}
+        {visible.map((item) => {
+          const key = `${title}/${item.name}@${item.version}`
+          const open = expanded === key
+          const text = item.textId ? texts[item.textId] : ''
+          return (
+            <div key={key} className="license-item">
+              <button
+                type="button"
+                className="license-toggle"
+                onClick={() => onToggle(open ? null : key)}
+                aria-expanded={open}
+              >
+                <span className="license-name">
+                  {item.name}
+                  {item.version ? ` · v${item.version}` : ''}
+                </span>
+                <span className="license-meta">
+                  {item.license}
+                  <span className="license-arrow">{open ? '▲' : '▼'}</span>
+                </span>
+              </button>
+              {open &&
+                (text ? (
+                  <>
+                    {item.textKind === 'canonical' && (
+                      <p className="license-source-note">
+                        上游包未附带许可文件，以下为 SPDX 标准文本。
+                      </p>
+                    )}
+                    <pre className="license-text">{text}</pre>
+                  </>
+                ) : (
+                  <p className="license-source-note">
+                    未能获取许可证文本，
+                    {item.repository ? (
+                      <a href={item.repository} target="_blank" rel="noreferrer">
+                        请查阅上游仓库
+                      </a>
+                    ) : (
+                      '请查阅上游仓库'
+                    )}
+                    。
+                  </p>
+                ))}
+            </div>
+          )
+        })}
       </div>
     </>
   )
 }
 
-function OpenSourceLicenses() {
+function OpenSourceLicenses({ data }: { data: LicensesData | null }) {
+  const [filter, setFilter] = useState('')
+  const [expanded, setExpanded] = useState<string | null>(null)
+
+  if (!data) {
+    return (
+      <div className="settings-legal">
+        <p>正在加载第三方组件清单…（若长期无响应，请先运行 pnpm gen:licenses）</p>
+      </div>
+    )
+  }
+
+  const query = filter.trim().toLowerCase()
   return (
     <div className="settings-legal">
       <p>
-        本应用使用了以下开源组件（清单由 pnpm gen:licenses 从依赖树自动生成，生成于{' '}
-        {thirdPartyLicenses.generatedAt}）。感谢各项目作者与贡献者。
+        本应用包含以下开源组件（含全部直接依赖与传递依赖），各组件的许可证原文已随应用一同分发。
+        清单由 pnpm gen:licenses 从依赖树自动生成，生成于 {data.generatedAt}。
+        共 {data.frontend.length} 个前端包、{data.backend.length} 个后端 crate。
+        感谢各项目作者与贡献者。
       </p>
-      <LicenseGroup title="前端依赖" items={thirdPartyLicenses.frontend} />
-      <LicenseGroup title="后端依赖" items={thirdPartyLicenses.backend} />
+      <input
+        className="license-filter"
+        type="search"
+        value={filter}
+        placeholder="按名称过滤组件…"
+        onChange={(e) => setFilter(e.target.value)}
+      />
+      <LicenseGroup
+        title="前端依赖"
+        items={data.frontend}
+        texts={data.licenseTexts}
+        query={query}
+        expanded={expanded}
+        onToggle={setExpanded}
+      />
+      <LicenseGroup
+        title="后端依赖"
+        items={data.backend}
+        texts={data.licenseTexts}
+        query={query}
+        expanded={expanded}
+        onToggle={setExpanded}
+      />
+      <LicenseGroup
+        title="其他资产"
+        items={data.assets}
+        texts={data.licenseTexts}
+        query={query}
+        expanded={expanded}
+        onToggle={setExpanded}
+      />
       <p className="settings-note">
-        完整许可证文本随各依赖一同分发，可在对应开源项目的源码仓库中查看。
+        许可证文本优先取自上游包内文件；上游未附带文件的，采用 SPDX
+        标准文本并明确标注。各组件的完整版权信息以上游源码仓库为准。
       </p>
     </div>
   )
