@@ -2,7 +2,10 @@ import { useEffect, useRef, useState } from 'react'
 import { getVersion } from '@tauri-apps/api/app'
 import { IconEye, IconInfo, IconNote } from '../../components/Icons'
 import { Modal } from '../../components/ui'
+import { renderMarkdownPreview } from '../../editor/markdown'
 import { SettingsGroup, SettingsRow } from './SettingsPrimitives'
+import privacySource from '../../../docs/PRIVACY.md?raw'
+import termsSource from '../../../docs/TERMS.md?raw'
 
 type LegalDoc = 'privacy' | 'terms' | 'licenses'
 
@@ -81,8 +84,8 @@ export default function AboutSection() {
       />
       <SettingsRow
         icon={<IconEye size={20} />}
-        title="隐私说明"
-        subtitle="数据存储、云请求与通知权限"
+        title="隐私政策"
+        subtitle="不收集数据；本地存储与第三方模型说明"
         value="查看"
         chevron
         onClick={() => setLegal('privacy')}
@@ -90,7 +93,7 @@ export default function AboutSection() {
       <SettingsRow
         icon={<IconNote size={20} />}
         title="用户协议"
-        subtitle="本地优先工具的使用约定（摘要）"
+        subtitle="MIT 开源授权与使用约定"
         value="查看"
         chevron
         onClick={() => setLegal('terms')}
@@ -108,17 +111,17 @@ export default function AboutSection() {
         <Modal
           title={
             legal === 'privacy'
-              ? '隐私说明'
+              ? '隐私政策'
               : legal === 'terms'
-                ? '用户协议（摘要）'
+                ? '用户协议'
                 : '开源许可'
           }
           onClose={() => setLegal(null)}
         >
           {legal === 'privacy' ? (
-            <PrivacyStatement />
+            <LegalDocument source={privacySource} />
           ) : legal === 'terms' ? (
-            <TermsStatement />
+            <LegalDocument source={termsSource} />
           ) : (
             <OpenSourceLicenses data={licenses} />
           )}
@@ -128,28 +131,14 @@ export default function AboutSection() {
   )
 }
 
-function PrivacyStatement() {
+// The full policy texts live in docs/*.md (single source of truth shared with
+// the website) and are rendered through the sanitized markdown pipeline.
+function LegalDocument({ source }: { source: string }) {
   return (
-    <div className="settings-legal">
-      <p>
-        Notes 采用本地优先设计。笔记、日记、待办、人脉与设置默认保存在本机
-        <code>life.db</code>，不经过 Notes 服务器同步。
-      </p>
-      <p>
-        仅当你主动使用云端 AI 功能时，相关请求才会发送到你配置的模型服务商；对话内容由该服务商按其条款处理。
-      </p>
-      <p>通知权限仅用于待办到期提醒，可随时在系统设置中关闭。</p>
-    </div>
-  )
-}
-
-function TermsStatement() {
-  return (
-    <div className="settings-legal">
-      <p>本应用为本地优先的个人知识管理工具，按现状提供。</p>
-      <p>你需自行负责数据备份；云端模型由你自行配置，其费用与合规义务由你承担。</p>
-      <p>请勿使用本应用处理违法内容。继续使用即表示你理解并接受上述约定。</p>
-    </div>
+    <div
+      className="settings-legal settings-legal-doc"
+      dangerouslySetInnerHTML={{ __html: renderMarkdownPreview(source) }}
+    />
   )
 }
 

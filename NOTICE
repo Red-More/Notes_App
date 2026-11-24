@@ -1,0 +1,22 @@
+Notes — Third-Party Software Notices
+Copyright (c) 2026 Red-More
+
+This product includes third-party open source software components. The
+complete list of components (direct and transitive dependencies), their
+license identifiers and the verbatim license texts are bundled with the
+application and can be viewed at:
+
+    Settings → 关于与协议 → 开源许可
+
+The machine-readable manifest is generated from the real dependency trees:
+
+    pnpm gen:licenses   →   public/third-party-licenses.json
+
+Notable notices:
+
+- KaTeX fonts are distributed under the SIL Open Font License 1.1.
+- highlight.js is distributed under the BSD 3-Clause License.
+- Tauri and the majority of Rust crates are dual-licensed MIT OR Apache-2.0;
+  the MIT text is reproduced in the manifest for those entries.
+- For upstream packages that ship no license file, the canonical SPDX license
+  text is used and clearly marked as such in the application.

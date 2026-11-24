@@ -7736,6 +7736,33 @@ body.kb-open .chat-page.expanded .chat-composer {
   font-size: 0.875em;
 }
 
+/* Full legal documents (docs/*.md) rendered inside the About dialogs. */
+.settings-legal-doc h1 {
+  margin: 0 0 14px;
+  font-size: 1.0625rem;
+  font-weight: 700;
+}
+
+.settings-legal-doc h2 {
+  margin: 18px 0 8px;
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.settings-legal-doc ul {
+  margin: 0 0 12px;
+  padding-left: 20px;
+}
+
+.settings-legal-doc li {
+  margin: 4px 0;
+}
+
+.settings-legal-doc a {
+  color: var(--accent, var(--text));
+  text-decoration: underline;
+}
+
 .license-list {
   display: flex;
   flex-direction: column;
