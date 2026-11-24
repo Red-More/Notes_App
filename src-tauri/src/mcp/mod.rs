@@ -590,9 +590,7 @@ impl SseSession {
         // No request timeout on the stream: reqwest's timeout covers the whole
         // body and would kill a healthy long-lived SSE connection. Idle time is
         // bounded per event inside `next_event` instead.
-        let mut request = client
-            .get(url)
-            .header("accept", "text/event-stream");
+        let mut request = client.get(url).header("accept", "text/event-stream");
         if let Some(token) = token {
             request = request.bearer_auth(token);
         }
@@ -988,10 +986,11 @@ mod tests {
                 .is_err()
         );
         // A cross-host announcement would leak the bearer token to a third party.
-        assert!(
-            resolve_sse_endpoint("https://mcp.example.com/sse", "https://evil.example/messages")
-                .is_err()
-        );
+        assert!(resolve_sse_endpoint(
+            "https://mcp.example.com/sse",
+            "https://evil.example/messages"
+        )
+        .is_err());
     }
 
     #[test]
